@@ -1,0 +1,164 @@
+// Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
+// Generates its own ICMP traffic with ping. Usage: node test/live-smoke.mjs   (after npm run build)
+import { spawn } from "node:child_process";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import assert from "node:assert/strict";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const token = "live-test-token";
+const captureDir = mkdtempSync(join(tmpdir(), "wirebuddy-live-"));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token, "--capture-dir", captureDir], {
+  stdio: ["ignore", "pipe", "inherit"],
+});
+const base = await new Promise((resolve, reject) => {
+  server.stdout.setEncoding("utf8");
+  server.stdout.on("data", (d) => {
+    const m = /UI at (http:\/\/[^/]+)\//.exec(d);
+    if (m) resolve(m[1]);
+  });
+  server.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
+});
+
+async function api(path, body) {
+  const res = await fetch(base + path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "X-WireBuddy-Token": token, "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(`${path}: ${res.status} ${JSON.stringify(json)}`);
+  return json;
+}
+const state = () => api("/api/state");
+// Only echo request/reply: other loopback ICMP (e.g. port unreachable) may be around
+const ECHO = "icmp[icmptype] == icmp-echo or icmp[icmptype] == icmp-echoreply";
+const ping = (seconds) => spawn("ping", ["-i", "0.2", "-c", String(seconds * 5), "127.0.0.1"], { stdio: "ignore" });
+
+async function waitIdle(timeoutMs) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const s = await state();
+    if (s.capture.status === "idle" || s.capture.status === "error") return s;
+    await sleep(250);
+  }
+  throw new Error("capture did not stop");
+}
+
+let failures = 0;
+async function check(name, fn) {
+  try {
+    await fn();
+    console.log(`ok   ${name}`);
+  } catch (err) {
+    failures++;
+    console.log(`FAIL ${name}: ${err.message}`);
+  }
+}
+
+try {
+  await check("invalid capture filter is refused", async () => {
+    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "icmpp", autostop: {}, ring: null }), /capture filter/);
+  });
+  await check("unknown interface is refused", async () => {
+    await assert.rejects(api("/api/capture/start", { iface: "-w/etc/passwd", filter: "", autostop: {}, ring: null }), /unknown interface/);
+  });
+
+  await check("live view grows, filter survives reloads, autostop", async () => {
+    const pinger = ping(6);
+    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 4 }, ring: null });
+    const seen = new Set();
+    const gens = new Set();
+    let filtered = false;
+    for (let i = 0; i < 14; i++) {
+      await sleep(300);
+      const s = await state();
+      if (s.file) {
+        seen.add(s.totalFrames);
+        gens.add(s.generation);
+      }
+      if (!filtered && s.totalFrames > 4) {
+        const r = await api("/api/filter", { filter: "icmp.type == 8" });
+        assert.equal(r.ok, true);
+        filtered = true;
+      }
+    }
+    const s = await waitIdle(6000);
+    pinger.kill();
+    assert.equal(s.capture.status, "idle", s.capture.error ?? "");
+    assert.ok(seen.size >= 3, `frame count should grow during capture, saw ${[...seen]}`);
+    assert.ok(gens.size >= 3, "generation should bump on each live reload");
+    await sleep(1200); // final reload after stop
+    const end = await state();
+    assert.equal(end.filter, "icmp.type == 8");
+    assert.ok(end.totalFrames >= 30, `expected ~40 frames, got ${end.totalFrames}`);
+    assert.ok(Math.abs(end.displayedFrames * 2 - end.totalFrames) <= 2, `requests should be half: ${end.displayedFrames}/${end.totalFrames}`);
+    assert.ok(Math.abs(end.capture.packets - end.totalFrames) <= 2, `dumpcap count ${end.capture.packets} vs frames ${end.totalFrames}`);
+    const rows = await api(`/api/rows?gen=${end.generation}&start=0&count=3`);
+    assert.ok(rows.rows.every((r) => /Echo \(ping\) request/.test(r.c[6])), JSON.stringify(rows.rows[0]));
+    await api("/api/filter", { filter: "" });
+  });
+
+  await check("ring buffer rotates files and keeps only N", async () => {
+    const pinger = ping(8);
+    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 7 }, ring: { files: 2, durationSec: 2 } });
+    let files = new Set();
+    for (let i = 0; i < 30; i++) {
+      await sleep(300);
+      const s = await state();
+      if (s.file) files.add(s.file);
+      if (s.capture.status === "idle") break;
+    }
+    const s = await waitIdle(5000);
+    pinger.kill();
+    assert.ok(s.capture.files.length >= 3, `expected >= 3 ring files, got ${s.capture.files.length}`);
+    assert.ok(files.size >= 2, "the viewer should follow the current ring file");
+    const onDisk = readdirSync(captureDir).filter((f) => f.includes("_0000"));
+    assert.equal(onDisk.length, 2, `ring keeps 2 files on disk: ${onDisk}`);
+    assert.equal(s.file, s.capture.currentFile);
+  });
+
+  await check("two simultaneous starts run only one dumpcap", async () => {
+    const req = { iface: "lo", filter: ECHO, autostop: { durationSec: 3 }, ring: null };
+    const results = await Promise.allSettled([api("/api/capture/start", req), api("/api/capture/start", req)]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(results.map((r) => r.status)));
+    await api("/api/capture/stop", {});
+    await waitIdle(6000);
+    const pids = await new Promise((resolve) => {
+      const ps = spawn("pgrep", ["-P", String(server.pid), "dumpcap"]);
+      let out = "";
+      ps.stdout.on("data", (d) => (out += d));
+      ps.on("exit", () => resolve(out.trim()));
+    });
+    assert.equal(pids, "", "no dumpcap may survive stop");
+  });
+  await check("ring buffer with auto-stop by size is refused", async () => {
+    await assert.rejects(
+      api("/api/capture/start", { iface: "lo", filter: "", autostop: { filesizeKB: 100 }, ring: { files: 2, durationSec: 2 } }),
+      /cannot be combined/,
+    );
+  });
+
+  await check("stop", async () => {
+    const pinger = ping(5);
+    await api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: null });
+    await sleep(1500);
+    assert.equal((await state()).capture.status, "running");
+    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: null }), /already running/);
+    await api("/api/capture/stop", {});
+    const s = await waitIdle(5000);
+    pinger.kill();
+    assert.equal(s.capture.status, "idle");
+    assert.equal(s.capture.error, null);
+    assert.ok(s.totalFrames > 0);
+  });
+} finally {
+  server.kill();
+  rmSync(captureDir, { recursive: true, force: true });
+}
+console.log(failures ? `${failures} check(s) failed` : "all checks passed");
+process.exit(failures ? 1 : 0);

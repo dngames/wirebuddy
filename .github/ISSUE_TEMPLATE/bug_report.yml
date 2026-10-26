@@ -1,0 +1,45 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a capture with ...
+        2. Apply the filter ...
+        3. ...
+  - type: input
+    id: wirebuddy
+    attributes:
+      label: WireBuddy version or commit
+    validations:
+      required: true
+  - type: input
+    id: wireshark
+    attributes:
+      label: Wireshark version
+      description: Output of `sharkd --version | head -1`
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, Node.js version and browser
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server output or browser console errors
+      render: text
+  - type: markdown
+    attributes:
+      value: |
+        Please don't attach captures with private traffic. Security issues: see SECURITY.md and report privately.

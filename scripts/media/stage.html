@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WireBuddy demo stage</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161c2b; --ink: #e8ecf4; --muted: #8b95ab; --accent: #4f8cff;
+    --agent: #8b5cf6; --user: #2a3550; --tool: #1f2a40; --ok: #3ecf8e;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1600px; height: 900px; overflow: hidden; background: var(--bg); color: var(--ink);
+    font: 18px/1.45 "Inter", "Segoe UI", system-ui, sans-serif; }
+  #wrap { display: grid; grid-template-columns: 470px 1fr; height: 900px; }
+  #chat { background: var(--panel); border-right: 1px solid #263048; display: flex; flex-direction: column; }
+  #chat header { padding: 18px 20px 14px; border-bottom: 1px solid #263048; display: flex; align-items: center; gap: 10px; }
+  #chat header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--agent); box-shadow: 0 0 12px var(--agent); }
+  #chat header b { font-size: 18px; }
+  #chat header span { color: var(--muted); font-size: 14px; margin-left: auto; }
+  #log { flex: 1; padding: 18px 18px 8px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; justify-content: flex-end; }
+  .msg { max-width: 92%; padding: 10px 13px; border-radius: 12px; animation: pop .25s ease-out; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
+  .msg.agent { align-self: flex-start; background: #221d3a; border: 1px solid #3b2f6b; border-bottom-left-radius: 4px; }
+  .msg.tool { align-self: flex-start; background: var(--tool); color: #9fb6e0; font: 15px/1.4 ui-monospace, "JetBrains Mono", monospace;
+    padding: 6px 10px; border-radius: 8px; border: 1px solid #2b3a5a; }
+  .msg.tool::before { content: "⚙ "; color: var(--agent); }
+  .msg.tool .ok { color: var(--ok); }
+  #composer { margin: 10px 18px 18px; padding: 12px 14px; border-radius: 12px; background: #0f1524; border: 1px solid #2b3a5a;
+    min-height: 46px; color: var(--muted); }
+  #composer.typing { color: var(--ink); }
+  #composer.typing::after { content: "▍"; color: var(--accent); animation: blink 1s steps(1) infinite; }
+  #view { position: relative; }
+  #view iframe { width: 100%; height: 100%; border: 0; background: #fff; visibility: hidden; }
+  #view iframe.on { visibility: visible; }
+  #placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; color: var(--muted); font-size: 22px; background: #121827; }
+  #placeholder.off { display: none; }
+  #caption { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 10px 22px; border-radius: 999px;
+    background: rgba(15, 20, 32, .9); color: #fff; font-size: 24px; font-weight: 600; letter-spacing: .2px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.35); opacity: 0; transition: opacity .35s; white-space: nowrap; pointer-events: none; }
+  #caption.on { opacity: 1; }
+  .card { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    background: radial-gradient(1200px 600px at 50% 40%, #1d2a4a 0%, #0b0f19 70%); opacity: 0; transition: opacity .6s; pointer-events: none; z-index: 5; }
+  .card.on { opacity: 1; }
+  .card h1 { font-size: 92px; letter-spacing: -2px; font-weight: 800; }
+  .card h1 em { font-style: normal; color: var(--accent); }
+  .card p { font-size: 28px; color: #c9d3e8; max-width: 1100px; text-align: center; }
+  .card .chips { display: flex; gap: 12px; margin-top: 8px; }
+  .card .chips span { padding: 8px 16px; border: 1px solid #34456b; border-radius: 999px; color: #b8c6e6; font-size: 18px; }
+  .card .url { font: 600 30px ui-monospace, monospace; color: #fff; margin-top: 10px; }
+  .fin { width: 120px; height: 120px; }
+  @keyframes pop { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <aside id="chat">
+    <header><div class="dot"></div><b>AI agent</b><span>connected to WireBuddy via MCP</span></header>
+    <div id="log"></div>
+    <div id="composer">Ask about the capture…</div>
+  </aside>
+  <main id="view">
+    <iframe id="app"></iframe>
+    <div id="placeholder"><svg class="fin" viewBox="0 0 64 64" style="width:72px;height:72px"><path d="M6 52 C20 40 30 18 34 6 C40 22 48 40 58 52 Z" fill="#4f8cff"/><path d="M6 56 H58" stroke="#8b5cf6" stroke-width="4" stroke-linecap="round"/></svg>WireBuddy is ready — no capture open</div>
+    <div id="caption"></div>
+  </main>
+</div>
+
+<section class="card" id="title">
+  <svg class="fin" viewBox="0 0 64 64"><path d="M6 52 C20 40 30 18 34 6 C40 22 48 40 58 52 Z" fill="#4f8cff"/><path d="M6 56 H58" stroke="#8b5cf6" stroke-width="4" stroke-linecap="round"/></svg>
+  <h1>Wire<em>Buddy</em></h1>
+  <p>A Wireshark-style packet viewer your AI agent can see and drive</p>
+  <div class="chips"><span>sharkd decoding</span><span>live capture</span><span>MCP tools</span><span>Open in Wireshark</span></div>
+</section>
+
+<section class="card" id="end">
+  <svg class="fin" viewBox="0 0 64 64"><path d="M6 52 C20 40 30 18 34 6 C40 22 48 40 58 52 Z" fill="#4f8cff"/><path d="M6 56 H58" stroke="#8b5cf6" stroke-width="4" stroke-linecap="round"/></svg>
+  <h1>Wire<em>Buddy</em></h1>
+  <p>You and your agent, looking at the same packets.</p>
+  <div class="url">github.com/dngames/wirebuddy</div>
+  <div class="chips"><span>MIT licensed</span><span>Claude Code &amp; any MCP client</span></div>
+</section>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const log = $("log");
+  window.stage = {
+    load(src) { $("app").src = src; },
+    reveal() { $("app").classList.add("on"); $("placeholder").classList.add("off"); },
+    card(id, on) { $(id).classList.toggle("on", on); },
+    async user(text) {
+      const c = $("composer");
+      c.classList.add("typing");
+      c.textContent = "";
+      for (const ch of text) { c.textContent += ch; await sleep(28); }
+      await sleep(350);
+      c.classList.remove("typing");
+      c.textContent = "Ask about the capture…";
+      this.add("user", text);
+    },
+    tool(name, result) {
+      const el = this.add("tool", "");
+      el.append(name);
+      if (result) { const ok = document.createElement("span"); ok.className = "ok"; ok.textContent = "  ✓ " + result; el.append(ok); }
+    },
+    async agent(text) {
+      const el = this.add("agent", "");
+      for (const word of text.split(/(\s+)/)) { el.textContent += word; await sleep(18); }
+    },
+    add(kind, text) {
+      const el = document.createElement("div");
+      el.className = "msg " + kind;
+      el.textContent = text;
+      log.append(el);
+      while (log.scrollHeight > log.clientHeight && log.children.length > 1) log.firstElementChild.remove();
+      return el;
+    },
+    caption(text) {
+      const c = $("caption");
+      if (!text) { c.classList.remove("on"); return; }
+      c.textContent = text;
+      c.classList.add("on");
+    },
+  };
+</script>
+</body>
+</html>

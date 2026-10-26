@@ -1,0 +1,61 @@
+{
+  "name": "wirebuddy",
+  "version": "0.1.0",
+  "description": "A lightweight Wireshark-style packet viewer for the browser, with live capture and MCP tools so an AI agent can look at the same capture as you",
+  "keywords": [
+    "wireshark",
+    "sharkd",
+    "dumpcap",
+    "pcap",
+    "pcapng",
+    "packet-analysis",
+    "network",
+    "mcp",
+    "model-context-protocol",
+    "claude"
+  ],
+  "homepage": "https://github.com/dngames/wirebuddy#readme",
+  "bugs": {
+    "url": "https://github.com/dngames/wirebuddy/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dngames/wirebuddy.git"
+  },
+  "license": "MIT",
+  "author": "Michael Haar",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wirebuddy": "dist/server/main.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "start": "node dist/server/main.js",
+    "mcp": "node dist/server/main.js --mcp",
+    "test": "node test/api-smoke.mjs && node test/mcp-smoke.mjs",
+    "test:live": "node test/live-smoke.mjs",
+    "demo": "node test/agent-demo.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
