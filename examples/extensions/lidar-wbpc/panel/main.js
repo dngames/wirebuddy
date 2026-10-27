@@ -7,15 +7,17 @@ const PORT = Number(wb.params.port ?? 7502);
 const HEADER = 16;
 const RECORD = 8;
 const PER_PACKET = 172;
+/** Parts a scan may have: a packet can't make the panel allocate more. */
+const MAX_PARTS = 64;
 /** Scans kept; older ones are dropped. */
 const MAX_SCANS = 1000;
 
 // --- The panel's query, in one place
 
-/** The sensor's packets: their UDP payload, matched by WireBuddy in the file itself (fast)... */
-const query = { match: { proto: "udp", dstport: PORT }, bytes: "payload" };
-/** ...or, in a file it can't read itself (a compressed one), by a display filter. */
-const slowQuery = { filter: `udp.dstport == ${PORT}`, bytes: "payload" };
+/** The sensor's packets (to or from the port, as wbpc.lua decodes them): their UDP payload, matched by WireBuddy in the file itself (fast)... */
+const query = { match: { proto: "udp", port: PORT }, bytes: "payload" };
+/** ...or, in a file it can't read itself, by a display filter. */
+const slowQuery = { filter: `udp.port == ${PORT}`, bytes: "payload" };
 
 // --- Page
 
@@ -299,7 +301,7 @@ function addPacket(b, frame, time) {
   const part = dv.getUint16(8, true);
   const parts = dv.getUint16(10, true);
   const n = dv.getUint16(12, true);
-  if (!parts || part >= parts || n > PER_PACKET || b.length < HEADER + n * RECORD) return bad++;
+  if (!parts || parts > MAX_PARTS || part >= parts || n > PER_PACKET || b.length < HEADER + n * RECORD) return bad++;
   let s = byId.get(id);
   if (!s) {
     s = { id, parts, counts: new Uint16Array(parts), got: new Uint8Array(parts), data: new Uint8Array(parts * PER_PACKET * RECORD), first: frame, last: frame, time };
@@ -354,7 +356,9 @@ function start() {
       } else showScan(Math.max(index, 0));
     },
     error(e) {
-      if (g === generation && e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery, handlers);
+      if (g !== generation) return;
+      if (e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery, handlers);
+      else console.warn(`Reading the scans failed: ${e.message}`);
     },
   };
   sub = wb.subscribe(query, handlers);

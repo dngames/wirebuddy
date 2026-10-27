@@ -333,7 +333,8 @@ function play(s) {
     byTime.set(micros(u), units.length);
     units.push(u);
   });
-  let unsupported = false;
+  /** SPS that failed to configure a decoder: the next one in the stream is tried. */
+  const failed = new Set();
   let read = 0;
   show("Reading the stream…");
   const handlers = {
@@ -349,9 +350,9 @@ function play(s) {
       if (!units.length) return;
       seek.max = String(units.length - 1);
       seek.disabled = false;
-      if (!decoder && !unsupported) {
-        const sps = units.find((u) => u.sps)?.sps;
-        if (!sps) return show("Waiting for the stream's parameters (SPS)…");
+      const sps = decoder ? null : units.find((u) => u.sps?.length >= 4 && !failed.has(wb.hex(u.sps, 64)))?.sps;
+      if (!decoder && !sps && !failed.size) return show("Waiting for the stream's parameters (SPS)…");
+      if (sps) {
         try {
           const d = await makeDecoder(sps);
           if (g !== generation) return d.close();
@@ -360,7 +361,7 @@ function play(s) {
           show("");
           setPlaying(true);
         } catch (e) {
-          unsupported = true;
+          failed.add(wb.hex(sps, 64));
           show(e.message);
           // The agent hears it too
           console.warn(e.message);
@@ -369,7 +370,9 @@ function play(s) {
       status();
     },
     error(e) {
-      if (g === generation && e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery(s), handlers);
+      if (g !== generation) return;
+      if (e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery(s), handlers);
+      else console.warn(`Reading the stream failed: ${e.message}`);
     },
   };
   sub = wb.subscribe(streamQuery(s), handlers);
@@ -437,9 +440,11 @@ wb.on("reset", start);
 // A live capture: look for streams that start later
 let liveTimer = 0;
 wb.on("packets", () => {
-  if (streams.length) return;
-  clearTimeout(liveTimer);
-  liveTimer = setTimeout(start, LIVE_LOOK_MS);
+  if (streams.length || liveTimer) return;
+  liveTimer = setTimeout(() => {
+    liveTimer = 0;
+    void start();
+  }, LIVE_LOOK_MS);
 });
 
 await start();

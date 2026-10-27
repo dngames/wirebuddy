@@ -227,6 +227,35 @@ try {
     assert.equal(manyStore.count, (await sharkdView(many)).frames);
   });
 
+  await check("review cases: variants, short blocks, blocks between records", async () => {
+    // pcap 2.2 is AIX's to Wireshark; implausible first records another variant's
+    const v22 = g.pcapHeader();
+    v22.writeUInt16LE(2, 6);
+    const aix = await indexed(write(Buffer.concat([v22, g.pcapRecord(1, 0, g.udpFrame(1))])));
+    assert.match(aix.off ?? "", /pcap variant/);
+    const odd = await indexed(write(Buffer.concat([g.pcapHeader(), g.pcapRecord(1, 2_000_000, g.udpFrame(1))])));
+    assert.match(odd.off ?? "", /another pcap variant/);
+    // A packet block too short to hold its fields, at the end of the file: stuck, not a throw
+    for (const len of [12, 16, 20]) {
+      const body = Buffer.alloc(len - 12);
+      const store = await indexed(write(Buffer.concat([g.shb(), g.idb(1), g.epb(0, 1n, g.udpFrame(1)), g.block(6, body)])));
+      assert.equal(store.count, 1);
+      await store.update();
+    }
+    // Blocks between two packets are not read with the first one
+    const filler = g.block(0x0bad, Buffer.alloc(4 * 1024 * 1024));
+    const gap = await indexed(write(Buffer.concat([g.shb(), g.idb(1), g.epb(0, 1n, g.udpFrame(1)), filler, filler, g.epb(0, 2n, g.udpFrame(2))])));
+    let largest = 0;
+    const alloc = Buffer.allocUnsafe;
+    Buffer.allocUnsafe = (n) => ((largest = Math.max(largest, n)), alloc(n));
+    try {
+      assert.deepEqual((await records(gap, [1])).map((r) => r.data.readUInt32BE(42)), [1]);
+    } finally {
+      Buffer.allocUnsafe = alloc;
+    }
+    assert.ok(largest < 64 * 1024, `read ${largest} bytes for one small packet`);
+  });
+
   await check("a replaced or cut file is noticed", async () => {
     const file = write(Buffer.concat([g.pcapHeader(), ...[1, 2, 3].map((i) => g.pcapRecord(1, i, g.udpFrame(i)))]));
     const store = await indexed(file);

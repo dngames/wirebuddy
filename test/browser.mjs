@@ -230,6 +230,8 @@ try {
     const images = files.filter((f) => f.image).length;
     const got = await until(() =>
       frame.evaluate(`(() => {
+        // Thumbnails load as they come into view
+        document.querySelector(".tile:not(.loaded)")?.scrollIntoView();
         const tiles = document.querySelectorAll(".tile").length;
         const loaded = document.querySelectorAll(".tile.loaded").length;
         const others = document.querySelectorAll(".others tbody tr").length;

@@ -96,6 +96,8 @@ const MAX_ALL = 64 * 1024 * 1024;
 const MAX_STORAGE = 256 * 1024;
 /** WireBuddy's page answers wb.select and wb.setFilter within this. */
 const ACT_WAIT_MS = 10_000;
+/** A filter is applied to the whole capture: on a big one that takes a while. */
+const FILTER_WAIT_MS = 5 * 60_000;
 
 (() => {
   const meta = (name: string): string => document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") ?? "";
@@ -513,11 +515,13 @@ const ACT_WAIT_MS = 10_000;
         newest = Math.max(newest, p.frames);
         nudge();
       }),
-      on("reset", () => {
+      on("reset", (r: { why: string }) => {
         restart = true;
+        whyReset = r.why;
         nudge();
       }),
     ];
+    let whyReset = "";
     const start = (): number => (q.from === "end" ? Math.max(newest, view.frames) : (q.after ?? 0));
     void (async () => {
       let after = start();
@@ -528,7 +532,7 @@ const ACT_WAIT_MS = 10_000;
           newest = view.frames;
           await h.reset?.();
           // A new live capture (or ring file) began after this subscription: all of it is new
-          after = q.from === "end" && view.live ? 0 : start();
+          after = q.from === "end" && view.live && whyReset === "file" ? 0 : start();
           epoch = view.epoch;
         }
         let page: Page;
@@ -545,7 +549,8 @@ const ACT_WAIT_MS = 10_000;
             await wait(0);
             continue;
           }
-          if (e instanceof WbError) console.warn(`wb.subscribe failed: ${e.message}${e.hint ? ` (${e.hint})` : ""}`);
+          // A panel that handles errors itself decides what to say
+          if (e instanceof WbError && !h.error) console.warn(`wb.subscribe failed: ${e.message}${e.hint ? ` (${e.hint})` : ""}`);
           h.error?.(e as Error);
           return;
         }
@@ -623,7 +628,7 @@ const ACT_WAIT_MS = 10_000;
       const id = ++actSeq;
       acts.set(id, { done, fail });
       post({ t: "act", id, m, a });
-      setTimeout(() => acts.delete(id) && fail(new WbError("WireBuddy's page did not answer", "internal")), ACT_WAIT_MS);
+      setTimeout(() => acts.delete(id) && fail(new WbError("WireBuddy's page did not answer", "internal")), m === "setFilter" ? FILTER_WAIT_MS : ACT_WAIT_MS);
     });
   }
 
@@ -633,11 +638,27 @@ const ACT_WAIT_MS = 10_000;
     return ((await (await request("storage", { op: "get" })).json()) as { value: unknown }).value;
   }
 
+  // One write at a time; a newer value replaces one still waiting, so the last one set is the one kept
+  let storing: Promise<void> | null = null;
+  let waiting: { value: unknown; done: Promise<void> } | null = null;
   async function storageSet(value: unknown): Promise<void> {
     const json = JSON.stringify(value ?? null);
     if (json === undefined) throw new WbError("wb.storage.set takes JSON values", "bad-args");
     if (new TextEncoder().encode(json).length > MAX_STORAGE) throw new WbError(`wb.storage keeps at most ${MAX_STORAGE / 1024} KiB of JSON`, "too-large");
-    await request("storage", { op: "set", value });
+    if (waiting) {
+      waiting.value = value;
+      return waiting.done;
+    }
+    const entry: { value: unknown; done: Promise<void> } = { value, done: Promise.resolve() };
+    const previous = storing;
+    waiting = entry;
+    entry.done = (async () => {
+      if (previous) await previous.catch(() => {});
+      waiting = null;
+      await request("storage", { op: "set", value: entry.value });
+    })();
+    storing = entry.done;
+    return entry.done;
   }
 
   // --- snapshots for the agent

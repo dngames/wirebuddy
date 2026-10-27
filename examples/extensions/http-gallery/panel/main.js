@@ -213,11 +213,14 @@ wb.on("reset", () => {
   return refresh();
 });
 
-// A live capture: look again once it has been quiet for a moment
+// A live capture: look again every REFRESH_MS while packets come
 let timer = 0;
 wb.on("packets", () => {
-  clearTimeout(timer);
-  timer = setTimeout(refresh, REFRESH_MS);
+  if (timer) return;
+  timer = setTimeout(() => {
+    timer = 0;
+    void refresh();
+  }, REFRESH_MS);
 });
 
 await refresh();

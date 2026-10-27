@@ -81,6 +81,9 @@ interface Instance {
   packetsAt: number;
   packetsTimer: NodeJS.Timeout | null;
   packetsDue: number;
+  /** The view's packets when last seen: the view catching up with FrameStore is news for panels reading the view's lists. */
+  viewFrames: number;
+  viewDue: boolean;
   inFlight: number;
   /** Bytes sent per answer, for the per-minute quota. */
   transfers: { at: number; bytes: number }[];
@@ -190,6 +193,8 @@ export class Panels extends EventEmitter {
       packetsAt: 0,
       packetsTimer: null,
       packetsDue: 0,
+      viewFrames: 0,
+      viewDue: false,
       inFlight: 0,
       transfers: [],
       frameCalls: [],
@@ -259,15 +264,18 @@ export class Panels extends EventEmitter {
         else if (json !== sent.view) res.write(`event: view\ndata: ${json}\n\n`);
       }
       inst.sent = { view: json, epoch: view.epoch, frames: reset ? view.frames : sent.frames };
+      const grew = !reset && view.frames > inst.viewFrames;
+      inst.viewFrames = view.frames;
       if (reset) inst.packetsDue = view.frames;
-      else this.packets(inst, view.frames);
+      else this.packets(inst, view.frames, grew);
     }
   }
 
   /** Tells a panel's page there are `frames` packets now (FrameStore may know more than the view), at most every PACKETS_EVERY_MS. */
-  private packets(inst: Instance, frames: number): void {
+  private packets(inst: Instance, frames: number, viewGrew = false): void {
     inst.packetsDue = Math.max(inst.packetsDue, frames);
-    if (inst.packetsDue <= inst.sent.frames || !inst.streams.size || inst.packetsTimer) return;
+    if (viewGrew) inst.viewDue = true;
+    if ((inst.packetsDue <= inst.sent.frames && !inst.viewDue) || !inst.streams.size || inst.packetsTimer) return;
     const wait = inst.packetsAt + PACKETS_EVERY_MS - Date.now();
     if (wait > 0) {
       inst.packetsTimer = setTimeout(() => {
@@ -277,8 +285,9 @@ export class Panels extends EventEmitter {
       return;
     }
     inst.packetsAt = Date.now();
-    inst.sent.frames = inst.packetsDue;
-    for (const res of inst.streams) sse(res, "packets", { frames: inst.packetsDue, live: this.source?.live() ?? false });
+    inst.viewDue = false;
+    inst.sent.frames = Math.max(inst.sent.frames, inst.packetsDue);
+    for (const res of inst.streams) sse(res, "packets", { frames: inst.sent.frames, live: this.source?.live() ?? false });
   }
 
   /** Watches the file while a panel that reads it raw listens: its page hears of new packets within TAIL_MS. */
@@ -625,7 +634,7 @@ export class Panels extends EventEmitter {
     if (view) {
       const json = JSON.stringify(view);
       res.write(`event: view\ndata: ${json}\n\n`);
-      if (!inst.streams.size) [inst.sent, inst.packetsDue] = [{ view: json, epoch: view.epoch, frames: view.frames }, view.frames];
+      if (!inst.streams.size) [inst.sent, inst.packetsDue, inst.viewFrames] = [{ view: json, epoch: view.epoch, frames: view.frames }, view.frames, view.frames];
     }
     inst.streams.add(res);
     res.on("close", () => {

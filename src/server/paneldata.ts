@@ -206,13 +206,16 @@ export class PanelData {
 
   /** Indexes what the view's file gained: how many packets FrameStore knows now, or null without it. */
   async tail(): Promise<number | null> {
-    const store = this.storeOf(this.opts.source.epoch(), false);
+    const epoch = this.opts.source.epoch();
+    const store = this.storeOf(epoch, false);
     if (!store || store.off || store.changed) return null;
     try {
       await store.update();
     } catch {
       return null;
     }
+    // Another file meanwhile: this count is not of it
+    if (this.store?.store !== store || this.opts.source.epoch() !== epoch) return null;
     return store.off || store.changed ? null : store.count;
   }
 
@@ -305,7 +308,8 @@ export class PanelData {
     if (source.epoch() !== epoch) throw stale(source.epoch());
     if (store.changed) throw new ApiError(409, "stale", "the capture file was replaced or cut: start over once WireBuddy read it again", { epoch, retryMs: 2000 });
     const s = this.store;
-    if (s?.store === store && !s.checked && !store.off) {
+    // A file still growing (more than the view read) is checked once the view caught up
+    if (s?.store === store && !s.checked && !store.off && (source.live() || store.count <= source.totalFrames())) {
       s.checked = true;
       // A live file grows meanwhile; a finished one must have Wireshark's packets, numbered alike
       if (!source.live() && store.count !== source.totalFrames()) {
@@ -319,7 +323,7 @@ export class PanelData {
   /** Why a match can't be answered for the view's file. */
   private noStore(): string {
     const store = this.store?.store;
-    return `match reads the capture file itself, and it can't read ${basename(store?.file ?? "")}: ${store?.off ?? "no file"}. Use a display filter instead, e.g. filter: "udp.port == 7502"`;
+    return `match reads the capture file itself, and it can't read ${basename(store?.file ?? "")}: ${store?.off ?? "no file"}. Use a display filter instead`;
   }
 
   /** The frames of `m` in the store's file, scanning what was added since last time. */
@@ -592,6 +596,7 @@ export class PanelData {
       fields.length || filter || fieldBytes ? this.load(label, epoch) : null,
     ]);
     if (match && !store) throw new ApiError(400, "bad-args", this.noStore());
+    if (match && store?.unknownLinks()) throw new ApiError(400, "bad-args", "match reads the packets' headers itself, and this capture has a link type it doesn't know. Use a display filter instead");
     const raw = store !== null && !fieldBytes;
     if (raw) this.tailers.add(label);
     const cap = fields.length ? MAX_LIMIT.fields : fieldBytes || (layer !== "none" && !raw) ? MAX_LIMIT.bytes : MAX_LIMIT.plain;

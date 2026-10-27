@@ -56,6 +56,8 @@ export class FrameStore {
   /** The file was replaced or cut after it was indexed. */
   changed = false;
   private offsets = new Float64Array(4096);
+  /** Each record's block length: a read never reaches past it into other blocks. */
+  private sizes = new Uint32Array(4096);
   /** After the last whole record or block: indexing goes on here. */
   private end = 0;
   private fh: FileHandle | null = null;
@@ -82,10 +84,12 @@ export class FrameStore {
   update(): Promise<void> {
     if (this.running) {
       // One more pass after the running one: the file may have grown since it looked
-      this.next ??= this.running.then(() => {
-        this.next = null;
-        return this.update();
-      });
+      this.next ??= this.running
+        .catch(() => {})
+        .then(() => {
+          this.next = null;
+          return this.update();
+        });
       return this.next;
     }
     this.running = this.use(() => this.index()).finally(() => (this.running = null));
@@ -147,10 +151,14 @@ export class FrameStore {
     });
   }
 
-  /** Where the record's block ends at the latest: other blocks between two records are not read with it. */
+  /** Where the record's block ends: other blocks between two records are not read with it. */
   private recordEnd(frame: number): number {
-    const next = frame < this.count ? this.offsets[frame] : this.end;
-    return Math.min(next, this.offsets[frame - 1] + MAX_BLOCK + 16);
+    return this.offsets[frame - 1] + this.sizes[frame - 1];
+  }
+
+  /** Whether some interface has a link type the layer parser doesn't know (raw matches find nothing there). */
+  unknownLinks(): boolean {
+    return this.format === "pcap" ? this.link === null : this.sections.some((s) => s.ifaces.some((i) => i.link === null));
   }
 
   /** Reads the record of `frame` from `buf` (the file from `base` on). */
@@ -256,8 +264,14 @@ export class FrameStore {
       return false;
     }
     if (size < 24 || h.length < 24) return false;
+    const little = pcap % 2 === 1;
+    // Version 2.4 only: Wireshark reads others (AIX, ...) its own ways
+    if ((little ? h.readUInt16LE(4) : h.readUInt16BE(4)) !== 2 || (little ? h.readUInt16LE(6) : h.readUInt16BE(6)) !== 4) {
+      this.off = "it is a pcap variant WireBuddy doesn't read itself";
+      return false;
+    }
     this.format = "pcap";
-    this.little = pcap % 2 === 1;
+    this.little = little;
     this.nano = pcap >= 2;
     this.link = linkOfType((this.little ? h.readUInt32LE(20) : h.readUInt32BE(20)) & 0x03ffffff);
     this.end = 24;
@@ -274,14 +288,20 @@ export class FrameStore {
         [buf, base] = [got, pos];
       }
       const p = pos - base;
-      const incl = this.little ? buf.readUInt32LE(p + 8) : buf.readUInt32BE(p + 8);
+      const u32 = (i: number): number => (this.little ? buf.readUInt32LE(i) : buf.readUInt32BE(i));
+      const incl = u32(p + 8);
       if (incl > MAX_RECORD) {
         this.stuckAt = size;
         return;
       }
+      // Wireshark reads a file whose first records look wrong as another pcap variant (SS990417, Nokia, ...)
+      if (this.count < 2 && (u32(p + 4) >= (this.nano ? 1e9 : 1e6) || incl > u32(p + 12) || u32(p + 12) > 128 * 1024 * 1024)) {
+        this.off = "its first records look like another pcap variant, which WireBuddy doesn't read itself";
+        return;
+      }
       // A record still being written: later
       if (pos + 16 + incl > size) return;
-      this.push(pos);
+      this.push(pos, 16 + incl);
       pos += 16 + incl;
       this.end = pos;
     }
@@ -339,13 +359,14 @@ export class FrameStore {
         if (len < 20 || p + len > buf.length) return stuck();
         section.ifaces.push(readIface(buf, p, len, little));
       } else if (type === EPB || type === OPB) {
+        if (len < 32) return stuck();
         const iface = type === OPB ? u16(p + 8) : u32(p + 8);
         const cap = u32(p + 20);
-        if (len < 32 || iface >= section.ifaces.length || cap > len - 32 || cap > MAX_RECORD) return stuck();
-        this.push(pos);
+        if (iface >= section.ifaces.length || cap > len - 32 || cap > MAX_RECORD) return stuck();
+        this.push(pos, len);
       } else if (type === SPB) {
         if (len < 16 || !section.ifaces.length) return stuck();
-        this.push(pos);
+        this.push(pos, len);
       }
       pos += len;
       this.end = pos;
@@ -360,12 +381,16 @@ export class FrameStore {
     return null;
   }
 
-  private push(offset: number): void {
+  private push(offset: number, size: number): void {
     if (this.count === this.offsets.length) {
       const grown = new Float64Array(this.offsets.length * 2);
       grown.set(this.offsets);
       this.offsets = grown;
+      const sizes = new Uint32Array(this.sizes.length * 2);
+      sizes.set(this.sizes);
+      this.sizes = sizes;
     }
+    this.sizes[this.count] = size;
     this.offsets[this.count++] = offset;
   }
 }
