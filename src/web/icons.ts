@@ -54,6 +54,33 @@ const ICONS = {
   expert:
     '<path d="M8 1.6 15 14H1z" fill="#f7d774" stroke="#a88400" stroke-width="1" stroke-linejoin="round"/>' +
     '<path d="M8 6v4.2M8 11.8v.4" stroke="#3a2e00" stroke-width="1.5" stroke-linecap="round"/>',
+  restart:
+    '<path d="M3 14c2.9-1.2 5.2-4 5.9-8.4 1.6 2.5 2.8 5.3 3.3 8.4z" fill="#3a9a3a"/>' +
+    '<path d="M2.4 7.4A5.6 5.6 0 0 1 12.6 3.4" fill="none" stroke="#3a9a3a" stroke-width="1.4" stroke-linecap="round"/>' +
+    '<path d="M13.4 1.2v2.9h-2.9" fill="none" stroke="#3a9a3a" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  gear:
+    '<path d="M8 1.2v2.4M8 12.4v2.4M1.2 8h2.4M12.4 8h2.4M3.2 3.2l1.7 1.7M11.1 11.1l1.7 1.7M3.2 12.8l1.7-1.7M11.1 4.9l1.7-1.7" stroke="currentColor" stroke-width="2.1"/>' +
+    '<circle cx="8" cy="8" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    `<circle cx="8" cy="8" r="1.5" ${S}/>`,
+  save: `<path d="M2.5 2.5h9l2 2v9h-11z" ${S}/><path d="M5 2.5v3.3h5.5V2.5M4.8 13.5V9.2h6.4v4.3" ${S}/>`,
+  find: `<circle cx="6.7" cy="6.7" r="4.4" ${S}/><path d="M10 10l4.3 4.3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>`,
+  back: `<path d="M13.5 8H3M7 4 3 8l4 4" ${S}/>`,
+  forward: `<path d="M2.5 8H13M9 4l4 4-4 4" ${S}/>`,
+  first: `<path d="M2.8 3v10M13.5 8H5M8.8 4.3 5 8l3.8 3.7" ${S}/>`,
+  last: `<path d="M13.2 3v10M2.5 8H11M7.2 4.3 11 8l-3.8 3.7" ${S}/>`,
+  colorize:
+    '<rect x="1.5" y="2" width="13" height="3.4" rx=".6" fill="#a7c7ff"/><rect x="1.5" y="6.3" width="13" height="3.4" rx=".6" fill="#ffd28a"/>' +
+    '<rect x="1.5" y="10.6" width="13" height="3.4" rx=".6" fill="#b9e6a3"/>',
+  zoomIn:
+    `<circle cx="6.7" cy="6.7" r="4.6" ${S}/><path d="M10.1 10.1l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>` +
+    `<path d="M4.5 6.7h4.4M6.7 4.5v4.4" ${S}/>`,
+  zoomOut:
+    `<circle cx="6.7" cy="6.7" r="4.6" ${S}/><path d="M10.1 10.1l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>` +
+    `<path d="M4.5 6.7h4.4" ${S}/>`,
+  zoomNormal:
+    `<circle cx="6.7" cy="6.7" r="4.6" ${S}/><path d="M10.1 10.1l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>` +
+    `<path d="M5.7 5.3 7 4.4v4.8" ${S}/>`,
+  resize: `<path d="M1.8 2.5v11M14.2 2.5v11" ${S}/><path d="M4.3 8h7.4M6.3 6 4.3 8l2 2M9.7 6l2 2-2 2" ${S}/>`,
 } as const;
 
 export type IconName = keyof typeof ICONS;

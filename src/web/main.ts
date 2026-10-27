@@ -6,61 +6,43 @@ import { app, bus } from "./app.ts";
 import { createBanner } from "./banner.ts";
 import { clearBytesHighlight, createBytesPane, highlightBytes, setBytesFrame } from "./bytes.ts";
 import { createCaptureBar } from "./capture.ts";
+import { claimOwnedKey, handleCommandKey } from "./commands.ts";
 import { createDetailsPane, selectByOffset, setDetailsFrame } from "./details.ts";
 import { closeTopDialog, dialogOpen } from "./dialog.ts";
-import { openExportDialog } from "./dialogs/export.ts";
-import { openGotoDialog } from "./dialogs/goto.ts";
-import { openFileDialog } from "./dialogs/openfile.ts";
-import { createFilterBar, focusFilter } from "./filterbar.ts";
+import { createFilterBar } from "./filterbar.ts";
+import { createFindBar } from "./findbar.ts";
 import { nodeAtOffset, srcIndex } from "./frame.ts";
 import { menuOpen } from "./menu.ts";
-import { createPacketList, focusPacketList, stepPacket } from "./packetlist.ts";
+import { createMenuBar, menuBarKey } from "./menubar.ts";
+import { createPacketList, focusPacketList } from "./packetlist.ts";
 import { createPanes } from "./panes.ts";
 import { createStatusBar } from "./statusbar.ts";
 import { createToastHost, toast } from "./toast.ts";
 import { createToolbar } from "./toolbar.ts";
-import { baseName, h, isMod, isTextInput } from "./util.ts";
+import { baseName, h, isTextInput } from "./util.ts";
 import { createWelcome } from "./welcome.ts";
 import { connectWs } from "./ws.ts";
 
 function onGlobalKey(e: KeyboardEvent): void {
-  if (menuOpen() || e.defaultPrevented) return;
-  if (e.key === "Escape") {
+  if (e.defaultPrevented) return;
+  claimOwnedKey(e);
+  if (e.key === "Escape" && !menuOpen()) {
     if (closeTopDialog()) e.preventDefault();
     return;
   }
-  if (dialogOpen()) return;
-  const mod = isMod(e);
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  const inText = isTextInput(document.activeElement);
-  if (mod && !e.altKey && key === "/") {
-    e.preventDefault();
-    focusFilter();
-  } else if (mod && !e.altKey && !e.shiftKey && key === "g") {
-    e.preventDefault();
-    openGotoDialog();
-  } else if (mod && !e.altKey && e.shiftKey && key === "x") {
-    e.preventDefault();
-    openExportDialog();
-  } else if (mod && !e.altKey && !e.shiftKey && key === "o") {
-    e.preventDefault();
-    openFileDialog();
-  } else if (mod && !e.altKey && !e.shiftKey && key === "m" && !inText) {
-    e.preventDefault();
-    act.toggleMark(app.selFrame);
-  } else if (mod && !e.altKey && !e.shiftKey && (key === "ArrowDown" || key === "ArrowUp") && !inText) {
-    e.preventDefault();
-    stepPacket(key === "ArrowDown" ? 1 : -1);
-  }
+  if (dialogOpen() || menuBarKey(e) || menuOpen()) return;
+  handleCommandKey(e);
 }
 
 function init(): void {
   const root = document.getElementById("app") ?? document.body.appendChild(h("div", { id: "app" }));
   document.body.appendChild(createToastHost());
 
+  const menuBar = createMenuBar();
   const toolbar = createToolbar();
   const captureBar = createCaptureBar();
   const filterBar = createFilterBar();
+  const findBar = createFindBar();
   const banner = createBanner();
 
   const bytesPane = createBytesPane({
@@ -95,7 +77,15 @@ function init(): void {
   panes.hidden = true;
   main.appendChild(panes);
 
-  root.replaceChildren(toolbar, captureBar, filterBar, banner, main, createStatusBar());
+  root.replaceChildren(menuBar, toolbar, captureBar, filterBar, findBar, banner, main, createStatusBar());
+
+  // View > Zoom scales the three panes, not the menus and bars
+  const applyZoom = (): void => {
+    if (app.zoom === 1) panes.style.removeProperty("zoom");
+    else panes.style.setProperty("zoom", String(app.zoom));
+  };
+  bus.on("view", applyZoom);
+  applyZoom();
 
   // Bytes first: details re-selects a field, which highlights into the new bytes.
   bus.on("frame", (fd) => {

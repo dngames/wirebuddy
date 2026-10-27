@@ -264,9 +264,31 @@ export function fontOf(el: Element): string {
   return `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
 }
 
-/** Ctrl on Linux/Windows, Cmd on macOS. */
+export const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+
+/** Ctrl on Linux/Windows, Cmd on macOS, where Control+key edits text and Control+click opens the context menu. */
 export function isMod(e: KeyboardEvent | MouseEvent): boolean {
-  return e.ctrlKey || e.metaKey;
+  return IS_MAC ? e.metaKey : e.ctrlKey;
+}
+
+/** Letter key pressed, "A"–"Z", on any layout; "" for other keys. */
+export function keyLetter(e: KeyboardEvent): string {
+  if (e.key.length === 1 && /[a-z]/i.test(e.key)) return e.key.toUpperCase();
+  // Punctuation at a letter's place (AZERTY ",") is its own key; AltGr types characters
+  if (/^[\x20-\x7e]$/.test(e.key) || e.getModifierState?.("AltGraph")) return "";
+  // Option on macOS and non-Latin layouts: the key's position
+  return /^Key[A-Z]$/.test(e.code) ? e.code[3] : "";
+}
+
+const MAC_KEYS: Record<string, string> = { Left: "←", Right: "→", Up: "↑", Down: "↓" };
+
+/** A binding as shown: "Ctrl+Shift+X", or "⇧⌘X" on macOS. */
+export function keyLabel(binding: string): string {
+  if (!IS_MAC) return binding;
+  const m = /^((?:(?:Ctrl|Alt|Shift)\+)*)(.+)$/.exec(binding);
+  if (!m) return binding;
+  const mods = m[1];
+  return `${mods.includes("Alt") ? "⌥" : ""}${mods.includes("Shift") ? "⇧" : ""}${mods.includes("Ctrl") ? "⌘" : ""}${MAC_KEYS[m[2]] ?? m[2]}`;
 }
 
 export function isTextInput(el: Element | null): boolean {

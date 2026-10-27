@@ -244,7 +244,7 @@ input[type="checkbox"] {
 }
 
 .btn:focus-visible,
-.tb-btn:focus-visible,
+.tb-icon:focus-visible,
 .tb-mini:focus-visible,
 .tb-wireshark:focus-visible,
 .fb-btn:focus-visible,
@@ -279,6 +279,46 @@ input[type="checkbox"] {
   }
 }
 
+/* -------------------------------------------------------------- menu bar */
+
+.menubar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  height: 24px;
+  padding: 0 2px;
+  background: var(--chrome);
+  overflow: hidden;
+  user-select: none;
+}
+
+.mb-title {
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  line-height: 24px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.mb-title:hover {
+  background: var(--btn-hover);
+}
+
+.mb-title.menu-owner-open {
+  background: var(--menu-hover);
+  color: var(--menu-hover-fg);
+}
+
+.mb-title u {
+  text-underline-offset: 2px;
+}
+
+.mb-title:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 /* --------------------------------------------------------------- toolbar */
 
 .toolbar {
@@ -295,16 +335,6 @@ input[type="checkbox"] {
   user-select: none;
 }
 
-.tb-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 6px 0 2px;
-  font-weight: 600;
-  white-space: nowrap;
-  flex: none;
-}
-
 .tb-sep {
   flex: none;
   width: 1px;
@@ -313,47 +343,39 @@ input[type="checkbox"] {
   background: var(--border);
 }
 
-.tb-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.tb-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
   height: 26px;
-  padding: 0 7px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 3px;
   background: transparent;
-  white-space: nowrap;
   flex: none;
 }
 
-.tb-btn:hover:not(:disabled) {
+.tb-icon:hover:not(:disabled) {
   background: var(--btn-hover);
   border-color: var(--btn-border);
 }
 
-.tb-btn:active:not(:disabled),
-.tb-btn.pressed,
-.tb-btn.menu-owner-open {
+.tb-icon:active:not(:disabled),
+.tb-icon.pressed {
   background: var(--btn-pressed);
   border-color: var(--btn-border);
 }
 
-.tb-btn:disabled {
-  opacity: 0.42;
+.tb-icon:disabled {
+  opacity: 0.38;
 }
 
-.tb-btn:disabled .icon {
+.tb-icon:disabled .icon {
   filter: grayscale(1);
 }
 
-.tb-btn.live .icon {
+.tb-icon.live .icon {
   animation: pulse 1.4s ease-in-out infinite;
-}
-
-.tb-chev {
-  width: 10px;
-  height: 10px;
-  opacity: 0.7;
 }
 
 .tb-spacer {
@@ -395,17 +417,6 @@ input[type="checkbox"] {
 
 .tb-wireshark .icon path {
   fill: #1679c2;
-}
-
-@container toolbar (max-width: 1240px) {
-  .tb-label,
-  .tb-brand-name {
-    display: none;
-  }
-
-  .tb-btn {
-    padding: 0 5px;
-  }
 }
 
 @container toolbar (max-width: 520px) {
@@ -527,6 +538,58 @@ input[type="checkbox"] {
 .cb-stop .icon {
   width: 14px;
   height: 14px;
+}
+
+/* -------------------------------------------------------------- find bar */
+
+.findbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+}
+
+.fd-lbl {
+  color: var(--text-dim);
+}
+
+.fd-input {
+  flex: 1 1 260px;
+  min-width: 160px;
+}
+
+.fd-input.mono {
+  font-family: var(--mono);
+  font-size: var(--fs-mono);
+}
+
+.fd-case {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.fd-btn {
+  height: 24px;
+}
+
+.fd-status {
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fd-status.error {
+  color: var(--danger);
 }
 
 /* ------------------------------------------------------------ filter bar */
@@ -966,6 +1029,11 @@ input[type="checkbox"] {
 .pl-row.sel {
   background: var(--sel-bg);
   color: var(--sel-fg);
+}
+
+.pl-row.cur {
+  outline: 1px dotted currentColor;
+  outline-offset: -2px;
 }
 
 .pl-row.mark-agent {
@@ -2165,6 +2233,24 @@ input[type="checkbox"] {
   max-width: 400px;
 }
 
+.fl-stream {
+  width: 72px;
+}
+
+.fl-findrow {
+  flex: 1 1 260px;
+}
+
+.fl-find {
+  flex: 1;
+  min-width: 120px;
+}
+
+.fl-find-msg {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 .fl-lbl {
   display: inline-flex;
   align-items: center;
@@ -2257,7 +2343,7 @@ input[type="checkbox"] {
   .toast,
   .cb-dot.running,
   .sb-cap.running::before,
-  .tb-btn.live .icon {
+  .tb-icon.live .icon {
     animation: none;
   }
 }

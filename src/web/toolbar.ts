@@ -1,150 +1,90 @@
-/** Main toolbar. */
+/** Main toolbar: Wireshark's icon bar, then TLS keys and Open in Wireshark. */
 
-import { APP_NAME } from "./api.ts";
 import * as act from "./actions.ts";
-import { app, bus, captureActive, hooks } from "./app.ts";
-import { cap, capBus, setBarOpen } from "./capture.ts";
-import { openConvDialog } from "./dialogs/conv.ts";
-import { openExpertDialog } from "./dialogs/expert.ts";
-import { openExportDialog } from "./dialogs/export.ts";
-import { openGotoDialog } from "./dialogs/goto.ts";
-import { openIoGraphDialog } from "./dialogs/iograph.ts";
-import { openFileDialog } from "./dialogs/openfile.ts";
-import { openPhsDialog } from "./dialogs/phs.ts";
-import { openTlsDialog } from "./dialogs/tls.ts";
+import { app, bus } from "./app.ts";
+import { capBus } from "./capture.ts";
+import { commands, isEnabled, tooltip, type Command, type CommandId } from "./commands.ts";
 import { icon, type IconName } from "./icons.ts";
-import { SEP, toggleMenuAt, type MenuItem } from "./menu.ts";
 import { h } from "./util.ts";
 
-function tbButton(ic: IconName, label: string, title: string, opts: { menu?: boolean; cls?: string } = {}): HTMLButtonElement {
-  return h(
-    "button",
-    { class: `tb-btn${opts.cls ? ` ${opts.cls}` : ""}`, title, attrs: { "aria-label": label } },
-    icon(ic),
-    h("span", { class: "tb-label" }, label),
-    opts.menu ? icon("chevron", "icon tb-chev") : null,
-  );
-}
+/** Wireshark's main toolbar in its order; "|" separates the groups. */
+const LAYOUT: ([CommandId, IconName] | "|")[] = [
+  ["startCapture", "fin"],
+  ["stopCapture", "stop"],
+  ["restartCapture", "restart"],
+  ["captureOptions", "gear"],
+  "|",
+  ["open", "open"],
+  ["saveAs", "save"],
+  ["close", "close"],
+  ["reload", "refresh"],
+  "|",
+  ["find", "find"],
+  ["back", "back"],
+  ["forward", "forward"],
+  ["gotoPacket", "goto"],
+  ["firstPacket", "first"],
+  ["lastPacket", "last"],
+  ["autoScroll", "autoscroll"],
+  ["colorize", "colorize"],
+  "|",
+  ["zoomIn", "zoomIn"],
+  ["zoomOut", "zoomOut"],
+  ["zoomNormal", "zoomNormal"],
+  ["resizeColumns", "resize"],
+];
 
-function marksMenu(): MenuItem[] {
-  const marks = [...app.marks.values()].sort((a, b) => a.frame - b.frame);
-  const items: MenuItem[] = [{ label: marks.length ? `Marked Packets (${marks.length})` : "No Marked Packets", header: true }];
-  for (const m of marks.slice(0, 300)) {
-    items.push({
-      label: `No. ${m.frame}`,
-      detail: m.note || undefined,
-      shortcut: m.by === "agent" ? "Claude" : "",
-      checked: m.frame === app.selFrame,
-      title: m.note || undefined,
-      action: () => act.jumpToFrame(m.frame),
-    });
-  }
-  if (marks.length > 300) items.push({ label: `…and ${marks.length - 300} more`, disabled: true });
-  items.push(
-    SEP,
-    { label: "Next Mark", disabled: !marks.length, action: () => act.gotoMark(1) },
-    { label: "Previous Mark", disabled: !marks.length, action: () => act.gotoMark(-1) },
-    SEP,
-    {
-      label: app.selFrame !== null && app.marks.has(app.selFrame) ? "Unmark Selected Packet" : "Mark Selected Packet",
-      shortcut: "Ctrl+M",
-      disabled: app.selFrame === null,
-      action: () => act.toggleMark(app.selFrame),
-    },
-    { label: "Unmark All", disabled: !marks.length, action: () => void act.clearMarks() },
-  );
-  return items;
+function iconButton(c: Command, ic: IconName): HTMLButtonElement {
+  const el = h("button", { class: "tb-icon", title: tooltip(c), attrs: { "aria-label": c.label } }, icon(ic));
+  // Keyboard focus stays in the packet list, as in Wireshark
+  el.addEventListener("mousedown", (e) => e.preventDefault());
+  el.addEventListener("click", () => {
+    if (isEnabled(c)) c.run();
+  });
+  return el;
 }
 
 export function createToolbar(): HTMLElement {
-  const openBtn = tbButton("open", "Open", "Open a capture file (Ctrl+O)");
-  const closeBtn = tbButton("close", "Close", "Close this capture file");
-  const exportBtn = tbButton("export", "Export", "Export specified packets (Ctrl+Shift+X)");
-  const startBtn = tbButton("fin", "Start", "Start capturing packets");
-  const stopBtn = tbButton("stop", "Stop", "Stop capturing packets");
-  const optsBtn = tbButton("options", "Options", "Show capture options");
-  const statsBtn = tbButton("stats", "Statistics", "Statistics", { menu: true });
-  const gotoBtn = tbButton("goto", "Go to", "Go to packet (Ctrl+G)");
-  const marksBtn = tbButton("marks", "Marks", "Marked packets", { menu: true });
-  const autoBtn = tbButton("autoscroll", "Auto-scroll", "Scroll to the last packet during a live capture");
-  const tlsBtn = tbButton("lock", "TLS Keys", "Decrypt TLS with a key log file");
+  const bar = h("div", { class: "toolbar", role: "toolbar", attrs: { "aria-label": "Main toolbar" } });
+  const buttons: { el: HTMLButtonElement; c: Command }[] = [];
+  let startBtn: HTMLButtonElement | null = null;
+  for (const entry of LAYOUT) {
+    if (entry === "|") {
+      bar.append(h("span", { class: "tb-sep" }));
+      continue;
+    }
+    const c: Command = commands[entry[0]];
+    const el = iconButton(c, entry[1]);
+    if (entry[0] === "startCapture") startBtn = el;
+    buttons.push({ el, c });
+    bar.append(el);
+  }
+
+  const tls: Command = commands.tlsKeys;
+  const tlsBtn = iconButton(tls, "lock");
+  buttons.push({ el: tlsBtn, c: tls });
   const wsBtn = h(
     "button",
     { class: "tb-wireshark", title: "Open this capture in Wireshark at the selected packet" },
     icon("wireshark"),
     h("span", { class: "tb-ws-label" }, "Open in Wireshark"),
   );
-
-  openBtn.addEventListener("click", () => openFileDialog());
-  closeBtn.addEventListener("click", () => void act.closeFile());
-  exportBtn.addEventListener("click", () => openExportDialog());
-  tlsBtn.addEventListener("click", () => openTlsDialog());
-  startBtn.addEventListener("click", () => hooks.startCapture());
-  stopBtn.addEventListener("click", () => void act.stopCapture());
-  optsBtn.addEventListener("click", () => setBarOpen(!cap.barOpen));
-  statsBtn.addEventListener("click", () =>
-    toggleMenuAt(statsBtn, () => [
-      { label: "Protocol Hierarchy", action: () => openPhsDialog() },
-      { label: "Conversations", action: () => openConvDialog("conv") },
-      { label: "Endpoints", action: () => openConvDialog("endpt") },
-      SEP,
-      { label: "I/O Graphs", action: () => openIoGraphDialog() },
-      { label: "Expert Information", action: () => openExpertDialog() },
-    ]),
-  );
-  gotoBtn.addEventListener("click", () => openGotoDialog());
-  marksBtn.addEventListener("click", () => toggleMenuAt(marksBtn, marksMenu, { minWidth: 240 }));
-  autoBtn.addEventListener("click", () => act.setAutoScroll(!app.autoScroll));
+  wsBtn.addEventListener("mousedown", (e) => e.preventDefault());
   wsBtn.addEventListener("click", () => void act.openInWireshark(app.selFrame));
-
-  const sep = (): HTMLElement => h("span", { class: "tb-sep" });
-  const bar = h(
-    "div",
-    { class: "toolbar", role: "toolbar" },
-    h("span", { class: "tb-brand", title: APP_NAME }, icon("fin"), h("span", { class: "tb-brand-name" }, APP_NAME)),
-    sep(),
-    openBtn,
-    closeBtn,
-    exportBtn,
-    sep(),
-    startBtn,
-    stopBtn,
-    optsBtn,
-    sep(),
-    statsBtn,
-    gotoBtn,
-    marksBtn,
-    autoBtn,
-    sep(),
-    tlsBtn,
-    h("span", { class: "tb-spacer" }),
-    wsBtn,
-  );
+  bar.append(h("span", { class: "tb-spacer" }), tlsBtn, wsBtn);
 
   const update = (): void => {
     const s = app.state;
-    const hasFile = !!s?.file && !s.loading;
-    const active = captureActive(s);
-    closeBtn.disabled = !s?.file;
-    exportBtn.disabled = !hasFile;
-    const tls = s?.tlsKeylog ?? null;
-    tlsBtn.classList.toggle("pressed", !!tls);
-    tlsBtn.setAttribute("aria-pressed", tls ? "true" : "false");
-    tlsBtn.title = tls ? `Decrypting TLS with ${tls}` : "Decrypt TLS with a key log file";
-    startBtn.disabled = active;
-    stopBtn.disabled = !(s && (s.capture.status === "running" || s.capture.status === "starting"));
-    startBtn.classList.toggle("live", s?.capture.status === "running");
-    statsBtn.disabled = !hasFile;
-    gotoBtn.disabled = !hasFile;
-    marksBtn.disabled = !s?.file;
-    const nMarks = app.marks.size;
-    marksBtn.querySelector(".tb-label")!.textContent = nMarks ? `Marks (${nMarks})` : "Marks";
-    autoBtn.classList.toggle("pressed", app.autoScroll);
-    autoBtn.setAttribute("aria-pressed", app.autoScroll ? "true" : "false");
-    optsBtn.classList.toggle("pressed", cap.barOpen);
-    optsBtn.setAttribute("aria-pressed", cap.barOpen ? "true" : "false");
-    const wsOk = !!s?.wiresharkAvailable && !!s.file;
-    wsBtn.disabled = !wsOk;
+    for (const { el, c } of buttons) {
+      el.disabled = !isEnabled(c);
+      const on = c.checked?.();
+      if (on === undefined) continue;
+      el.classList.toggle("pressed", on);
+      el.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    startBtn?.classList.toggle("live", s?.capture.status === "running");
+    tlsBtn.title = s?.tlsKeylog ? `Decrypting TLS with ${s.tlsKeylog}` : tooltip(tls);
+    wsBtn.disabled = !s?.wiresharkAvailable || !s.file;
     wsBtn.title = !s?.wiresharkAvailable
       ? "Wireshark was not found on this machine"
       : !s.file
@@ -157,6 +97,8 @@ export function createToolbar(): HTMLElement {
   bus.on("state", update);
   bus.on("selection", update);
   bus.on("autoscroll", update);
+  bus.on("view", update);
+  bus.on("frame", update);
   capBus.on("bar", update);
   update();
   return bar;

@@ -5,6 +5,7 @@ import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
 import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, IoGraphSpec, RecentFiles, ServerEvent } from "../shared/api.ts";
+import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -59,6 +60,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/stats/iograph": (q) => viewer.ioGraph(graphs(q.get("graphs")), num(q, "interval")),
     "/api/frame-at": async (q) => ({ frame: await viewer.frameAt(num(q, "t")) }),
     "/api/follow": (q) => viewer.follow(q.get("proto") || "TCP", q.get("filter") ?? ""),
+    "/api/find": (q) => viewer.find(q.get("filter") ?? "", num(q, "from"), num(q, "dir")),
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
     "/api/capture/activity": () => viewer.capture.activity(),
@@ -67,12 +69,15 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
   const ok = { ok: true };
   const post: Record<string, Handler> = {
     "/api/filter": (_q, b) => viewer.setFilter(String(b.filter ?? ""), "user"),
-    "/api/select": (_q, b) => (viewer.select(b.frame ?? null, "user"), ok),
+    "/api/select": (_q, b) => (viewer.select(b.frame ?? null, "user", rowRanges(b.rows), viewKey(b.view)), ok),
     "/api/open": async (_q, b) => (await viewer.open(String(b.path ?? "")), ok),
     "/api/close": async () => (await viewer.close(), ok),
+    "/api/reload": async () => (await viewer.reload(true), ok),
     "/api/marks": (_q, b) => (viewer.mark(numbers(b.frames), String(b.note ?? ""), "user"), ok),
     "/api/marks/clear": (_q, b) => (viewer.clearMarks(b.frames ? numbers(b.frames) : undefined), ok),
-    "/api/wireshark": (_q, b) => (viewer.openInWireshark(b.frame ?? null), ok),
+    "/api/marks/toggle": () => (viewer.toggleMarks("user"), ok),
+    "/api/marks/displayed": (_q, b) => (viewer.markDisplayed(flag(b.on, "on"), "user"), ok),
+    "/api/wireshark": async (_q, b) => (await viewer.openInWireshark(b.frame ?? null), ok),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? String(b.keylog) : null), ok),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
@@ -185,6 +190,30 @@ function numbers(value: unknown): number[] {
   if (!Array.isArray(value)) throw new HttpError(400, "frames must be an array of frame numbers");
   if (value.length > 10000) throw new HttpError(400, "too many frames");
   return value.map(Number).filter(Number.isInteger);
+}
+
+/** Row ranges as [first, last] integer pairs; absent means none given. */
+function rowRanges(value: unknown): Ranges | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || !value.every((r) => Array.isArray(r) && r.length === 2 && Number.isInteger(r[0]) && Number.isInteger(r[1]))) {
+    throw new HttpError(400, "rows must be an array of [first, last] row index pairs");
+  }
+  return value as Ranges;
+}
+
+function viewKey(value: unknown): { file: string; filter: string; generation?: number } | undefined {
+  if (value === undefined || value === null) return undefined;
+  const v = value as { file?: unknown; filter?: unknown; generation?: unknown };
+  if (typeof v !== "object" || typeof v.file !== "string" || typeof v.filter !== "string") {
+    throw new HttpError(400, "view must be { file, filter, generation? }");
+  }
+  if (v.generation !== undefined && !Number.isInteger(v.generation)) throw new HttpError(400, "view.generation must be an integer");
+  return { file: v.file, filter: v.filter, generation: v.generation as number | undefined };
+}
+
+function flag(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new HttpError(400, `"${name}" must be true or false`);
+  return value;
 }
 
 function graphs(raw: string | null): IoGraphSpec[] {

@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format follows
 First version.
 
 - Wireshark-style packet list, details tree and bytes view, decoded by `sharkd`
+- Wireshark's menu bar, main toolbar and keyboard shortcuts
+- Select several packets with Ctrl+click and Shift+click, to mark, copy or export them
+- Find Packet by display filter, string or hex value; packet history; zoom
+- Follow Stream window like Wireshark's: stream stepping, C Arrays, UTF-8 and Raw views, find, filter out, save
 - Display filter bar with validation, field autocompletion and capture-filter hints
 - Follow stream, protocol hierarchy, conversations and endpoints
 - Custom columns ("Apply as Column"), Expert Information and I/O Graph

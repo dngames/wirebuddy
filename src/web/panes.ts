@@ -1,5 +1,6 @@
 /** Packet list / details / bytes stacked with draggable splitters. */
 
+import { app } from "./app.ts";
 import { clamp, h, load, save } from "./util.ts";
 
 const MIN = 44;
@@ -46,7 +47,8 @@ export function createPanes(list: HTMLElement, details: HTMLElement, bytes: HTML
     const [a0, b0] = sizes();
     const y0 = e.clientY;
     const move = (ev: PointerEvent): void => {
-      const dy = ev.clientY - y0;
+      // Screen pixels to the zoomed panes' own
+      const dy = (ev.clientY - y0) / app.zoom;
       let a = a0;
       let b = b0;
       if (which === 0) {

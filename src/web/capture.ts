@@ -201,6 +201,28 @@ export async function startCaptureClicked(iface?: string): Promise<void> {
   await act.startCapture(buildRequest(target));
 }
 
+/** Capture > Restart: stops, waits until the capture is down, starts it again as it was. */
+export async function restartCaptureClicked(): Promise<void> {
+  const c = app.state?.capture;
+  if (!c?.iface || !captureActive()) return;
+  const req: CaptureRequest = { iface: c.iface, filter: c.filter, autostop: c.autostop, ring: c.ring };
+  if (!(await act.stopCapture())) return;
+  // The idle state may already be here
+  const stopped = !captureActive() || await new Promise<boolean>((resolve) => {
+    const done = (ok: boolean): void => {
+      window.clearTimeout(timer);
+      off();
+      resolve(ok);
+    };
+    const timer = window.setTimeout(() => done(false), 15000);
+    const off = bus.on("state", (s) => {
+      if (!captureActive(s)) done(true);
+    });
+  });
+  if (stopped) await act.startCapture(req);
+  else toast("error", "The capture did not stop; not restarting it");
+}
+
 export function captureStatusText(s: ViewState): { text: string; cls: string } {
   const c = s.capture;
   switch (c.status) {

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { basename } from "node:path";
 import type { Viewer } from "./viewer.ts";
 import type { PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
+import { inRanges, type Ranges } from "../shared/ranges.ts";
 
 const INSTRUCTIONS = `wirebuddy is a lightweight Wireshark-style capture viewer running in the user's browser pane.
 You and the user look at the same view: the open capture, display filter, selected packet and marks.
@@ -17,6 +18,9 @@ You and the user look at the same view: the open capture, display filter, select
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
 - You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.`;
+
+/** Longest selection filter get_view_state prints. */
+const MAX_SELECTION_FILTER = 2000;
 
 type Text = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -68,6 +72,16 @@ function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: num
   }
   if (truncated) lines.push(`... cut at ${opts.maxLines} lines; pass protocols or a larger max_lines`);
   return lines.join("\n");
+}
+
+/** The user's selected frames as a display filter, unless that gets too long. */
+function selectionLine(frames: Ranges, count: number): string {
+  let set = "";
+  for (const [a, b] of frames) {
+    set += `${set ? ", " : ""}${a === b ? a : `${a}..${b}`}`;
+    if (set.length > MAX_SELECTION_FILTER) return `Selected packets: ${count} (too many to list; export_packets with which "selected" exports them)`;
+  }
+  return `Selected packets (${count}): frame.number in {${set}}`;
 }
 
 function phsText(nodes: PhsNode[], totalFrames: number, depth = 0, out: string[] = []): string[] {
@@ -122,13 +136,16 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
   server.registerTool(
     "get_view_state",
     {
-      description: "What the user is looking at right now: open file, frame counts, display filter, selected frame (with its summary row), marks and live-capture status.",
+      description: "What the user is looking at right now: open file, frame counts, display filter, selected frame (with its summary row), the packets the user selected with Ctrl/Shift+click (as a display filter for query_packets), marks and live-capture status.",
       annotations: { readOnlyHint: true },
     },
     tool(async () => {
       const s = viewer.state;
       const c = s.capture;
       const lines: string[] = [];
+      // From this snapshot: the row lookup below awaits sharkd
+      const others = s.selectedCount > 1 || (s.selectedCount === 1 && !inRanges(s.selectedRows, s.selectedIndex));
+      const selection = s.file && others ? selectionLine(viewer.selectedFrames(), s.selectedCount) : null;
       if (s.loadError) lines.push(`Last open failed: ${s.loadError}`);
       if (s.loading) lines.push("A capture is being opened.");
       if (!s.file) lines.push("No capture is open.");
@@ -143,6 +160,7 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
           lines.push(`Selected frame (by ${s.selectedBy}): ${s.selected}${hidden}`);
           if (row) lines.push(`  ${s.columns.join(" | ")}\n  ${rowLine(s.columns, row)}`);
         } else lines.push("Selected frame: none");
+        if (selection) lines.push(selection);
         if (s.marks.length) {
           lines.push(`Marks (${s.marks.length}):`);
           for (const m of s.marks.slice(0, 50)) lines.push(`  ${m.frame} [${m.by}]${m.note ? ` ${m.note}` : ""}`);
@@ -486,11 +504,11 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
   server.registerTool(
     "export_packets",
     {
-      description: "Write packets of the open capture to a new pcapng/pcap file (Wireshark's Export Specified Packets), e.g. a minimal capture with just the relevant packets. Choose by display filter, the user's view, marks or a frame range.",
+      description: "Write packets of the open capture to a new pcapng/pcap file (Wireshark's Export Specified Packets), e.g. a minimal capture with just the relevant packets. Choose by display filter, the user's view, marks, the user's selection or a frame range.",
       inputSchema: {
         path: z.string().describe("Absolute path ending in .pcapng or .pcap; its directory must exist"),
         filter: z.string().optional().describe("Export the frames matching this display filter"),
-        which: z.enum(["displayed", "marked", "selected", "range", "all"]).default("displayed").describe("Used when no filter is given"),
+        which: z.enum(["displayed", "marked", "selected", "range", "all"]).default("displayed").describe("Used when no filter is given; \"selected\" is the packets the user selected (Ctrl/Shift+click), else the selected one"),
         range: z.string().optional().describe("For which=range, e.g. \"1-10,25\""),
         overwrite: z.boolean().default(false),
       },
@@ -546,8 +564,8 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
       description: "Open the current capture in the real Wireshark GUI with the same display filter, jumping to a frame (default: the selected one).",
       inputSchema: { frame: z.number().int().min(1).optional() },
     },
-    tool(({ frame }) => {
-      viewer.openInWireshark(frame ?? null);
+    tool(async ({ frame }) => {
+      await viewer.openInWireshark(frame ?? null);
       return "Wireshark is starting";
     }),
   );

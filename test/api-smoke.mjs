@@ -1,7 +1,7 @@
 // End-to-end check of the HTTP API against test/fixtures/http.pcapng.
 // Usage: node test/api-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -161,6 +161,9 @@ try {
     assert.equal(r.client.bytes, 86);
     assert.equal(r.server.bytes, 81243);
     assert.equal(r.payloads[0].server, false);
+    const missing = await api("/api/follow?proto=TCP&filter=" + encodeURIComponent("tcp.stream eq 7"));
+    assert.ok(missing.status >= 400 && missing.status < 500, `status ${missing.status}`);
+    assert.match(missing.json.error, /no TCP stream matches tcp\.stream eq 7/);
   });
 
   await check("capture interfaces and filter check", async () => {
@@ -276,6 +279,248 @@ try {
     }
   });
 
+  const state = async () => (await api("/api/state")).json;
+
+  await check("select with rows sets selectedRows and selectedCount", async () => {
+    await api("/api/filter", { filter: "" });
+    assert.equal((await api("/api/select", { frame: 5, rows: [[6, 8], [2, 4], [0, 0], [3, 3]] })).status, 200);
+    let s = await state();
+    assert.equal(s.selected, 5);
+    assert.equal(s.selectedIndex, 4);
+    assert.deepEqual(s.selectedRows, [[0, 0], [2, 4], [6, 8]]);
+    assert.equal(s.selectedCount, 7);
+    await api("/api/select", { frame: 7 });
+    s = await state();
+    assert.deepEqual([s.selectedRows, s.selectedCount], [[[6, 6]], 1]);
+    await api("/api/select", { frame: 7, rows: [] });
+    s = await state();
+    assert.deepEqual([s.selected, s.selectedRows, s.selectedCount], [7, [], 0]);
+    await api("/api/select", { frame: null });
+    s = await state();
+    assert.deepEqual([s.selected, s.selectedRows, s.selectedCount], [null, [], 0]);
+  });
+  await check("invalid select rows give 400 and change nothing", async () => {
+    await api("/api/select", { frame: 3, rows: [[1, 2]] });
+    const tooMany = Array.from({ length: 10001 }, () => [0, 0]);
+    for (const rows of [[[3, 2]], [[0, 29]], [[-1, 0]], [[1.5, 2]], [[1]], [[1, 2, 3]], [["1", "2"]], "0-3", { a: 1 }, tooMany]) {
+      const r = await api("/api/select", { frame: 4, rows });
+      assert.equal(r.status, 400, `${JSON.stringify(rows).slice(0, 40)}: ${JSON.stringify(r.json)}`);
+    }
+    const s = await state();
+    assert.deepEqual([s.selected, s.selectedRows], [3, [[1, 2]]]);
+  });
+  await check("rows from another file or filter give 409 and change nothing", async () => {
+    const file = (await state()).file;
+    assert.equal((await api("/api/select", { frame: 4, rows: [[2, 5]], view: { file, filter: "" } })).status, 200);
+    assert.equal((await api("/api/select", { frame: 4, rows: [[0, 1]], view: { file, filter: "tcp" } })).status, 409);
+    assert.equal((await api("/api/select", { frame: 4, rows: [[0, 1]], view: { file: "/elsewhere.pcapng", filter: "" } })).status, 409);
+    assert.equal((await api("/api/select", { frame: 4, rows: [[0, 1]], view: "x" })).status, 400);
+    assert.deepEqual((await state()).selectedRows, [[2, 5]]);
+  });
+  await check("rows from a list rebuilt since give 409, a plain reload keeps them valid", async () => {
+    await api("/api/filter", { filter: "tcp" });
+    let s = await state();
+    const view = { file: s.file, filter: "tcp", generation: s.generation };
+    assert.equal((await api("/api/select", { frame: 5, rows: [[1, 3]], view })).status, 200);
+    await api("/api/reload", {});
+    assert.equal((await api("/api/select", { frame: 5, rows: [[2, 3]], view })).status, 200);
+    // Same file and filter text, but the list was rebuilt in between
+    await api("/api/filter", { filter: "http" });
+    await api("/api/filter", { filter: "tcp" });
+    assert.equal((await api("/api/select", { frame: 5, rows: [[0, 1]], view })).status, 409);
+    s = await state();
+    assert.equal((await api("/api/select", { frame: 5, rows: [[0, 1]], view: { ...view, generation: s.generation } })).status, 200);
+    assert.equal((await api("/api/select", { frame: 5, rows: [[0, 1]], view: { ...view, generation: 1.5 } })).status, 400);
+    await api("/api/filter", { filter: "" });
+  });
+  await check("a display filter change resets selectedRows to the current row", async () => {
+    await api("/api/select", { frame: 12, rows: [[0, 28]] });
+    assert.equal((await state()).selectedCount, 29);
+    await api("/api/filter", { filter: "http" });
+    let s = await state();
+    assert.deepEqual([s.selectedIndex, s.selectedRows, s.selectedCount], [1, [[1, 1]], 1]);
+    await api("/api/select", { frame: 4, rows: [[0, 3]] });
+    await api("/api/filter", { filter: "http.response" });
+    s = await state();
+    assert.deepEqual([s.selected, s.selectedIndex, s.selectedRows, s.selectedCount], [4, -1, [], 0]);
+    await api("/api/filter", { filter: "" });
+  });
+  await check("opening or closing a file clears selectedRows", async () => {
+    await api("/api/select", { frame: 3, rows: [[0, 5]] });
+    assert.equal((await api("/api/open", { path: fixture })).status, 200);
+    let s = await state();
+    assert.deepEqual([s.selected, s.selectedRows, s.selectedCount], [null, [], 0]);
+    await api("/api/select", { frame: 3, rows: [[0, 5]] });
+    await api("/api/close", {});
+    s = await state();
+    assert.deepEqual([s.selected, s.selectedRows, s.selectedCount], [null, [], 0]);
+    assert.equal((await api("/api/open", { path: fixture })).status, 200);
+  });
+  await check("a re-dissection of the same file keeps selectedRows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-rows-test-"));
+    try {
+      const keys = join(dir, "keys.log");
+      writeFileSync(keys, "");
+      await api("/api/filter", { filter: "http" });
+      await api("/api/select", { frame: 12, rows: [[0, 1], [3, 3]] });
+      const gen = (await state()).generation;
+      assert.equal((await api("/api/tls", { keylog: keys })).status, 200);
+      const s = await state();
+      assert.ok(s.generation > gen, "the capture is re-dissected");
+      assert.deepEqual([s.selected, s.selectedRows, s.selectedCount], [12, [[0, 1], [3, 3]], 3]);
+    } finally {
+      await api("/api/tls", { keylog: null });
+      await api("/api/filter", { filter: "" });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("export selected rows, also under a display filter", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-export-sel-test-"));
+    try {
+      const info = (f) => {
+        const out = execFileSync("capinfos", ["-M", "-c", "-d", f], { encoding: "utf8" });
+        return [Number(/Number of packets:\s+(\d+)/.exec(out)[1]), Number(/Data size:\s+(\d+) bytes/.exec(out)[1])];
+      };
+      await api("/api/select", { frame: 3, rows: [[0, 2], [10, 10]] });
+      const plain = await api("/api/export", { path: join(dir, "plain.pcapng"), which: "selected" });
+      assert.equal(plain.json.frames, 4, JSON.stringify(plain.json));
+      // Frames 1-3 and 11
+      assert.deepEqual(info(join(dir, "plain.pcapng")), [4, 74 + 74 + 66 + 66]);
+      await api("/api/filter", { filter: "http" });
+      await api("/api/select", { frame: 21, rows: [[0, 0], [2, 3]] });
+      const filtered = await api("/api/export", { path: join(dir, "filtered.pcapng"), which: "selected" });
+      assert.equal(filtered.json.frames, 3, JSON.stringify(filtered.json));
+      // Frames 4, 21 and 25, not 1, 3 and 4
+      assert.deepEqual(info(join(dir, "filtered.pcapng")), [3, 152 + 152 + 535]);
+      await api("/api/select", { frame: 5 });
+      assert.equal((await state()).selectedCount, 0);
+      const hidden = await api("/api/export", { path: join(dir, "hidden.pcapng"), which: "selected" });
+      assert.equal(hidden.json.frames, 1, "falls back to the selected frame");
+      await api("/api/select", { frame: null });
+      const none = await api("/api/export", { path: join(dir, "none.pcapng"), which: "selected" });
+      assert.equal(none.status, 400);
+      assert.match(none.json.error, /no packets to export/);
+    } finally {
+      await api("/api/filter", { filter: "" });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("marks/toggle flips the marks of the selected frames", async () => {
+    await api("/api/marks/clear", {});
+    await api("/api/marks", { frames: [3, 4], note: "x" });
+    await api("/api/select", { frame: 4, rows: [[2, 5]] });
+    assert.equal((await api("/api/marks/toggle", {})).status, 200);
+    const marks = (await state()).marks;
+    assert.deepEqual(marks, [{ frame: 5, note: "", by: "user" }, { frame: 6, note: "", by: "user" }]);
+    await api("/api/marks/toggle", {});
+    assert.deepEqual((await state()).marks.map((m) => m.frame), [3, 4]);
+    // No selected rows: the selected frame
+    await api("/api/filter", { filter: "http" });
+    await api("/api/select", { frame: 5 });
+    await api("/api/marks/toggle", {});
+    assert.deepEqual((await state()).marks.map((m) => m.frame), [3, 4, 5]);
+    await api("/api/select", { frame: null });
+    await api("/api/marks/toggle", {});
+    assert.deepEqual((await state()).marks.map((m) => m.frame), [3, 4, 5]);
+    await api("/api/filter", { filter: "" });
+  });
+  await check("marks/displayed marks and unmarks the displayed frames", async () => {
+    await api("/api/marks/clear", {});
+    await api("/api/marks", { frames: [3, 12], note: "keep" });
+    await api("/api/filter", { filter: "http" });
+    assert.equal((await api("/api/marks/displayed", { on: true })).status, 200);
+    const marks = (await state()).marks;
+    assert.deepEqual(marks.map((m) => m.frame), [3, 4, 12, 21, 25]);
+    assert.equal(marks.find((m) => m.frame === 12).note, "keep");
+    assert.equal(marks.find((m) => m.frame === 21).by, "user");
+    assert.equal((await api("/api/marks/displayed", { on: false })).status, 200);
+    assert.deepEqual((await state()).marks.map((m) => m.frame), [3]);
+    assert.equal((await api("/api/marks/displayed", {})).status, 400);
+    assert.equal((await api("/api/marks/displayed", { on: "yes" })).status, 400);
+    await api("/api/filter", { filter: "" });
+    await api("/api/marks/displayed", { on: true });
+    assert.equal((await state()).marks.length, 29);
+    await api("/api/marks/clear", {});
+  });
+
+  const find = async (filter, from, dir) => api(`/api/find?filter=${encodeURIComponent(filter)}&from=${from}&dir=${dir}`);
+  await check("find forward, backward, wrapping and without match", async () => {
+    await api("/api/filter", { filter: "" });
+    assert.deepEqual((await find("http.request", 0, 1)).json, { frame: 4, index: 3, wrapped: false });
+    assert.deepEqual((await find("http.request", 4, 1)).json, { frame: 21, index: 20, wrapped: false });
+    assert.deepEqual((await find("http.request", 21, 1)).json, { frame: 4, index: 3, wrapped: true });
+    assert.deepEqual((await find("http.request", 21, -1)).json, { frame: 4, index: 3, wrapped: false });
+    assert.deepEqual((await find("http.request", 4, -1)).json, { frame: 21, index: 20, wrapped: true });
+    assert.deepEqual((await find("http.request", 0, -1)).json, { frame: 21, index: 20, wrapped: false });
+    assert.deepEqual((await find("tcp.flags.syn == 1 && tcp.stream eq 1", 18, 1)).json, { frame: 19, index: 18, wrapped: false });
+    assert.deepEqual((await find("dns", 5, 1)).json, { frame: null, index: -1, wrapped: false });
+    assert.deepEqual((await find("dns", 5, -1)).json, { frame: null, index: -1, wrapped: false });
+  });
+  await check("find rejects invalid filters and parameters", async () => {
+    const bad = await find("http.foo ==", 0, 1);
+    assert.equal(bad.status, 400);
+    assert.match(bad.json.error, /invalid display filter/);
+    assert.match((await find("tcp port 80", 0, 1)).json.error, /tcp\.port == 80/);
+    assert.equal((await find("", 0, 1)).status, 400);
+    assert.equal((await find("http", 0, 2)).status, 400);
+    assert.equal((await find("http", 1.5, 1)).status, 400);
+    assert.equal((await find("http", -1, 1)).status, 400);
+    assert.equal((await api("/api/find?filter=http&dir=1")).status, 400);
+  });
+  await check("find searches only the displayed frames", async () => {
+    await api("/api/filter", { filter: "tcp.stream eq 1" });
+    assert.deepEqual((await find("http", 0, 1)).json, { frame: 21, index: 3, wrapped: false });
+    assert.deepEqual((await find("http", 25, 1)).json, { frame: 21, index: 3, wrapped: true });
+    assert.deepEqual((await find("http.request", 30, -1)).json, { frame: 21, index: 3, wrapped: false });
+    assert.deepEqual((await find("frame.number < 10", 0, 1)).json, { frame: null, index: -1, wrapped: false });
+    await api("/api/filter", { filter: "http || tcp.flags.syn == 1" });
+    assert.deepEqual((await find("tcp.stream eq 1", 12, 1)).json, { frame: 18, index: 4, wrapped: false });
+    await api("/api/filter", { filter: "" });
+  });
+
+  await check("reload re-reads the file and keeps marks and selection", async () => {
+    await api("/api/filter", { filter: "" });
+    await api("/api/marks/clear", {});
+    await api("/api/marks", { frames: [2, 9], note: "keep me" });
+    await api("/api/select", { frame: 9, rows: [[3, 8]] });
+    const before = await state();
+    assert.equal((await api("/api/reload", {})).status, 200);
+    const s = await state();
+    assert.ok(s.generation > before.generation);
+    assert.deepEqual(s.marks.map((m) => [m.frame, m.note]), [[2, "keep me"], [9, "keep me"]]);
+    assert.deepEqual([s.selected, s.selectedRows], [9, [[3, 8]]]);
+    await api("/api/marks/clear", {});
+  });
+  await check("rowsSince follows list rebuilds; a shrunk file resets the selected rows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-shrink-"));
+    const copy = join(dir, "copy.pcapng");
+    copyFileSync(fixture, copy);
+    try {
+      await api("/api/filter", { filter: "" });
+      assert.equal((await api("/api/open", { path: copy })).status, 200);
+      let s = await state();
+      assert.equal(s.rowsSince, s.generation);
+      await api("/api/select", { frame: 5, rows: [[2, 20]] });
+      await api("/api/reload", {});
+      s = await state();
+      assert.ok(s.rowsSince < s.generation, "a plain re-read keeps rowsSince");
+      assert.deepEqual(s.selectedRows, [[2, 20]]);
+      execFileSync("editcap", ["-r", fixture, copy, "1-10"]);
+      await api("/api/reload", {});
+      s = await state();
+      assert.equal(s.totalFrames, 10);
+      assert.equal(s.rowsSince, s.generation);
+      assert.deepEqual([s.selected, s.selectedRows], [5, [[4, 4]]]);
+      // A frame found in another view (Find) is refused like stale rows
+      assert.equal((await api("/api/select", { frame: 3, view: { file: "/elsewhere.pcapng", filter: "" } })).status, 409);
+      assert.equal((await api("/api/select", { frame: 3, view: { file: s.file, filter: "" } })).status, 200);
+    } finally {
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   await check("TLS key log setting", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-tls-test-"));
     try {
