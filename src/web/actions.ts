@@ -324,15 +324,6 @@ export async function applyFilter(text: string): Promise<FilterCheck> {
 
 // -------------------------------------------------------------------- marks
 
-export async function markFrames(frames: number[], note: string): Promise<void> {
-  try {
-    await post("api/marks", { frames, note });
-    if (app.conn !== "open") void refreshState();
-  } catch (e) {
-    toastError(e, "Marking failed");
-  }
-}
-
 export async function clearMarks(frames?: number[]): Promise<void> {
   try {
     await post("api/marks/clear", frames ? { frames } : {});

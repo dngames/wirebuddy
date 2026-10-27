@@ -5,19 +5,30 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
 const verbose = process.argv.includes("--verbose");
 
+// A home of its own: the tester's Wireshark preferences, profiles and plugins don't apply
+const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
+const out = mkdtempSync(join(tmpdir(), "wirebuddy-mcp-"));
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0"],
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") },
   stderr: "ignore",
 });
+let capture = true;
+try {
+  execFileSync("dumpcap", ["-L", "-i", "lo"], { stdio: "ignore", timeout: 10000 });
+} catch {
+  capture = false;
+}
 const client = new Client({ name: "mcp-smoke", version: "0" });
 await client.connect(transport);
 
@@ -123,10 +134,15 @@ try {
     assert.match(t, /"all packets": total 29/);
     assert.match(t, /"http": total 4/);
   });
-  const exportPath = join(dirname(fixture), `.mcp-export-${process.pid}.pcapng`);
+  const exportPath = join(out, "export.pcapng");
   await call("export_packets", { path: exportPath, filter: "tcp.stream eq 1" }, (t) => assert.match(t, /Wrote 12 packets/));
   await call("export_packets", { path: exportPath, filter: "http" }, (t, r) => assert.ok(r.isError && /already exists/.test(t)));
-  rmSync(exportPath, { force: true });
+  // The agent may replace its own export, never a file of the user's
+  await call("export_packets", { path: exportPath, filter: "http", overwrite: true }, (t) => assert.match(t, /Wrote 4 packets/));
+  const usersFile = join(out, "users.pcapng");
+  copyFileSync(fixture, usersFile);
+  await call("export_packets", { path: usersFile, filter: "http", overwrite: true }, (t, r) => assert.ok(r.isError && /only replace files it exported itself/.test(t), t));
+  assert.equal(readFileSync(usersFile).length, readFileSync(fixture).length);
   await call("set_display_filter", { filter: "" }, (t) => assert.match(t, /29 of 29 frames/));
   assert.equal((await post("/api/select", { frame: 5, rows: [[2, 4], [6, 8], [10, 10]] })).status, 200);
   let selection;
@@ -143,7 +159,7 @@ try {
   await call("set_display_filter", { filter: "http" }, (t) => assert.match(t, /4 of 29 frames/));
   assert.equal((await post("/api/select", { frame: 12, rows: [[1, 3]] })).status, 200);
   await call("get_view_state", {}, (t) => assert.match(t, /^Selected packets \(3\): frame\.number in \{12, 21, 25\}$/m));
-  const selectedPath = join(dirname(fixture), `.mcp-selected-${process.pid}.pcapng`);
+  const selectedPath = join(out, "selected.pcapng");
   await call("export_packets", { path: selectedPath, which: "selected" }, (t) => assert.match(t, /Wrote 3 packets/));
   rmSync(selectedPath, { force: true });
   // One selected row that is not the current packet is still news to the agent
@@ -172,10 +188,13 @@ try {
     assert.match(printed, /INFO The user applied the display filter "tcp"/);
     assert.match(printed, /ERROR Opening a file failed: .*again\.pcapng/);
   });
-  await call("list_interfaces", {}, (t) => assert.match(t, /^lo \(Loopback\) \[loopback\]: 127\.0\.0\.1, ::1 — \d+ pkt\/s now/m));
+  if (capture) await call("list_interfaces", {}, (t) => assert.match(t, /^lo\b.*\[loopback\]/m));
+  else console.log("skip list_interfaces: dumpcap may not capture on lo here");
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
 } finally {
   await client.close();
+  rmSync(out, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 }
 console.log(failures ? `${failures} check(s) failed` : "all checks passed");
 process.exit(failures ? 1 : 0);

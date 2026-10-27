@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -86,7 +87,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/marks/displayed": (_q, b) => (viewer.markDisplayed(flag(b.on, "on"), "user"), ok),
     "/api/wireshark": async (_q, b) => (await viewer.openInWireshark(b.frame ?? null), ok),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
-    "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? String(b.keylog) : null), ok),
+    "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
     "/api/capture/start": async (_q, b) => (await viewer.capture.start(b as CaptureRequest), ok),
     "/api/capture/stop": () => (viewer.capture.stop(), ok),
@@ -102,7 +103,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     const hosts = localHosts();
     if (!req.headers.host || !hosts.has(req.headers.host)) return false;
     const origin = req.headers.origin;
-    if (origin && origin !== "null") {
+    // "null" comes from sandboxed frames and file pages: never ours
+    if (origin) {
       try {
         if (!hosts.has(new URL(origin).host)) return false;
       } catch {
@@ -111,12 +113,16 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     }
     return true;
   };
-  const hasToken = (req: IncomingMessage, q: URLSearchParams): boolean =>
-    req.headers["x-wirebuddy-token"] === token || q.get("token") === token;
+  const secret = Buffer.from(token);
+  const tokenOk = (value: unknown): boolean => {
+    if (typeof value !== "string") return false;
+    const given = Buffer.from(value);
+    return given.length === secret.length && timingSafeEqual(given, secret);
+  };
 
   const send = (res: ServerResponse, status: number, body: unknown) => {
     const json = JSON.stringify(body);
-    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...SECURITY_HEADERS });
     res.end(json);
   };
 
@@ -127,10 +133,15 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       if (!url) return send(res, 400, { error: "bad request" });
 
       if (!url.pathname.startsWith("/api/")) return serveStatic(res, webRoot, url.pathname);
-      if (!hasToken(req, url.searchParams)) return send(res, 401, { error: "missing or wrong token" });
+      // A header, never the query string: URLs end up in logs, history and Referer headers
+      if (!tokenOk(req.headers["x-wirebuddy-token"])) return send(res, 401, { error: "missing or wrong token" });
 
       const handler = req.method === "GET" ? get[url.pathname] : req.method === "POST" ? post[url.pathname] : undefined;
       if (!handler) return send(res, 404, { error: `no route ${req.method} ${url.pathname}` });
+      // JSON only: other types are what cross-site forms can send without a preflight
+      if (req.method === "POST" && !/^application\/json\b/i.test(req.headers["content-type"] ?? "")) {
+        return send(res, 415, { error: "requests must be application/json" });
+      }
       const body = req.method === "POST" ? await readJson(req) : undefined;
       const result = await handler(url.searchParams, body);
       if (req.method === "POST") {
@@ -151,15 +162,19 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     }
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  // The page only listens; anything it sends is at most a tiny ping
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
   server.on("upgrade", (req, socket, head) => {
     const url = parseUrl(req.url);
-    if (!url || url.pathname !== "/ws" || !trusted(req) || !hasToken(req, url.searchParams)) {
+    // Browsers can't set headers on a WebSocket: the token comes in the URL here
+    if (!url || url.pathname !== "/ws" || !trusted(req) || !tokenOk(url.searchParams.get("token"))) {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
+      // A malformed frame or a too large message: drop this client, keep the server
+      ws.on("error", () => ws.terminate());
       ws.send(JSON.stringify({ type: "state", state: viewer.state } satisfies ServerEvent));
     });
   });
@@ -221,6 +236,13 @@ function rowRanges(value: unknown): Ranges | undefined {
   }
   return value as Ranges;
 }
+
+const MAX_BODY = 1024 * 1024;
+
+const SECURITY_HEADERS = { "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin" };
+
+/** The page loads only its own code; inline styles come from the UI's own style properties. */
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'";
 
 /** Longest a watcher's request waits for an event. */
 const MAX_EVENT_WAIT_MS = 60_000;
@@ -350,12 +372,11 @@ function readJson(req: IncomingMessage): Promise<any> {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > 1024 * 1024) {
-        reject(new HttpError(413, "request body too large"));
-        req.destroy();
-      } else chunks.push(c);
+      // Read to the end anyway, so the client gets the 413 instead of a reset connection
+      if (size <= MAX_BODY) chunks.push(c);
     });
     req.on("end", () => {
+      if (size > MAX_BODY) return reject(new HttpError(413, "request body too large"));
       const text = Buffer.concat(chunks).toString("utf8");
       try {
         resolveBody(text ? JSON.parse(text) : {});
@@ -375,7 +396,14 @@ function serveStatic(res: ServerResponse, root: string, pathname: string): void 
     res.end("not found");
     return;
   }
-  res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream", "cache-control": "no-cache" });
+  // The app page; other pages are only the media scripts' recording stage
+  const html = rel === "index.html";
+  res.writeHead(200, {
+    "content-type": MIME[extname(file)] ?? "application/octet-stream",
+    "cache-control": "no-cache",
+    ...SECURITY_HEADERS,
+    ...(html ? { "content-security-policy": CSP } : {}),
+  });
   res.end(readFileSync(file));
 }
 

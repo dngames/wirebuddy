@@ -35,7 +35,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "node build.mjs",
@@ -45,7 +45,8 @@
     "test": "node test/api-smoke.mjs && node test/mcp-smoke.mjs",
     "test:live": "node test/live-smoke.mjs",
     "demo": "node test/agent-demo.mjs",
-    "prepack": "npm run build"
+    "prepare": "npm run build",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

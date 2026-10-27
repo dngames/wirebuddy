@@ -90,7 +90,8 @@ export const commands = {
   markAllDisplayed: { label: "Mark All Displayed", shortcut: "Ctrl+Shift+M", enabled: () => hasFile() && hasRows(), run: () => void act.markDisplayed(true) },
   unmarkAllDisplayed: { label: "Unmark All Displayed", shortcut: "Ctrl+Alt+M", enabled: () => hasFile() && app.marks.size > 0, run: () => void act.markDisplayed(false) },
   unmarkAll: { label: "Unmark All", tip: "Also marks hidden by the display filter", enabled: () => app.marks.size > 0, run: () => void act.clearMarks() },
-  nextMark: { label: "Next Mark", shortcut: "Ctrl+Shift+N", enabled: () => app.marks.size > 0, run: () => act.gotoMark(1) },
+  // Chrome keeps Wireshark's Ctrl+Shift+N for incognito windows: not advertised, it works where the browser lets it through
+  nextMark: { label: "Next Mark", keys: ["Ctrl+Shift+N"], enabled: () => app.marks.size > 0, run: () => act.gotoMark(1) },
   previousMark: { label: "Previous Mark", shortcut: "Ctrl+Shift+B", enabled: () => app.marks.size > 0, run: () => act.gotoMark(-1) },
 
   // View
@@ -107,7 +108,8 @@ export const commands = {
   zoomOut: { label: "Zoom Out", tip: "Shrink the main window text", shortcut: "Ctrl+-", anywhere: true, owns: () => true, enabled: () => app.zoom > ZOOMS[0], run: () => zoomStep(-1) },
   zoomNormal: { label: "Normal Size", tip: "Return the main window text to its normal size", shortcut: "Ctrl+0", anywhere: true, enabled: () => app.zoom !== 1, run: () => act.setZoom(1) },
   resizeColumns: { label: "Resize Columns", tip: "Resize packet list columns to fit contents", shortcut: "Ctrl+Shift+R", enabled: hasRows, run: resizeColumns },
-  resetLayout: { label: "Reset Layout", tip: "Reset appearance layout to default size", shortcut: "Ctrl+Shift+W", run: resetLayout },
+  // No Ctrl+Shift+W as in Wireshark: browsers close the window with it
+  resetLayout: { label: "Reset Layout", tip: "Reset appearance layout to default size", run: resetLayout },
   expandSubtrees: { label: "Expand Subtrees", shortcut: "Shift+Right", enabled: () => !!selectedField()?.n?.length, run: () => expandSubtrees(true) },
   collapseSubtrees: { label: "Collapse Subtrees", shortcut: "Shift+Left", enabled: () => !!selectedField()?.n?.length, run: () => expandSubtrees(false) },
   // Cmd+Left/Right are Back/Forward in browsers on macOS

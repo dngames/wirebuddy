@@ -7,6 +7,7 @@ import type { HttpServer } from "./http.ts";
 import type { Viewer } from "./viewer.ts";
 import type { PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
 import { inRanges, type Ranges } from "../shared/ranges.ts";
+import { VERSION } from "../shared/version.ts";
 
 function instructions(watchCommand: string): string {
   return `wirebuddy is a lightweight Wireshark-style capture viewer running in the user's browser pane.
@@ -119,7 +120,12 @@ function printable(data: Buffer): string {
 }
 
 export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "viewers">, watchCommand: string): Promise<void> {
-  const server = new McpServer({ name: "wirebuddy", version: "0.1.0" }, { instructions: instructions(watchCommand) });
+  const server = new McpServer({ name: "wirebuddy", version: VERSION }, { instructions: instructions(watchCommand) });
+  // The UI names the agent after its client
+  server.server.oninitialized = () => {
+    const client = server.server.getClientVersion()?.name ?? "";
+    viewer.attachAgent(/claude/i.test(client) ? "Claude" : "Agent");
+  };
   const url = () => ui.url;
 
   // Once when the viewer is missing, then every few minutes until one connects
@@ -406,7 +412,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "mark_frames",
     {
-      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip and in the Marks menu).",
+      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip and under Go → Marked Packets).",
       inputSchema: {
         frames: z.array(z.number().int().min(1)).min(1).max(5000),
         note: z.string().max(200).describe("Why these frames matter, e.g. \"DNS NXDOMAIN\""),
@@ -428,7 +434,10 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       inputSchema: { frames: z.array(z.number().int().min(1)).optional() },
     },
     tool(({ frames }) => {
+      const before = viewer.state.marks.length;
       viewer.clearMarks(frames);
+      const removed = before - viewer.state.marks.length;
+      if (removed) viewer.notice(frames ? `Unmarked ${removed} frame${removed === 1 ? "" : "s"}` : "Cleared all marks");
       return `${viewer.state.marks.length} marks left`;
     }),
   );
@@ -540,7 +549,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         filter: z.string().optional().describe("Export the frames matching this display filter"),
         which: z.enum(["displayed", "marked", "selected", "range", "all"]).default("displayed").describe("Used when no filter is given; \"selected\" is the packets the user selected (Ctrl/Shift+click), else the selected one"),
         range: z.string().optional().describe("For which=range, e.g. \"1-10,25\""),
-        overwrite: z.boolean().default(false),
+        overwrite: z.boolean().default(false).describe("Replace a file this session exported before; other existing files are never replaced"),
       },
     },
     tool(async ({ path, filter, which, range, overwrite }) => {

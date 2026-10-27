@@ -3,7 +3,8 @@
 Scripts that regenerate `docs/demo.mp4`, `docs/demo.gif` and `docs/screenshot.png` from a real
 WireBuddy server, real MCP calls and a real loopback capture. Not part of the build or the tests.
 
-You need Google Chrome (or Chromium) and `ffmpeg`. Build first (`npm run build`).
+You need Node.js ≥ 22, Google Chrome (or Chromium; `screenshot.mjs` takes its path from
+`CHROME`) and `ffmpeg`. Build first (`npm run build`).
 
 ```bash
 # 1. a headless Chrome to drive

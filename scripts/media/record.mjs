@@ -1,13 +1,20 @@
 // Records the WireBuddy promo video: scripted chat + real MCP calls + real UI, captured with Chrome's screencast.
 // Usage: CDP_PORT=<port of a running headless chrome> node record.mjs <wirebuddy-root> <outdir>
 import { spawn } from "node:child_process";
-import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const [root, outdir] = process.argv.slice(2);
+if (!process.env.CDP_PORT || !root || !outdir) {
+  console.error("Usage: CDP_PORT=<port of a running headless chrome> node record.mjs <wirebuddy-root> <outdir>");
+  process.exit(2);
+}
+const TOKEN = randomBytes(16).toString("hex");
 const require = createRequire(join(root, "package.json"));
 const { Client } = await import(require.resolve("@modelcontextprotocol/sdk/client/index.js"));
 const { StdioClientTransport } = await import(require.resolve("@modelcontextprotocol/sdk/client/stdio.js"));
@@ -25,9 +32,9 @@ mkdirSync(join(outdir, "home"), { recursive: true });
 const mcp = new Client({ name: "promo", version: "0" });
 await mcp.connect(new StdioClientTransport({
   command: process.execPath,
-  args: [join(root, "dist/server/main.js"), "--mcp", "--port", String(PORT), "--token", "video", "--capture-dir", "/tmp/wirebuddy"],
+  args: [join(root, "dist/server/main.js"), "--mcp", "--port", String(PORT), "--capture-dir", mkdtempSync(join(tmpdir(), "wb-video-"))],
   // Empty home: no recent-file history from the real Wireshark config can appear on screen
-  env: { ...process.env, HOME: join(outdir, "home") },
+  env: { ...process.env, HOME: join(outdir, "home"), WIREBUDDY_TOKEN: TOKEN },
   stderr: "ignore",
 }));
 const tool = async (name, args = {}) => {
@@ -108,7 +115,7 @@ await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-sch
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/stage.html` });
 await sleep(1200);
 await stage(`card("title", true)`);
-await stage(`load("/?token=video")`);
+await stage(`load("/?token=${TOKEN}")`);
 await sleep(1500);
 await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
 
@@ -149,6 +156,11 @@ await click(byText("[role=tree] *", "HTTP/1.0 404"), 2);
 await sleep(800);
 await click(byText("[role=tree] *", "Status Code: 404"));
 await sleep(2200);
+await stage(`caption("Follow streams like in Wireshark: the list shows just that conversation")`);
+await key("T", "KeyT", 84, { modifiers: 1 | 2 | 8 });
+await sleep(3200);
+await click(byText("button", "Back"));
+await sleep(900);
 await stage(`caption("Capture-filter syntax by mistake? It suggests the display filter")`);
 await click(byLabel("Display filter"));
 await selectAll();
@@ -168,25 +180,41 @@ await sleep(600);
 // Recording pauses while the bar opens, so no frame shows another interface's addresses
 await send("Page.stopScreencast");
 if (frames.length) frames[frames.length - 1].pausedAfter = true;
-await click(byText("button", "Options"));
+// The bar remembers being open in the browser profile: open it only when it is closed
+const barShown = () => js(`!!${APP}.contentDocument.querySelector(".capturebar")?.offsetParent`);
+if (!(await barShown())) await click(byLabel("Options…"));
 await sleep(500);
 const picked = await js(`(() => {
-  const s = ${APP}.contentDocument.querySelector("select");
+  const s = ${APP}.contentDocument.querySelector("select.cb-iface");
   s.value = "lo";
   s.dispatchEvent(new Event("change", { bubbles: true }));
   return s.value;
 })()`);
 if (picked !== "lo") throw new Error("could not select lo");
 await sleep(500);
-const barOpen = await js(`!!${APP}.contentDocument.querySelector('[aria-label="Capture filter"]')?.offsetParent`);
-if (!barOpen) throw new Error("capture bar did not open");
+if (!(await barShown())) throw new Error("capture bar did not open");
 await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
 await sleep(400);
-await click(byLabel("Capture filter"));
-await type("icmp", 90);
+await click(`(doc) => doc.querySelector(".capturebar .cb-filter")`);
+// Options persist in the browser profile: replace what an earlier run left
+await selectAll();
+// Pings only: other loopback ICMP (resolver port-unreachables) has no place in the video
+await type("icmp and icmp[0] != 3", 70);
 await sleep(900);
 const ping = spawn("ping", ["-i", "0.1", "-c", "140", "127.0.0.1"], { stdio: "ignore" });
-await click(byLabel("Start capturing with these options"));
+// The capture filter is checked as it is typed: wait for the verdict
+const ready = await js(`new Promise((done) => {
+  const t0 = Date.now();
+  const tick = () => {
+    const b = ${APP}.contentDocument.querySelector(".cb-start");
+    if (b && !b.disabled) return done("ready");
+    if (Date.now() - t0 > 6000) return done(b ? b.title : "missing");
+    setTimeout(tick, 100);
+  };
+  tick();
+})`);
+if (ready !== "ready") throw new Error(`capture can't start: ${ready}`);
+await click(`(doc) => doc.querySelector(".cb-start")`);
 await sleep(3500);
 await stage(`user("Anything unusual in the live traffic?")`);
 await tool("get_view_state", {});

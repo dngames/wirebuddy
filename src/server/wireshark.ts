@@ -91,7 +91,7 @@ function openLog(): number | null {
   // A file, not a pipe: Wireshark keeps logging after WireBuddy is gone
   const log = join(tmpdir(), `wirebuddy-wireshark-${randomBytes(6).toString("hex")}.log`);
   try {
-    const fd = openSync(log, "w+", 0o600);
+    const fd = openSync(log, "wx+", 0o600);
     // Gone from the directory at once; Wireshark and this process keep their handles
     rmSync(log, { force: true });
     return fd;

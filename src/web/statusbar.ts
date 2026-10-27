@@ -3,7 +3,7 @@
 import type { ExpertItem, ExpertSeverity, ViewState } from "../shared/api.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
-import { app, bus } from "./app.ts";
+import { agentName, app, bus } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
 import { maxItemSeverity, openExpertDialog } from "./dialogs/expert.ts";
 import { openTlsDialog } from "./dialogs/tls.ts";
@@ -27,7 +27,6 @@ export function createStatusBar(): HTMLElement {
     {
       class: "sb-seg sb-agent",
       hidden: true,
-      title: "Problems Claude gets with its next WireBuddy call, or at once while it watches the viewer. If nothing happens, ask Claude in the chat.",
     },
   );
   let fieldText = "";
@@ -99,7 +98,7 @@ export function createStatusBar(): HTMLElement {
       );
       const agent = s.marks.filter((m) => m.by === "agent").length;
       markSeg.hidden = false;
-      setText(markSeg, `Marked: ${fmtInt(s.marks.length)}${agent ? ` (${agent} by Claude)` : ""}`);
+      setText(markSeg, `Marked: ${fmtInt(s.marks.length)}${agent ? ` (${agent} by ${agentName()})` : ""}`);
     } else {
       pktSeg.hidden = !s;
       setText(pktSeg, "No Packets");
@@ -108,7 +107,9 @@ export function createStatusBar(): HTMLElement {
 
     const agent = s?.agent;
     agentSeg.hidden = !agent?.attached || !agent.pending;
-    setText(agentSeg, agent?.pending ? `⚠ ${fmtInt(agent.pending)} problem${agent.pending === 1 ? "" : "s"} sent to Claude` : "");
+    const who = agentName();
+    setText(agentSeg, agent?.pending ? `⚠ ${fmtInt(agent.pending)} problem${agent.pending === 1 ? "" : "s"} sent to ${who}` : "");
+    setTitle(agentSeg, `Problems ${who} gets with its next WireBuddy call, or at once while it watches the viewer. If nothing happens, ask ${who} in the chat.`);
 
     if (s && s.capture.status !== "idle") {
       const st = captureStatusText(s);

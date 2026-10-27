@@ -12,7 +12,7 @@ import type { PacketRow, RowsResponse, ViewState } from "../shared/api.ts";
 import { countRanges, inRanges, mergeRanges, toggleInRanges, type Ranges } from "../shared/ranges.ts";
 import { get, HttpError } from "./api.ts";
 import * as act from "./actions.ts";
-import { app, bus, captureActive, hooks } from "./app.ts";
+import { agentName, app, bus, captureActive, hooks } from "./app.ts";
 import { promptDialog } from "./dialog.ts";
 import { openExportDialog } from "./dialogs/export.ts";
 import { followItems } from "./dialogs/follow.ts";
@@ -395,7 +395,7 @@ function makeRow(): RowEl {
     el.appendChild(cell);
     return cell;
   });
-  el.prepend(h("span", { class: "pl-badge", title: "Marked by Claude" }, "✦"));
+  el.prepend(h("span", { class: "pl-badge" }, "✦"));
   layer.appendChild(el);
   return { el, cells };
 }
@@ -433,7 +433,7 @@ function fillRow(r: RowEl, i: number, row: PacketRow | undefined, now: number): 
     const useColors = app.colorize && !sel && mark?.by !== "user";
     r.el.style.backgroundColor = useColors && row.bg ? `#${row.bg}` : "";
     r.el.style.color = useColors && row.fg ? `#${row.fg}` : "";
-    const title = mark ? `${mark.by === "agent" ? "Marked by Claude" : "Marked"}${mark.note ? `: ${mark.note}` : ""}` : "";
+    const title = mark ? `${mark.by === "agent" ? `Marked by ${agentName()}` : "Marked"}${mark.note ? `: ${mark.note}` : ""}` : "";
     if (r.el.title !== title) r.el.title = title;
   }
   if (r.el.className !== cls) r.el.className = cls;

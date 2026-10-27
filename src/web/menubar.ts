@@ -3,7 +3,7 @@
 import type { RecentFiles } from "../shared/api.ts";
 import { get } from "./api.ts";
 import * as act from "./actions.ts";
-import { app, bus, hooks } from "./app.ts";
+import { agentName, app, bus, hooks } from "./app.ts";
 import { item, type CommandId } from "./commands.ts";
 import { fieldCopyItems, fieldFilterItems } from "./details.ts";
 import { followItems } from "./dialogs/follow.ts";
@@ -56,7 +56,7 @@ function markItems(): MenuItem[] {
   const out: MenuItem[] = marks.slice(0, 300).map((m) => ({
     label: `No. ${m.frame}`,
     detail: m.note || undefined,
-    shortcut: m.by === "agent" ? "Claude" : "",
+    shortcut: m.by === "agent" ? agentName() : "",
     checked: m.frame === app.selFrame,
     title: m.note || undefined,
     action: () => act.jumpToFrame(m.frame),

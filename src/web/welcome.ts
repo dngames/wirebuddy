@@ -165,7 +165,7 @@ export function createWelcome(): HTMLElement {
     h(
       "div",
       { class: "wl-inner" },
-      h("div", { class: "wl-head" }, icon("wireshark", "icon wl-logo"), h("div", null, h("h1", null, `Welcome to ${APP_NAME}`), h("div", { class: "wl-sub" }, "Open a capture file or start a live capture."))),
+      h("div", { class: "wl-head" }, icon("logo", "icon wl-logo"), h("div", null, h("h1", null, `Welcome to ${APP_NAME}`), h("div", { class: "wl-sub" }, "Open a capture file or start a live capture."))),
       errBox,
       h("section", { class: "wl-section" }, h("h2", null, "Open"), h("div", { class: "wl-row" }, openBtn), recentList),
       h(

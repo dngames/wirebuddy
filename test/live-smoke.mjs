@@ -8,12 +8,15 @@ import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const token = "live-test-token";
+const token = "live-smoke-test-token";
 const captureDir = mkdtempSync(join(tmpdir(), "wirebuddy-live-"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A home of its own: the tester's Wireshark preferences, profiles and plugins don't apply
+const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
 const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token, "--capture-dir", captureDir], {
   stdio: ["ignore", "pipe", "inherit"],
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") },
 });
 const base = await new Promise((resolve, reject) => {
   server.stdout.setEncoding("utf8");
@@ -99,7 +102,8 @@ try {
     assert.ok(Math.abs(end.displayedFrames * 2 - end.totalFrames) <= 2, `requests should be half: ${end.displayedFrames}/${end.totalFrames}`);
     assert.ok(Math.abs(end.capture.packets - end.totalFrames) <= 2, `dumpcap count ${end.capture.packets} vs frames ${end.totalFrames}`);
     const rows = await api(`/api/rows?gen=${end.generation}&start=0&count=3`);
-    assert.ok(rows.rows.every((r) => /Echo \(ping\) request/.test(r.c[6])), JSON.stringify(rows.rows[0]));
+    const info = end.columns.indexOf("Info");
+    assert.ok(rows.rows.every((r) => /Echo \(ping\) request/.test(r.c[info])), JSON.stringify(rows.rows[0]));
     await api("/api/filter", { filter: "" });
   });
 
