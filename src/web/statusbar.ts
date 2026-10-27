@@ -22,6 +22,14 @@ export function createStatusBar(): HTMLElement {
   const markSeg = h("span", { class: "sb-seg sb-marks" });
   const capSeg = h("span", { class: "sb-seg sb-cap" });
   const connSeg = h("button", { class: "sb-seg sb-conn", onclick: () => reconnectNow() });
+  const agentSeg = h(
+    "span",
+    {
+      class: "sb-seg sb-agent",
+      hidden: true,
+      title: "Problems Claude gets with its next WireBuddy call, or at once while it watches the viewer. If nothing happens, ask Claude in the chat.",
+    },
+  );
   let fieldText = "";
 
   // Capture-wide expert severity: only for finished captures of moderate size.
@@ -98,6 +106,10 @@ export function createStatusBar(): HTMLElement {
       markSeg.hidden = true;
     }
 
+    const agent = s?.agent;
+    agentSeg.hidden = !agent?.attached || !agent.pending;
+    setText(agentSeg, agent?.pending ? `⚠ ${fmtInt(agent.pending)} problem${agent.pending === 1 ? "" : "s"} sent to Claude` : "");
+
     if (s && s.capture.status !== "idle") {
       const st = captureStatusText(s);
       capSeg.hidden = false;
@@ -135,5 +147,5 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   update();
-  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), tlsSeg, pktSeg, markSeg, capSeg, connSeg);
+  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), agentSeg, tlsSeg, pktSeg, markSeg, capSeg, connSeg);
 }

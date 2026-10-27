@@ -97,6 +97,7 @@ export function applyState(s: ViewState): void {
 
   if (prev && (s.file !== prev.file || fresh)) {
     // Frame numbers of the new file are unrelated to the old one.
+    cancelPendingSelect();
     resetFrame();
     if (app.frame) {
       app.frame = null;
@@ -195,7 +196,8 @@ export function selectRow(index: number, frame: number, rows?: Ranges): void {
   app.selIndex = index;
   app.selRows = sel;
   bus.emit("selection");
-  postSelect(frame, 60, rows);
+  // A row clicked in the list shown now: refused if that list is gone by then
+  postSelect(frame, 60, rows, true);
   loadFrame(frame);
 }
 
@@ -239,6 +241,13 @@ function resetFrame(): void {
   frameSeq++;
   loadingNum = null;
   lastFailedNum = null;
+}
+
+/** Shows the selected packet's details again, e.g. after its file was re-read. */
+export function reloadFrame(): void {
+  const num = app.selFrame;
+  resetFrame();
+  if (num !== null) frameTimer = window.setTimeout(() => void fetchFrame(num), 0);
 }
 
 /** Loads the details of `num` (debounced) unless shown or already loading. */
@@ -452,6 +461,8 @@ export async function setTlsKeylog(keylog: string | null): Promise<string | null
   try {
     await post("api/tls", { keylog });
     if (app.conn !== "open") void refreshState();
+    // Decryption changes the dissection of the shown packet
+    reloadFrame();
     return null;
   } catch (e) {
     return errorText(e);
@@ -470,7 +481,10 @@ export async function findPacket(filter: string, dir: 1 | -1): Promise<FindResul
   // A live capture may have found a packet the pushed state doesn't count yet
   for (let k = 0; k < 3 && r.frame !== null && r.frame > (app.state?.totalFrames ?? 0); k++) await refreshState();
   if (view() !== before) throw new Error("the packet list changed, find again");
-  if (r.frame !== null) jumpToFrame(r.frame, true);
+  if (r.frame !== null) {
+    jumpToFrame(r.frame, true);
+    if (!(await flushSelection())) throw new Error("the packet list changed, find again");
+  }
   return r;
 }
 
@@ -479,6 +493,7 @@ export async function reloadFile(): Promise<void> {
   try {
     await post("api/reload", {});
     if (app.conn !== "open") void refreshState();
+    reloadFrame();
   } catch (e) {
     toastError(e, "Reloading failed");
   }

@@ -7,7 +7,7 @@ import { commands, isEnabled, tooltip, type Command, type CommandId } from "./co
 import { icon, type IconName } from "./icons.ts";
 import { h } from "./util.ts";
 
-/** Wireshark's main toolbar in its order; "|" separates the groups. */
+/** Wireshark's main toolbar (ui/qt/wireshark_main_window.ui) in its order; "|" separates the groups. */
 const LAYOUT: ([CommandId, IconName] | "|")[] = [
   ["startCapture", "fin"],
   ["stopCapture", "stop"],
@@ -20,18 +20,20 @@ const LAYOUT: ([CommandId, IconName] | "|")[] = [
   ["reload", "refresh"],
   "|",
   ["find", "find"],
-  ["back", "back"],
-  ["forward", "forward"],
+  ["previousPacket", "previous"],
+  ["nextPacket", "next"],
   ["gotoPacket", "goto"],
   ["firstPacket", "first"],
   ["lastPacket", "last"],
   ["autoScroll", "autoscroll"],
+  "|",
   ["colorize", "colorize"],
   "|",
   ["zoomIn", "zoomIn"],
   ["zoomOut", "zoomOut"],
   ["zoomNormal", "zoomNormal"],
   ["resizeColumns", "resize"],
+  ["resetLayout", "layout"],
 ];
 
 function iconButton(c: Command, ic: IconName): HTMLButtonElement {

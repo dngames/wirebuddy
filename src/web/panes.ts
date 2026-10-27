@@ -6,6 +6,13 @@ import { clamp, h, load, save } from "./util.ts";
 const MIN = 44;
 const DEFAULT: [number, number] = [0.48, 0.3];
 
+let reset = (): void => {};
+
+/** View > Reset Layout: the default pane sizes. */
+export function resetLayout(): void {
+  reset();
+}
+
 export function createPanes(list: HTMLElement, details: HTMLElement, bytes: HTMLElement): HTMLElement {
   const p1 = h("div", { class: "pane pane-list" }, list);
   const p2 = h("div", { class: "pane pane-details" }, details);
@@ -74,13 +81,12 @@ export function createPanes(list: HTMLElement, details: HTMLElement, bytes: HTML
 
   s1.addEventListener("pointerdown", drag(0));
   s2.addEventListener("pointerdown", drag(1));
-  for (const s of [s1, s2]) {
-    s.addEventListener("dblclick", () => {
-      fr = DEFAULT;
-      save("panes", fr);
-      layout();
-    });
-  }
+  reset = () => {
+    fr = DEFAULT;
+    save("panes", fr);
+    layout();
+  };
+  for (const s of [s1, s2]) s.addEventListener("dblclick", reset);
   new ResizeObserver(layout).observe(root);
   return root;
 }

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
+import { WebSocket } from "ws";
+import { spawn } from "node:child_process";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -48,8 +50,26 @@ try {
       headers: { "X-WireBuddy-Token": ui.searchParams.get("token"), "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-  await call("get_view_state", {}, (t) => assert.match(t, /No capture is open/));
-  await call("open_capture", { path: fixture }, (t) => assert.match(t, /29 frames/));
+  // No viewer is connected yet: the first result reminds the agent to open one, the next doesn't
+  const reminder = /No WireBuddy viewer is open.*open http:\/\/127\.0\.0\.1:\d+\/\?token=[0-9a-f]{32} in the browser pane/;
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /No capture is open/);
+    assert.match(t, reminder);
+  });
+  await call("open_capture", { path: fixture }, (t) => {
+    assert.match(t, /29 frames/);
+    assert.doesNotMatch(t, reminder);
+  });
+  const ws = new WebSocket(`ws://${ui.host}/ws?token=${ui.searchParams.get("token")}`);
+  await new Promise((resolve, reject) => {
+    ws.once("open", resolve);
+    ws.once("error", reject);
+  });
+  await call("get_view_state", {}, (t) => assert.doesNotMatch(t, reminder));
+  ws.close();
+  await new Promise((resolve) => ws.once("close", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await call("get_view_state", {}, (t) => assert.match(t, reminder, "a viewer that went away is missed again"));
   await call("capture_summary", {}, (t) => {
     assert.match(t, /Protocol hierarchy/);
     assert.match(t, /http: 4 frames/);
@@ -132,6 +152,26 @@ try {
   await call("goto_frame", { frame: 4 }, (t) => assert.match(t, /row 1 of 4/));
   await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /Selected packets/));
   await call("clear_marks", {}, (t) => assert.match(t, /0 marks left/));
+  // Problems the user runs into come back with the next tool result, and wake a watcher
+  const command = /`"([^"]+)" "([^"]+)" --watch "([^"]+)"`/.exec(client.getInstructions() ?? "");
+  assert.ok(command, "the instructions name the watch command");
+  assert.equal((await post("/api/open", { path: "/nonexistent/gone.pcapng" })).status, 400);
+  await call("get_view_state", {}, (t) => assert.match(t, /WireBuddy events since your last call[\s\S]*ERROR Opening a file failed: .*gone\.pcapng/));
+  await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /WireBuddy events/));
+  const watcher = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "inherit"] });
+  let printed = "";
+  watcher.stdout.on("data", (d) => (printed += d));
+  const exited = new Promise((resolve) => watcher.on("exit", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await post("/api/filter", { filter: "tcp" });
+  await post("/api/open", { path: "/nonexistent/again.pcapng" });
+  const code = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve("timeout"), 10000))]);
+  if (code === "timeout") watcher.kill();
+  await call("set_display_filter", { filter: "" }, () => {
+    assert.equal(code, 0, `watcher exit ${code}`);
+    assert.match(printed, /INFO The user applied the display filter "tcp"/);
+    assert.match(printed, /ERROR Opening a file failed: .*again\.pcapng/);
+  });
   await call("list_interfaces", {}, (t) => assert.match(t, /^lo \(Loopback\) \[loopback\]: 127\.0\.0\.1, ::1 — \d+ pkt\/s now/m));
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
 } finally {

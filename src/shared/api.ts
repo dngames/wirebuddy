@@ -47,6 +47,9 @@
  * | POST   | /api/marks/displayed          | { on: boolean }                      | { ok: true }           |
  * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
+ * | GET    | /api/events                   | ?after=<seq>&wait=<ms>&problems=1    | { events, last, taken } |
+ * | POST   | /api/events                   | { level, text, details? } (from the page) | { ok: true }      |
+ * | POST   | /api/events/take              |                                      | { events }             |
  * | GET    | /api/capture/interfaces       |                                      | CaptureInterface[]     |
  * | GET    | /api/capture/check            | ?iface=&filter=                      | FilterCheck            |
  * | GET    | /api/capture/activity         |                                      | InterfaceActivity      |
@@ -117,6 +120,11 @@ export interface ViewState {
   capture: CaptureState;
   /** Last action the agent took in the UI, shown as a dismissable banner. */
   agentNotice: AgentNotice | null;
+  /**
+   * An MCP agent is attached: problems go to it instead of the page, which
+   * only shows how many are waiting (`pending`).
+   */
+  agent: { attached: boolean; pending: number };
   /** Whether a `wireshark` executable was found for "Open in Wireshark". */
   wiresharkAvailable: boolean;
   /**
@@ -367,6 +375,19 @@ export interface ExportRequest {
   range?: string;
   /** Replace an existing file. */
   overwrite?: boolean;
+}
+
+/** Something that happened in the viewer, for the agent: a problem or what the user did. */
+export interface ViewerEvent {
+  seq: number;
+  /** ISO time. */
+  time: string;
+  /** INFO: what the user did; WARNING and ERROR: problems. */
+  level: "INFO" | "WARNING" | "ERROR";
+  text: string;
+  details?: Record<string, unknown>;
+  /** It happened this many times in a row. */
+  repeated?: number;
 }
 
 /** Find Packet: the next displayed frame matching a filter, wrapping around the end once. */

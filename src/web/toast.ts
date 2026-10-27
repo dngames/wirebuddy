@@ -1,6 +1,10 @@
-/** Transient notifications in the lower right corner. */
+/**
+ * Transient notifications in the lower right corner. With an agent attached,
+ * errors go to the agent instead, which helps in the chat.
+ */
 
-import { errorText } from "./api.ts";
+import { errorText, HttpError, post } from "./api.ts";
+import { app } from "./app.ts";
 import { h } from "./util.ts";
 
 let host: HTMLElement | null = null;
@@ -16,7 +20,22 @@ export interface ToastAction {
   run: () => void;
 }
 
+function agentTakesErrors(): boolean {
+  return !!app.state?.agent.attached;
+}
+
+/** Tells the agent about a problem only the page knows about. */
+export function reportProblem(text: string, details?: Record<string, unknown>): void {
+  post("api/events", { level: "ERROR", text, details }).catch(() => {
+    // the server is gone; the status bar says so
+  });
+}
+
 export function toast(level: "info" | "error", text: string, action?: ToastAction): void {
+  if (level === "error" && !action && agentTakesErrors()) {
+    reportProblem(text);
+    return;
+  }
   if (!host) {
     console.log(`[${level}] ${text}`);
     return;
@@ -51,5 +70,7 @@ export function toast(level: "info" | "error", text: string, action?: ToastActio
 }
 
 export function toastError(e: unknown, prefix?: string): void {
+  // The server already told the agent about a request it refused
+  if (agentTakesErrors() && e instanceof HttpError && e.status >= 400) return;
   toast("error", prefix ? `${prefix}: ${errorText(e)}` : errorText(e));
 }

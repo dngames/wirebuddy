@@ -6,7 +6,7 @@ import { bus, hooks } from "./app.ts";
 import { fieldInfoText, fieldName, fieldValue, frameInfo, nodeLabel, sevClass, srcIndex, walk } from "./frame.ts";
 import { followItems } from "./dialogs/follow.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
-import { bytesToHex, copyText, h, isMod, keyLabel } from "./util.ts";
+import { bytesToHex, copyText, h, IS_MAC, isMod, keyLabel } from "./util.ts";
 import { VList } from "./vlist.ts";
 
 const RH = 20;
@@ -340,7 +340,8 @@ export function createDetailsPane(opts: { onSelect: (n: TreeNode | null) => void
   vl.el.setAttribute("role", "tree");
   vl.el.setAttribute("aria-label", "Packet details");
   vl.el.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
+    // Control+click is the context click on macOS
+    if (e.button !== 0 || (IS_MAC && e.ctrlKey)) return;
     const n = nodeFromEvent(e);
     if (!n) return;
     if ((e.target as HTMLElement).closest(".dt-tog") && hasKids(n)) {
@@ -363,11 +364,24 @@ export function createDetailsPane(opts: { onSelect: (n: TreeNode | null) => void
   });
   vl.el.addEventListener("contextmenu", (e) => {
     e.preventDefault();
-    const n = nodeFromEvent(e);
+    const hit = nodeFromEvent(e);
+    // The Menu key or Shift+F10: the selected item's menu, under its row
+    const n = hit ?? sel;
     if (!n) return;
     if (n !== sel) selectNode(n, false);
     vl.el.focus();
-    nodeMenu(n, e.clientX, e.clientY);
+    let x = e.clientX;
+    let y = e.clientY;
+    if (!hit) {
+      let rowEl: HTMLElement | null = null;
+      vl.forEachRow((el, i) => {
+        if (vis[i] === n) rowEl = el;
+      });
+      const r = (rowEl ?? vl.el).getBoundingClientRect();
+      x = r.left + 40;
+      y = r.bottom;
+    }
+    nodeMenu(n, x, y);
   });
   vl.el.addEventListener("keydown", onKey);
   return vl.el;

@@ -17,7 +17,7 @@ import { createMenuBar, menuBarKey } from "./menubar.ts";
 import { createPacketList, focusPacketList } from "./packetlist.ts";
 import { createPanes } from "./panes.ts";
 import { createStatusBar } from "./statusbar.ts";
-import { createToastHost, toast } from "./toast.ts";
+import { createToastHost, reportProblem, toast } from "./toast.ts";
 import { createToolbar } from "./toolbar.ts";
 import { baseName, h, isTextInput } from "./util.ts";
 import { createWelcome } from "./welcome.ts";
@@ -95,9 +95,14 @@ function init(): void {
 
   let lastLoadError: string | null = null;
   bus.on("state", (s) => {
-    if (s.loadError && s.loadError !== lastLoadError) toast("error", `Loading failed: ${s.loadError}`);
+    // With an agent attached the server has told it already
+    if (s.loadError && s.loadError !== lastLoadError && !s.agent.attached) toast("error", `Loading failed: ${s.loadError}`);
     lastLoadError = s.loadError;
   });
+
+  // Bugs in the page reach the agent too
+  window.addEventListener("error", (e) => reportProblem(`Page error: ${e.message}`, { at: `${e.filename}:${e.lineno}:${e.colno}` }));
+  window.addEventListener("unhandledrejection", (e) => reportProblem(`Page error: ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
 
   document.addEventListener("keydown", onGlobalKey);
   window.setInterval(() => bus.emit("tick"), 1000);

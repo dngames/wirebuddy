@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { Viewer } from "./viewer.ts";
 import { startHttp } from "./http.ts";
 import { startMcp } from "./mcp.ts";
+import { instanceFile, removeInstance, watch, writeInstance } from "./watch.ts";
 
 const USAGE = `Usage: wirebuddy [options] [capture-file]
 
@@ -16,6 +17,7 @@ const USAGE = `Usage: wirebuddy [options] [capture-file]
   --capture-dir <d>   where live captures are written (default ~/.local/share/wirebuddy/captures)
   --profile <name>    Wireshark configuration profile for dissection (also used by Open in Wireshark)
   --tls-keylog <file> decrypt TLS with this key log file (SSLKEYLOGFILE format)
+  --watch <file>      wait for the next problem in the viewer that wrote this instance file, print it, exit
   -h, --help          show this help`;
 
 function which(name: string): string | null {
@@ -41,6 +43,7 @@ const { values, positionals } = parseArgs({
     "capture-dir": { type: "string", default: process.env.WIREBUDDY_CAPTURE_DIR },
     profile: { type: "string", default: process.env.WIREBUDDY_PROFILE },
     "tls-keylog": { type: "string" },
+    watch: { type: "string" },
     help: { type: "boolean", short: "h", default: false },
   },
 });
@@ -49,6 +52,8 @@ if (values.help) {
   console.log(USAGE);
   process.exit(0);
 }
+
+if (values.watch) process.exit(await watch(values.watch));
 
 // In MCP mode stdout carries the protocol, so everything human goes to stderr
 const log = (msg: string) => (values.mcp ? process.stderr : process.stdout).write(`wirebuddy: ${msg}\n`);
@@ -81,6 +86,8 @@ const http = await startHttp(viewer, {
   webRoot,
 });
 log(`UI at ${http.url}`);
+const instance = instanceFile();
+writeInstance(instance, http.url);
 
 if (positionals[0]) {
   viewer.open(resolve(positionals[0])).catch((err) => log(`could not open ${positionals[0]}: ${(err as Error).message}`));
@@ -89,13 +96,15 @@ if (positionals[0]) {
 const shutdown = () => {
   viewer.shutdown();
   http.close();
+  removeInstance(instance);
   process.exit(0);
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 if (values.mcp) {
-  await startMcp(viewer, () => http.url);
+  viewer.attachAgent();
+  await startMcp(viewer, http, `"${process.execPath}" "${fileURLToPath(import.meta.url)}" --watch "${instance}"`);
   // The MCP client closing stdin ends the session
   process.stdin.on("close", shutdown);
 }

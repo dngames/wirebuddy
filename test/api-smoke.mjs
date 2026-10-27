@@ -521,6 +521,38 @@ try {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  await check("events: problems and user activity for the agent, long-poll for watchers", async () => {
+    const start = (await api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json;
+    assert.equal((await state()).agent.attached, false);
+    assert.equal((await api("/api/open", { path: "/nonexistent/missing.pcapng" })).status, 400);
+    await api("/api/filter", { filter: "tcp.port ==== 1" });
+    await api("/api/filter", { filter: "http" });
+    await api("/api/filter", { filter: "" });
+    assert.equal((await api("/api/events", { level: "ERROR", text: "Page error: boom", details: { at: "app.js:1:2" } })).status, 200);
+    const { events, last } = (await api(`/api/events?after=${start.last}`)).json;
+    const texts = events.map((e) => `${e.level} ${e.text}`);
+    assert.ok(texts.some((t) => /^ERROR Opening a file failed: .*missing\.pcapng/.test(t)), texts.join("\n"));
+    assert.ok(texts.some((t) => /^WARNING The user's display filter "tcp\.port ==== 1" was rejected/.test(t)), texts.join("\n"));
+    assert.ok(texts.includes('INFO The user applied the display filter "http"'), texts.join("\n"));
+    assert.ok(texts.includes("INFO The user cleared the display filter"), texts.join("\n"));
+    assert.ok(texts.includes("ERROR Page error: boom"), texts.join("\n"));
+    assert.ok((await state()).agent.pending >= 3);
+    // Taking marks them seen; a watcher's long-poll wakes up for the next problem only
+    const taken = (await api("/api/events/take", {})).json.events;
+    assert.ok(taken.length >= 5);
+    assert.equal((await state()).agent.pending, 0);
+    const t0 = Date.now();
+    const quiet = (await api(`/api/events?after=${last}&wait=300&problems=1`)).json;
+    assert.deepEqual(quiet.events, []);
+    assert.ok(Date.now() - t0 >= 250, "waited");
+    const poll = api(`/api/events?after=${last}&wait=10000&problems=1`);
+    await api("/api/filter", { filter: "frame" });
+    await api("/api/events", { level: "WARNING", text: "Page error: second" });
+    const woke = (await poll).json;
+    assert.deepEqual(woke.events.map((e) => e.text), ["Page error: second"]);
+    await api("/api/filter", { filter: "" });
+    await api("/api/events/take", {});
+  });
   await check("TLS key log setting", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-tls-test-"));
     try {

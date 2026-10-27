@@ -275,7 +275,7 @@ export function isMod(e: KeyboardEvent | MouseEvent): boolean {
 export function keyLetter(e: KeyboardEvent): string {
   if (e.key.length === 1 && /[a-z]/i.test(e.key)) return e.key.toUpperCase();
   // Punctuation at a letter's place (AZERTY ",") is its own key; AltGr types characters
-  if (/^[\x20-\x7e]$/.test(e.key) || e.getModifierState?.("AltGraph")) return "";
+  if (/^[\x20-\x7e]$/.test(e.key) || (!IS_MAC && e.getModifierState?.("AltGraph"))) return "";
   // Option on macOS and non-Latin layouts: the key's position
   return /^Key[A-Z]$/.test(e.code) ? e.code[3] : "";
 }

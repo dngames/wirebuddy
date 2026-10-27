@@ -87,6 +87,7 @@ export class Dialog {
   }
 
   show(focus?: HTMLElement | null): void {
+    watchMainFocus();
     const active = document.activeElement;
     this.returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     document.body.appendChild(this.overlay);
@@ -113,7 +114,9 @@ export class Dialog {
     this.onClose?.();
     // Keys work again where they did before, unless another dialog has the focus
     if (!open.some((d) => d.win.contains(document.activeElement))) {
-      if (this.returnFocus?.isConnected) this.returnFocus.focus();
+      // A modeless dialog: the user may have worked in the main window since it opened
+      const back = this.modal ? this.returnFocus : mainFocus;
+      if (back?.isConnected) back.focus();
       else hooks.focusMain();
     }
   }
@@ -146,6 +149,19 @@ export class Dialog {
 }
 
 /** True while a modal dialog is open (global shortcuts are off then). */
+/** Last focused element outside dialogs and menus. */
+let mainFocus: HTMLElement | null = null;
+let watching = false;
+
+function watchMainFocus(): void {
+  if (watching) return;
+  watching = true;
+  document.addEventListener("focusin", (e) => {
+    const t = e.target;
+    if (t instanceof HTMLElement && !t.closest(".dlg, .menu")) mainFocus = t;
+  });
+}
+
 export function dialogOpen(): boolean {
   return open.some((d) => d.modal);
 }
