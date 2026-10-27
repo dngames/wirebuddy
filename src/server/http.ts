@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, IoGraphSpec, RecentFiles, ServerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, RecentFiles, ServerEvent, ViewerEvent } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
@@ -28,6 +28,8 @@ type Handler = (q: URLSearchParams, body: any) => unknown | Promise<unknown>;
 
 export interface HttpServer {
   url: string;
+  /** UI pages connected right now. */
+  viewers(): number;
   close(): void;
 }
 
@@ -64,6 +66,11 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
     "/api/capture/activity": () => viewer.capture.activity(),
+    "/api/events": async (q) => {
+      const after = num(q, "after");
+      const wait = Math.min(Math.max(Number(q.get("wait") ?? 0) || 0, 0), MAX_EVENT_WAIT_MS);
+      return { ...(await viewer.events.since(after, wait, q.get("problems") === "1")), taken: viewer.events.taken };
+    },
   };
 
   const ok = { ok: true };
@@ -83,6 +90,9 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
     "/api/capture/start": async (_q, b) => (await viewer.capture.start(b as CaptureRequest), ok),
     "/api/capture/stop": () => (viewer.capture.stop(), ok),
+    // Problems in the page itself (exceptions), for the agent
+    "/api/events": (_q, b) => (viewer.events.add(eventLevel(b.level), String(b.text ?? "").slice(0, 500), b.details && typeof b.details === "object" ? b.details : undefined), ok),
+    "/api/events/take": () => ({ events: viewer.events.take() }),
   };
 
   let port = opts.port;
@@ -122,11 +132,21 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       const handler = req.method === "GET" ? get[url.pathname] : req.method === "POST" ? post[url.pathname] : undefined;
       if (!handler) return send(res, 404, { error: `no route ${req.method} ${url.pathname}` });
       const body = req.method === "POST" ? await readJson(req) : undefined;
-      send(res, 200, await handler(url.searchParams, body));
+      const result = await handler(url.searchParams, body);
+      if (req.method === "POST") {
+        const did = userActivity(url.pathname, body, result);
+        if (did) viewer.events.add(did.level, did.text);
+      }
+      send(res, 200, result);
     } catch (err) {
       if (res.headersSent) return res.destroy();
       if (err instanceof StaleGenerationError) return send(res, 409, { error: err.message });
       const status = err instanceof HttpError ? err.status : 400;
+      const path = parseUrl(req.url)?.pathname ?? "";
+      // The agent hears about what failed for the user (the events routes are its own)
+      if (status !== 401 && status !== 403 && !path.startsWith("/api/events")) {
+        viewer.events.add("ERROR", `${ACTIONS[path] ?? `${req.method} ${path}`} failed: ${(err as Error).message}`);
+      }
       send(res, status, { error: (err as Error).message });
     }
   });
@@ -179,6 +199,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
 
   return {
     url: `http://127.0.0.1:${port}/?token=${token}`,
+    viewers: () => [...(wss.clients as Set<WebSocket>)].filter((ws) => ws.readyState === ws.OPEN).length,
     close: () => {
       wss.close();
       server.close();
@@ -199,6 +220,82 @@ function rowRanges(value: unknown): Ranges | undefined {
     throw new HttpError(400, "rows must be an array of [first, last] row index pairs");
   }
   return value as Ranges;
+}
+
+/** Longest a watcher's request waits for an event. */
+const MAX_EVENT_WAIT_MS = 60_000;
+
+/** What a failed request was doing, for the agent. */
+const ACTIONS: Record<string, string> = {
+  "/api/open": "Opening a file",
+  "/api/close": "Closing the file",
+  "/api/reload": "Reloading the file",
+  "/api/filter": "Applying the display filter",
+  "/api/select": "Selecting packets",
+  "/api/frame": "Loading packet details",
+  "/api/rows": "Loading the packet list",
+  "/api/marks": "Marking packets",
+  "/api/marks/toggle": "Marking packets",
+  "/api/marks/displayed": "Marking the displayed packets",
+  "/api/columns": "Changing the columns",
+  "/api/tls": "Setting the TLS key log",
+  "/api/export": "Exporting packets",
+  "/api/follow": "Following the stream",
+  "/api/find": "Finding a packet",
+  "/api/wireshark": "Opening Wireshark",
+  "/api/capture/start": "Starting the capture",
+  "/api/capture/stop": "Stopping the capture",
+  "/api/files": "Listing a folder",
+  "/api/stats/phs": "Protocol hierarchy",
+  "/api/stats/conv": "Conversations",
+  "/api/stats/endpt": "Endpoints",
+  "/api/stats/expert": "Expert information",
+  "/api/stats/iograph": "The I/O graph",
+};
+
+/** What the user did, for the agent's picture of the session; null for routine requests. */
+function userActivity(path: string, b: any, result: unknown): { level: ViewerEvent["level"]; text: string } | null {
+  switch (path) {
+    case "/api/open":
+      return { level: "INFO", text: `The user opened ${String(b.path ?? "")}` };
+    case "/api/close":
+      return { level: "INFO", text: "The user closed the capture" };
+    case "/api/reload":
+      return { level: "INFO", text: "The user reloaded the file" };
+    case "/api/filter": {
+      const r = result as FilterCheck;
+      const f = String(b.filter ?? "").trim();
+      if (r && r.ok === false) return { level: "WARNING", text: `The user's display filter "${f}" was rejected: ${r.error ?? "invalid"}` };
+      return { level: "INFO", text: f ? `The user applied the display filter "${f}"` : "The user cleared the display filter" };
+    }
+    case "/api/marks/toggle":
+      return { level: "INFO", text: "The user marked or unmarked the selected packets" };
+    case "/api/marks/displayed":
+      return { level: "INFO", text: b.on ? "The user marked all displayed packets" : "The user unmarked all displayed packets" };
+    case "/api/columns": {
+      const r = result as FilterCheck;
+      if (r && r.ok === false) return { level: "WARNING", text: `The user's columns were rejected: ${r.error ?? "invalid"}` };
+      return { level: "INFO", text: "The user changed the custom columns" };
+    }
+    case "/api/tls":
+      return { level: "INFO", text: b.keylog ? `The user set the TLS key log ${String(b.keylog)}` : "The user turned TLS decryption off" };
+    case "/api/export": {
+      const r = result as ExportResult;
+      return { level: "INFO", text: `The user exported ${r.frames} packets to ${r.path}` };
+    }
+    case "/api/capture/start":
+      return { level: "INFO", text: `The user started a capture on ${String(b.iface ?? "")}${b.filter ? ` with the capture filter "${String(b.filter)}"` : ""}` };
+    case "/api/capture/stop":
+      return { level: "INFO", text: "The user stopped the capture" };
+    case "/api/wireshark":
+      return { level: "INFO", text: "The user opened the capture in Wireshark" };
+    default:
+      return null;
+  }
+}
+
+function eventLevel(value: unknown): ViewerEvent["level"] {
+  return value === "INFO" || value === "WARNING" ? value : "ERROR";
 }
 
 function viewKey(value: unknown): { file: string; filter: string; generation?: number } | undefined {

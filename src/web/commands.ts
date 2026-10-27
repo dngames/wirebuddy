@@ -18,6 +18,7 @@ import { findAgain, openFindBar } from "./findbar.ts";
 import { canGoBack, canGoForward, goHistory } from "./history.ts";
 import type { MenuItem } from "./menu.ts";
 import { resizeColumns, selectEdge, stepPacket } from "./packetlist.ts";
+import { resetLayout } from "./panes.ts";
 import { IS_MAC, isMod, isTextInput, keyLabel, keyLetter } from "./util.ts";
 
 export interface Command {
@@ -106,6 +107,7 @@ export const commands = {
   zoomOut: { label: "Zoom Out", tip: "Shrink the main window text", shortcut: "Ctrl+-", anywhere: true, owns: () => true, enabled: () => app.zoom > ZOOMS[0], run: () => zoomStep(-1) },
   zoomNormal: { label: "Normal Size", tip: "Return the main window text to its normal size", shortcut: "Ctrl+0", anywhere: true, enabled: () => app.zoom !== 1, run: () => act.setZoom(1) },
   resizeColumns: { label: "Resize Columns", tip: "Resize packet list columns to fit contents", shortcut: "Ctrl+Shift+R", enabled: hasRows, run: resizeColumns },
+  resetLayout: { label: "Reset Layout", tip: "Reset appearance layout to default size", shortcut: "Ctrl+Shift+W", run: resetLayout },
   expandSubtrees: { label: "Expand Subtrees", shortcut: "Shift+Right", enabled: () => !!selectedField()?.n?.length, run: () => expandSubtrees(true) },
   collapseSubtrees: { label: "Collapse Subtrees", shortcut: "Shift+Left", enabled: () => !!selectedField()?.n?.length, run: () => expandSubtrees(false) },
   // Cmd+Left/Right are Back/Forward in browsers on macOS
@@ -125,8 +127,8 @@ export const commands = {
   gotoPacket: { label: "Go to Packet…", tip: "Go to specified packet", shortcut: "Ctrl+G", anywhere: true, enabled: hasFile, run: () => openGotoDialog() },
   back: { label: "Previous Packet in History", tip: "Go back in packet history", shortcut: "Alt+Left", owns: () => true, enabled: canGoBack, run: () => goHistory(-1) },
   forward: { label: "Next Packet in History", tip: "Go forward in packet history", shortcut: "Alt+Right", owns: () => true, enabled: canGoForward, run: () => goHistory(1) },
-  nextPacket: { label: "Next Packet", shortcut: "Ctrl+Down", enabled: hasRows, run: () => stepPacket(1) },
-  previousPacket: { label: "Previous Packet", shortcut: "Ctrl+Up", enabled: hasRows, run: () => stepPacket(-1) },
+  nextPacket: { label: "Next Packet", tip: "Go to the next packet", shortcut: "Ctrl+Down", enabled: hasRows, run: () => stepPacket(1) },
+  previousPacket: { label: "Previous Packet", tip: "Go to the previous packet", shortcut: "Ctrl+Up", enabled: hasRows, run: () => stepPacket(-1) },
   firstPacket: { label: "First Packet", tip: "Go to first packet", shortcut: "Ctrl+Home", enabled: hasRows, run: () => selectEdge(-1) },
   lastPacket: { label: "Last Packet", tip: "Go to last packet", shortcut: "Ctrl+End", enabled: hasRows, run: () => selectEdge(1) },
 
@@ -211,10 +213,13 @@ function bindings(c: Command): string[] {
  * dialog or menu is open, it is disabled); caret keys in text fields stay.
  */
 export function claimOwnedKey(e: KeyboardEvent): void {
-  const inText = isTextInput(document.activeElement);
+  const active = document.activeElement;
+  const caretField = isTextInput(active) && !(active instanceof HTMLSelectElement);
+  // Arrows move the caret; Alt+arrows only on macOS (by word)
+  const caretKey = (b: string): boolean => /Left|Right|Up|Down|Home|End/.test(b) && (IS_MAC || !b.startsWith("Alt+"));
   for (const c of Object.values(commands) as Command[]) {
     if (!c.owns?.()) continue;
-    if (bindings(c).some((b) => matches(e, b) && !(inText && /Left|Right|Up|Down|Home|End/.test(b)))) {
+    if (bindings(c).some((b) => matches(e, b) && !(caretField && caretKey(b)))) {
       e.preventDefault();
       return;
     }

@@ -2,15 +2,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { basename } from "node:path";
+import { eventLines } from "./events.ts";
+import type { HttpServer } from "./http.ts";
 import type { Viewer } from "./viewer.ts";
 import type { PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
 import { inRanges, type Ranges } from "../shared/ranges.ts";
 
-const INSTRUCTIONS = `wirebuddy is a lightweight Wireshark-style capture viewer running in the user's browser pane.
+function instructions(watchCommand: string): string {
+  return `wirebuddy is a lightweight Wireshark-style capture viewer running in the user's browser pane.
 You and the user look at the same view: the open capture, display filter, selected packet and marks.
 
+- The page shows no error messages while you are attached: problems in the viewer (a file that won't open, a rejected filter, a failed capture, a crashed helper) and what the user does there (opened a file, applied a filter, started a capture) come to you instead, as "WireBuddy events" at the end of tool results. To react while the user works in the page, run \`${watchCommand}\` as a background command: it waits for the next problem, prints it with the recent activity and exits; start it again after handling. Fix what you can (correct a filter, reopen a file, stop and explain a failing capture) and tell the user in the chat what happened.
+
 - Start with get_view_state: it tells you what the user is looking at (file, filter, selected frame, live capture).
-- Show the UI with the URL from viewer_url (open it in the browser pane).
+- The user follows along in the viewer: open the URL from viewer_url in the browser pane (in the Claude desktop app, its built-in Browser pane) as soon as you start working with wirebuddy, without being asked. Tool results remind you while no viewer is open.
 - Go from coarse to fine to save tokens: capture_summary / expert_info / io_graph -> query_packets (paginated summary rows, or exact field values with fields: [...]) -> inspect_frame / follow_stream for single frames or streams.
 - query_packets with fields (like tshark -T fields) is the precise way to tabulate values, e.g. fields: ["dns.qry.name", "dns.flags.rcode"].
 - export_packets writes the relevant packets to a new small capture file, e.g. a minimal repro for a bug report.
@@ -18,19 +23,25 @@ You and the user look at the same view: the open capture, display filter, select
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
 - You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.`;
+}
 
 /** Longest selection filter get_view_state prints. */
 const MAX_SELECTION_FILTER = 2000;
+/** While no viewer is open, how often tool results repeat the reminder to open one. */
+const VIEWER_HINT_MS = 5 * 60_000;
+
+/** Appended to successful tool results; set by startMcp. */
+let footer: () => string = () => "";
 
 type Text = { content: { type: "text"; text: string }[]; isError?: boolean };
 
 const text = (s: string): Text => ({ content: [{ type: "text", text: s }] });
 
-/** Wraps a tool body so thrown errors reach the agent as tool errors. */
-function tool<A>(fn: (args: A) => Promise<string> | string): (args: A) => Promise<Text> {
+/** Wraps a tool body so thrown errors reach the agent as tool errors; `remind` adds the open-the-viewer reminder. */
+function tool<A>(fn: (args: A) => Promise<string> | string, remind = true): (args: A) => Promise<Text> {
   return async (args: A) => {
     try {
-      return text(await fn(args));
+      return text((await fn(args)) + (remind ? footer() : ""));
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
     }
@@ -107,8 +118,27 @@ function printable(data: Buffer): string {
   return data.toString("latin1").replace(/[^\x20-\x7e\n\t]/g, ".");
 }
 
-export async function startMcp(viewer: Viewer, url: () => string): Promise<void> {
-  const server = new McpServer({ name: "wirebuddy", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "viewers">, watchCommand: string): Promise<void> {
+  const server = new McpServer({ name: "wirebuddy", version: "0.1.0" }, { instructions: instructions(watchCommand) });
+  const url = () => ui.url;
+
+  // Once when the viewer is missing, then every few minutes until one connects
+  let hintedAt = 0;
+  const viewerHint = (): string => {
+    if (ui.viewers() > 0) {
+      hintedAt = 0;
+      return "";
+    }
+    if (hintedAt && Date.now() - hintedAt < VIEWER_HINT_MS) return "";
+    hintedAt = Date.now();
+    return `\n\n[No WireBuddy viewer is open, so the user can't follow along: open ${url()} in the browser pane now, no need to ask.]`;
+  };
+  // What happened in the viewer since the agent last looked
+  const events = (): string => {
+    const lines = eventLines(viewer.events.take());
+    return lines.length ? `\n\n[WireBuddy events since your last call (problems the user ran into, what they did):\n${lines.join("\n")}]` : "";
+  };
+  footer = () => events() + viewerHint();
 
   server.registerTool(
     "viewer_url",
@@ -116,7 +146,7 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
       description: "URL of the wirebuddy UI (Wireshark-style packet list, details, bytes, capture controls). Open it in the browser pane so the user sees what you do.",
       annotations: { readOnlyHint: true },
     },
-    tool(() => url()),
+    tool(() => url(), false),
   );
 
   server.registerTool(

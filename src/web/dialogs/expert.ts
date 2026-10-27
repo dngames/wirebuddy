@@ -8,7 +8,7 @@ import { Dialog } from "../dialog.ts";
 import { sevClass, sevRank } from "../frame.ts";
 import { icon } from "../icons.ts";
 import { showMenu } from "../menu.ts";
-import { copyText, debounce, fmtInt, h } from "../util.ts";
+import { copyText, debounce, fmtInt, h, IS_MAC } from "../util.ts";
 import { VList } from "../vlist.ts";
 
 const RH = 22;
@@ -212,7 +212,8 @@ export function openExpertDialog(): void {
   };
 
   vl.el.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
+    // Control+click is the context click on macOS
+    if (e.button !== 0 || (IS_MAC && e.ctrlKey)) return;
     const r = rowFromEvent(e);
     if (!r) return;
     select(rows.indexOf(r));

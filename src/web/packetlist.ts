@@ -61,6 +61,8 @@ let widths: number[] = [];
 const colW: Record<string, number> = load<Record<string, number>>("colwidths", {});
 let total = 0;
 let gen = -1;
+/** The stale pages show the same frames as the new list (it only grew). */
+let staleValid = false;
 let pages = new Map<number, PacketRow[]>();
 /** Previous generation's pages, shown while a live reload refetches. */
 let stale = new Map<number, PacketRow[]>();
@@ -479,8 +481,8 @@ function selectIndex(i: number, rows?: Ranges): void {
   i = clamp(i, 0, total - 1);
   if (!rows) anchor = i;
   ensureVisible(i, "nearest");
-  // Not a stale row: after a re-read it may show another frame
-  const row = freshRowAt(i);
+  // A stale row may show another frame after a re-read that rebuilt the list
+  const row = freshRowAt(i) ?? (staleValid ? rowAt(i) : undefined);
   if (row) {
     pendingSel = null;
     act.selectRow(i, row.num, rows);
@@ -547,7 +549,8 @@ function onKey(e: KeyboardEvent): void {
       break;
     case "ArrowLeft":
     case "ArrowRight":
-      if (isMod(e)) return;
+      // Ctrl: Expand/Collapse All, Shift: Expand/Collapse Subtrees of the details
+      if (isMod(e) || e.shiftKey) return;
       scroller.scrollLeft += e.key === "ArrowLeft" ? -40 : 40;
       e.preventDefault();
       return;
@@ -609,6 +612,7 @@ async function selectedRowData(): Promise<PacketRow[]> {
 
 async function copyRows(format: (r: PacketRow) => string): Promise<void> {
   try {
+    if (pendingSel) throw new Error("the selected packets are still loading, copy again");
     await copyText((await selectedRowData()).map(format).join("\n"));
   } catch (e) {
     toastError(e, "Copying failed");
@@ -730,12 +734,21 @@ export function createPacketList(): HTMLElement {
     } else if (isMod(e)) toggleRow(i);
     else selectIndex(i);
   });
-  layer.addEventListener("contextmenu", (e: MouseEvent) => {
+  scroller.addEventListener("contextmenu", (e: MouseEvent) => {
     e.preventDefault();
-    const i = rowIndexFromEvent(e);
-    if (i < 0) return;
+    let i = rowIndexFromEvent(e);
+    let x = e.clientX;
+    let y = e.clientY;
+    // The Menu key or Shift+F10: the current row's menu, under that row
+    if (i < 0) {
+      i = currentIndex();
+      if (i < 0) return;
+      const r = (layer.querySelector<HTMLElement>(`.pl-row[data-i="${i}"]`) ?? scroller).getBoundingClientRect();
+      x = r.left + 40;
+      y = r.bottom;
+    }
     scroller.focus();
-    void openRowMenu(i, e.clientX, e.clientY);
+    void openRowMenu(i, x, y);
   });
 
   let lastVh = 0;
@@ -751,7 +764,7 @@ export function createPacketList(): HTMLElement {
   }).observe(scroller);
 
   hooks.indexOfFrame = indexOfFrame;
-  hooks.selectionLoading = () => !!pendingSel?.rows;
+  hooks.selectionLoading = () => pendingSel !== null;
   hooks.focusMain = focusPacketList;
 
   bus.on("state", (s, prev) => {
@@ -766,6 +779,7 @@ export function createPacketList(): HTMLElement {
     // A restarted server's rows and generations have nothing to do with the cached ones
     const reset = !!prev && prev.instance !== s.instance;
     const genChanged = reset || fileChanged || s.generation !== gen;
+    staleValid = !!prev && !reset && !fileChanged && s.rowsSince === prev.rowsSince;
     const sameView = !!prev && !fileChanged && !reset && s.filter === prev.filter;
     // Measured before the row count changes; a file that just finished loading starts at the top.
     // An empty list counts as at the bottom, so the first rows of a live file are followed too

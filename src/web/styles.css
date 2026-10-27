@@ -326,8 +326,8 @@ input[type="checkbox"] {
   display: flex;
   align-items: center;
   gap: 1px;
-  min-height: 34px;
-  padding: 3px 6px;
+  min-height: 38px;
+  padding: 2px 4px;
   background: var(--chrome);
   border-bottom: 1px solid var(--border);
   container: toolbar / inline-size;
@@ -338,16 +338,16 @@ input[type="checkbox"] {
 .tb-sep {
   flex: none;
   width: 1px;
-  height: 20px;
-  margin: 0 4px;
+  height: 24px;
+  margin: 0 5px;
   background: var(--border);
 }
 
 .tb-icon {
   display: inline-grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 3px;
@@ -376,6 +376,11 @@ input[type="checkbox"] {
 
 .tb-icon.live .icon {
   animation: pulse 1.4s ease-in-out infinite;
+}
+
+.tb-icon .icon {
+  width: 24px;
+  height: 24px;
 }
 
 .tb-spacer {
@@ -1434,8 +1439,29 @@ input[type="checkbox"] {
   font-weight: 400;
 }
 
-.wl-iface.current .wl-name {
-  font-weight: 600;
+.wl-iface {
+  cursor: default;
+  user-select: none;
+}
+
+.wl-iface:focus {
+  outline: none;
+}
+
+.wl-iface.current {
+  background: var(--sel-bg-inactive);
+  color: var(--sel-fg-inactive);
+}
+
+.wl-ifaces:focus-within .wl-iface.current {
+  background: var(--sel-bg);
+  color: var(--sel-fg);
+}
+
+.wl-ifaces:focus-within .wl-iface.current .wl-desc,
+.wl-ifaces:focus-within .wl-iface.current .wl-path,
+.wl-ifaces:focus-within .wl-iface.current .wl-tag {
+  color: inherit;
 }
 
 .wl-path {
@@ -1450,11 +1476,6 @@ input[type="checkbox"] {
   color: var(--text-faint);
   font-size: 12px;
   white-space: nowrap;
-}
-
-.wl-start .icon {
-  width: 14px;
-  height: 14px;
 }
 
 .wl-empty {
@@ -2272,6 +2293,11 @@ input[type="checkbox"] {
   background: var(--warn-bg);
   color: var(--filter-fg);
   font-size: 11px;
+}
+
+.sb-agent {
+  color: var(--agent);
+  font-weight: 500;
 }
 
 /* ---------------------------------------------------------------- toasts */

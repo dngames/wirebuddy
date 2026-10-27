@@ -5,10 +5,12 @@ import { resolve } from "node:path";
 import { Sharkd, SharkdError } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
+import { EventLog } from "./events.ts";
 import { launchWireshark } from "./wireshark.ts";
 import { countRanges, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   ConvRow,
+  CaptureState,
   CustomColumn,
   EndpointRow,
   ExpertItem,
@@ -84,6 +86,8 @@ const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
  */
 export class Viewer extends EventEmitter {
   private engines: [Sharkd, Sharkd];
+  /** Problems and user activity for the agent. */
+  readonly events = new EventLog((pending) => this.set({ agent: { ...this.state.agent, pending } }));
   private active = 0;
   /** Frame numbers matching the filter; null means all frames 1..totalFrames. */
   private displayed: Int32Array | null = null;
@@ -113,6 +117,7 @@ export class Viewer extends EventEmitter {
   }) {
     super();
     this.engines = [new Sharkd(opts.sharkd, opts.profile), new Sharkd(opts.sharkd, opts.profile)];
+    for (const e of this.engines) e.onFailure = (message) => this.events.add("WARNING", message);
     this.profile = opts.profile;
     this.editcap = opts.editcap ?? "editcap";
     this.mergecap = opts.mergecap ?? "mergecap";
@@ -141,16 +146,20 @@ export class Viewer extends EventEmitter {
       marks: [],
       capture: this.capture.state,
       agentNotice: null,
+      agent: { attached: false, pending: 0 },
       wiresharkAvailable: !!this.wiresharkBin,
       customColumns: [],
       tlsKeylog: null,
     };
-    this.capture.on("change", (capture) => this.set({ capture }));
+    this.capture.on("change", (capture: CaptureState) => {
+      if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
+      this.set({ capture });
+    });
     this.capture.on("file", (file: string) => {
       // A new capture takes over the view; later ring files only if the view still follows it
       const files = this.capture.state.files;
       if (files.length > 1 && !this.followingCapture(files[files.length - 2])) return;
-      this.open(file).catch((err) => this.emit("toast", "error", `live view: ${(err as Error).message}`));
+      this.open(file).catch((err) => this.problem(`Live view: ${(err as Error).message}`));
       this.scheduleReload();
     });
     this.capture.on("stopped", () => {
@@ -302,7 +311,7 @@ export class Viewer extends EventEmitter {
       try {
         if (this.followingCapture()) await this.reload();
       } catch (err) {
-        this.emit("toast", "error", `live reload: ${(err as Error).message}`);
+        this.problem(`Live reload: ${(err as Error).message}`);
       }
       if (this.capture.running) this.scheduleReload();
       else this.reloadTimer = null;
@@ -626,6 +635,17 @@ export class Viewer extends EventEmitter {
       if (!had.has(frame)) added.push({ frame, note: "", by });
     }
     this.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
+  }
+
+  /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
+  attachAgent(): void {
+    this.set({ agent: { ...this.state.agent, attached: true } });
+  }
+
+  /** A problem nobody asked for (live view): the agent gets it, the page shows it only without one. */
+  private problem(text: string): void {
+    this.events.add("ERROR", text);
+    if (!this.state.agent.attached) this.emit("toast", "error", text);
   }
 
   notice(text: string): void {

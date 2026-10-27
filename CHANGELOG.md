@@ -21,5 +21,7 @@ First version.
 - Live capture with `dumpcap`: interface picker, capture-filter check, auto-stop, ring buffer
 - Traffic sparklines for capture interfaces on the start page and in the capture bar
 - "Open in Wireshark" at the same file, filter and packet
-- MCP server with tools to read, filter, select and mark packets and follow streams
+- MCP server with tools to read, filter, select and mark packets and follow streams; Claude opens
+  the viewer in the browser pane by itself
+- Problems in the viewer go to the agent instead of the screen; `--watch` wakes it when one happens
 - Wireshark dissector plugins, preferences and `--profile` support

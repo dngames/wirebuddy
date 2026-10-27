@@ -57,7 +57,8 @@ node dist/server/main.js path/to/capture.pcapng   # open a file right away
 ```
 
 Options: `--port <n>` (default 8765, falls back to a free port), `--token <t>`,
-`--capture-dir <dir>` (default `~/.local/share/wirebuddy/captures`), `--profile <name>`, `--mcp`.
+`--capture-dir <dir>` (default `~/.local/share/wirebuddy/captures`), `--profile <name>`, `--mcp`,
+`--tls-keylog <file>`, `--watch <instance-file>` (see below); `--help` lists them all.
 
 ## TLS decryption
 
@@ -101,8 +102,16 @@ claude mcp add wirebuddy -- node /path/to/wirebuddy/dist/server/main.js --mcp
 To see what the agent side looks like without Claude, `node test/agent-demo.mjs` plays a short
 scripted session (filter, mark, select) against the fixture; open the URL it prints.
 
-Then ask Claude to open the viewer: the `viewer_url` tool returns the URL, which Claude opens in
-the browser pane next to the chat. Example prompts:
+Claude opens the viewer in the browser pane next to the chat by itself as soon as it starts
+working with WireBuddy: while no viewer is connected, the tool results remind it, with the URL.
+
+While Claude is attached, the viewer shows you no error messages. Problems (a file that won't
+open, a rejected filter, a failed capture, a crashed `sharkd`) and what you do in the viewer go
+to Claude instead, with its next WireBuddy tool call; the status bar only counts the problems
+waiting for it. To react while you work, Claude runs `wirebuddy --watch <instance-file>` as a
+background command: it waits for the next problem, prints it and exits, which wakes Claude.
+
+Example prompts:
 
 - "Open ~/captures/slow-login.pcapng and tell me why the login is slow."
 - "Explain the packet I have selected."

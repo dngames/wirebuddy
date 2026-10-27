@@ -13,7 +13,8 @@ import { baseName, dirName, fmtDateTime, fmtSize, h, setText } from "./util.ts";
 
 export function createWelcome(): HTMLElement {
   const recentList = h("div", { class: "wl-list" });
-  const ifaceList = h("div", { class: "wl-list" });
+  // Like Wireshark's: click selects, double-click or Enter starts capturing
+  const ifaceList = h("div", { class: "wl-list wl-ifaces", role: "listbox", attrs: { "aria-label": "Capture interfaces" } });
   const sparks = new Map<string, HTMLElement>();
   const errBox = h("div", { class: "wl-error", hidden: true });
   const capStatus = h("div", { class: "wl-capstatus", hidden: true });
@@ -67,6 +68,7 @@ export function createWelcome(): HTMLElement {
 
   const renderIfaces = (): void => {
     const active = captureActive();
+    const hadFocus = ifaceList.contains(document.activeElement);
     if (cap.ifaceLoading && !cap.interfaces) {
       ifaceList.replaceChildren(h("div", { class: "wl-empty" }, "Looking for interfaces…"));
       return;
@@ -81,20 +83,23 @@ export function createWelcome(): HTMLElement {
       ifaceList.replaceChildren(h("div", { class: "wl-empty" }, "No capture interfaces found"));
       return;
     }
+    const current = list.some((i) => i.name === capOpts.iface) ? capOpts.iface : list[0].name;
     ifaceList.replaceChildren(
       ...list.map((i) => {
         const spark = h("span", { class: "wl-spark" });
         sparks.set(i.name, spark);
         paintSpark(spark, i.name);
-        const start = h(
-          "button",
-          { class: "btn wl-start", disabled: active || cap.filterState === "error", title: `Start capturing on ${i.name}`, onclick: () => void startCaptureClicked(i.name) },
-          icon("fin"),
-          h("span", null, "Start"),
-        );
+        const selected = i.name === current;
         return h(
           "div",
-          { class: `wl-iface${i.name === capOpts.iface ? " current" : ""}` },
+          {
+            class: `wl-iface${selected ? " current" : ""}`,
+            role: "option",
+            tabIndex: selected ? 0 : -1,
+            title: active ? "A capture is running" : `Double-click to start capturing on ${i.name}`,
+            data: { iface: i.name },
+            attrs: { "aria-selected": selected ? "true" : "false" },
+          },
           icon("iface"),
           h(
             "span",
@@ -103,11 +108,38 @@ export function createWelcome(): HTMLElement {
             h("span", { class: "wl-path" }, i.addresses.length ? i.addresses.join(", ") : "no addresses"),
           ),
           spark,
-          start,
         );
       }),
     );
+    // Selecting re-renders the list: keep keyboard focus on the selected row
+    if (hadFocus) ifaceList.querySelector<HTMLElement>(".wl-iface.current")?.focus();
   };
+
+  const ifaceRow = (e: Event): HTMLElement | null => (e.target as HTMLElement).closest<HTMLElement>(".wl-iface");
+  const startOn = (name: string): void => {
+    if (!captureActive() && cap.filterState !== "error") void startCaptureClicked(name);
+  };
+  ifaceList.addEventListener("click", (e) => {
+    const row = ifaceRow(e);
+    if (!row?.dataset.iface) return;
+    row.focus();
+    if (row.dataset.iface !== capOpts.iface) setOpts({ iface: row.dataset.iface }, "welcome");
+  });
+  ifaceList.addEventListener("dblclick", (e) => {
+    const name = ifaceRow(e)?.dataset.iface;
+    if (name) startOn(name);
+  });
+  ifaceList.addEventListener("keydown", (e) => {
+    const rows = [...ifaceList.querySelectorAll<HTMLElement>(".wl-iface")];
+    const i = rows.findIndex((r) => r === document.activeElement);
+    if (i < 0) return;
+    if (e.key === "Enter") startOn(rows[i].dataset.iface!);
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const next = rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+      setOpts({ iface: next.dataset.iface! }, "welcome");
+    } else return;
+    e.preventDefault();
+  });
 
   const renderCheck = (): void => {
     paintFilterInput(filterIn);

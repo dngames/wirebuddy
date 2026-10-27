@@ -135,10 +135,6 @@ export function createFindBar(): HTMLElement {
     if (e.key === "Enter") {
       e.preventDefault();
       void run(e.shiftKey ? -1 : 1);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      closeFindBar();
     }
   });
   findBtn.addEventListener("click", () => void run(1));
@@ -147,5 +143,12 @@ export function createFindBar(): HTMLElement {
   syncMode();
 
   bar = h("div", { class: "findbar", hidden: true, role: "search" }, h("span", { class: "fd-lbl" }, "Find:"), modeSel, input, caseLbl, findBtn, prevBtn, status, closeBtn);
+  // Esc from anywhere in the bar, not just the text field
+  bar.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeFindBar();
+  });
   return bar;
 }

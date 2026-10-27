@@ -105,13 +105,13 @@ const MENUS: TopMenu[] = [
     title: "View",
     key: "V",
     items: () =>
-      items("zoomIn", "zoomOut", "zoomNormal", "resizeColumns", SEP, "expandSubtrees", "collapseSubtrees", "expandAll", "collapseAll", SEP, "colorize", "autoScroll", SEP, "reload"),
+      items("zoomIn", "zoomOut", "zoomNormal", "resizeColumns", "resetLayout", SEP, "expandSubtrees", "collapseSubtrees", "expandAll", "collapseAll", SEP, "colorize", "autoScroll", SEP, "reload"),
   },
   {
     title: "Go",
     key: "G",
     items: () => [
-      ...items("gotoPacket", SEP, "back", "forward", SEP, "nextPacket", "previousPacket", "firstPacket", "lastPacket"),
+      ...items("gotoPacket", SEP, "forward", "back", SEP, "nextPacket", "previousPacket", "firstPacket", "lastPacket"),
       SEP,
       { label: "Marked Packets", sub: markItems(), disabled: !app.marks.size },
     ],

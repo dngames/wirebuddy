@@ -64,8 +64,9 @@ const ICONS = {
     `<circle cx="8" cy="8" r="1.5" ${S}/>`,
   save: `<path d="M2.5 2.5h9l2 2v9h-11z" ${S}/><path d="M5 2.5v3.3h5.5V2.5M4.8 13.5V9.2h6.4v4.3" ${S}/>`,
   find: `<circle cx="6.7" cy="6.7" r="4.4" ${S}/><path d="M10 10l4.3 4.3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>`,
-  back: `<path d="M13.5 8H3M7 4 3 8l4 4" ${S}/>`,
-  forward: `<path d="M2.5 8H13M9 4l4 4-4 4" ${S}/>`,
+  previous: `<path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
+  next: `<path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
+  layout: `<rect x="1.5" y="2.5" width="13" height="11" rx="1" ${S}/><path d="M1.5 6.5h13M1.5 10h13M8 6.5v7" ${S}/>`,
   first: `<path d="M2.8 3v10M13.5 8H5M8.8 4.3 5 8l3.8 3.7" ${S}/>`,
   last: `<path d="M13.2 3v10M2.5 8H11M7.2 4.3 11 8l-3.8 3.7" ${S}/>`,
   colorize:

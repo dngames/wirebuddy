@@ -35,6 +35,8 @@ export class Sharkd {
   private stderrTail = "";
   private lastLoad: Record<string, unknown> | undefined;
   private readonly prefs = new Map<string, string>();
+  /** Called when sharkd dies or hangs (it is respawned on the next call). */
+  onFailure: (message: string) => void = () => {};
 
   constructor(
     private readonly bin = "sharkd",
@@ -55,7 +57,10 @@ export class Sharkd {
     proc.on("error", (err) => this.fail(proc, err));
     proc.on("exit", (code, signal) => {
       const detail = this.stderrTail.trim().split("\n").pop() ?? "";
-      this.fail(proc, new Error(`sharkd exited (${signal ?? code})${detail ? ": " + detail : ""}`));
+      const message = `sharkd exited (${signal ?? code})${detail ? ": " + detail : ""}`;
+      // Still current: it died by itself, not by close() or a timeout kill
+      if (this.proc === proc) this.onFailure(message);
+      this.fail(proc, new Error(message));
     });
     this.proc = proc;
     return proc;
@@ -113,6 +118,7 @@ export class Sharkd {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s`));
+        if (this.proc === proc) this.onFailure(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s and was restarted`);
         this.fail(proc, new Error("sharkd restarted after a timeout"));
       }, CALL_TIMEOUT_MS);
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
