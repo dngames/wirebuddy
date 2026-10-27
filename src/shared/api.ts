@@ -47,6 +47,9 @@
  * | POST   | /api/marks/displayed          | { on: boolean }                      | { ok: true }           |
  * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
+ * | GET    | /api/extensions               |                                      | ExtensionList          |
+ * | POST   | /api/extensions/enable        | { name, on }                         | ExtensionList          |
+ * | POST   | /api/extensions/reload        |                                      | ExtensionList          |
  * | GET    | /api/events                   | ?after=<seq>&wait=<ms>&problems=1    | { events, last, taken } |
  * | POST   | /api/events                   | { level, text, details? } (from the page) | { ok: true }      |
  * | POST   | /api/events/take              |                                      | { events }             |
@@ -136,6 +139,11 @@ export interface ViewState {
   customColumns: CustomColumn[];
   /** Keylog file used to decrypt TLS (SSLKEYLOGFILE format), or null. */
   tlsKeylog: string | null;
+  /**
+   * Lua extensions: how many decode now, how many failed to load; `revision`
+   * grows with every reload, after which packets dissect differently.
+   */
+  extensions: { active: number; failing: number; revision: number };
 }
 
 export interface Mark {
@@ -410,3 +418,31 @@ export interface ExportResult {
 export type ServerEvent =
   | { type: "state"; state: ViewState }
   | { type: "toast"; level: "info" | "error"; text: string };
+
+/**
+ * A Lua dissector extension. `status`: "new" (not loaded yet), "loaded",
+ * "error" (its Lua failed to load), "off", "invalid" (bad folder or
+ * extension.json) or "untrusted" (others could have changed its files).
+ */
+export interface ExtensionInfo {
+  name: string;
+  folder: string;
+  label: string;
+  version: string;
+  description: string;
+  enabled: boolean;
+  status: "new" | "loaded" | "error" | "off" | "invalid" | "untrusted";
+  error?: string;
+  /** Protocols it registered, as filter names. */
+  protocols: string[];
+}
+
+export interface ExtensionList {
+  /** Where the agent writes extensions. */
+  dir: string;
+  /** Why extensions can't load, or null. */
+  unavailable: string | null;
+  extensions: ExtensionInfo[];
+  /** Extension folders that were not even looked into, with why (others could change them). */
+  ignored: string[];
+}

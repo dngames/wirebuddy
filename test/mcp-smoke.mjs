@@ -5,10 +5,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
+import { writeAcmeCapture } from "./acme.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -20,7 +21,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-mcp-"));
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0"],
-  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") },
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
   stderr: "ignore",
 });
 let capture = true;
@@ -191,6 +192,73 @@ try {
   if (capture) await call("list_interfaces", {}, (t) => assert.match(t, /^lo\b.*\[loopback\]/m));
   else console.log("skip list_interfaces: dumpcap may not capture on lo here");
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
+
+  // Teaching the viewer a protocol, the way the guide tells the agent to
+  const acmeFile = join(out, "acme.pcap");
+  writeAcmeCapture(acmeFile);
+  const extDir = join(home, ".local/share/wirebuddy/extensions");
+  await call("open_capture", { path: acmeFile }, (t) => assert.match(t, /20 frames/));
+  await call("capture_summary", {}, (t) => {
+    assert.match(t, /Undecoded payload \("data"\): 20 frames/);
+    assert.match(t, /UDP 10\.0\.0\.1:40000 <-> 10\.0\.0\.2:50000: 20 frames/);
+  });
+  const guide = await call("extensions", { action: "guide" }, (t) => {
+    assert.ok(t.includes(`Folder: ${extDir}/<name>/`), "the guide names the folder");
+    assert.match(t, /Template, protocol on a fixed port:/);
+  });
+  const template = (title) => new RegExp(`Template, ${title}:\\n([\\s\\S]*?)\\n(?:Template,|$)`).exec(guide ?? "")?.[1] ?? "";
+  const addExtension = (name, lua) => {
+    mkdirSync(join(extDir, name), { recursive: true });
+    writeFileSync(join(extDir, name, "extension.json"), JSON.stringify({ label: name, version: "1", description: "test" }));
+    writeFileSync(join(extDir, name, `${name}.lua`), lua);
+  };
+  addExtension("acme", template("protocol on a fixed port"));
+  addExtension("acme_heur", template("heuristic \\(recognized by content\\)"));
+  addExtension("acme_gap", template("post-dissector \\(computed field on packets decoded by others\\)"));
+  // Each template on its own: the port and heuristic ones both register "acme"
+  await call("extensions", { action: "test", name: "acme" }, (t) => {
+    assert.match(t, /Extension "acme": loaded/);
+    assert.match(t, /^  acme: 20 packets, first 1$/m);
+    assert.match(t, /Sequence: 0/);
+    assert.match(t, /No Lua errors/);
+  });
+  await call("extensions", { action: "test", name: "acme_heur" }, (t) => {
+    assert.match(t, /^  acme: 19 packets, first 1$/m);
+    assert.match(t, /No Lua errors/);
+  });
+  await call("extensions", { action: "test", name: "acme_gap" }, (t) => {
+    assert.match(t, /^  acme_gap: 19 packets, first 2$/m);
+    assert.match(t, /Since previous ACME packet \(ms\): 99\.9/);
+  });
+  addExtension("acme_rtp", template("a known protocol on another port"));
+  await call("extensions", { action: "test", name: "acme_rtp" }, (t) => {
+    // ACME bytes aren't RTP: the hierarchy shows what the extension made of them
+    assert.match(t, /no protocol of its own \(like Decode As\); with it the capture decodes as:\n\s+frame > eth > ip > udp > \S+: 20 frames/);
+  });
+  rmSync(join(extDir, "acme_rtp"), { recursive: true });
+  addExtension("acme_syntax", "local x = \n");
+  await call("extensions", { action: "test", name: "acme_syntax" }, (t) => {
+    assert.match(t, /Extension "acme_syntax": error: acme_syntax\/acme_syntax\.lua:2: unexpected symbol/);
+    assert.match(t, /Fix it and test again/);
+    assert.doesNotMatch(t, /No Lua errors|applies it there/);
+  });
+  rmSync(join(extDir, "acme_syntax"), { recursive: true });
+  await call("extensions", { action: "test", name: "nonexistent" }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /no extension "nonexistent"/);
+  });
+  // The view still shows Data: testing never changes it
+  await call("query_packets", { filter: "acme", limit: 1 }, (t, r) => assert.ok(r.isError || /0 of|no packets|0 rows/i.test(t), t));
+  rmSync(join(extDir, "acme_heur"), { recursive: true });
+  await call("extensions", { action: "reload" }, (t) => {
+    assert.match(t, /^acme \[loaded\] acme v1 — test; protocols: acme$/m);
+    assert.match(t, /^acme_gap \[loaded\]/m);
+    assert.match(t, /Extension "acme" loaded \(protocols: acme\)/);
+  });
+  await call("query_packets", { filter: "acme.kind == 2", fields: ["acme.seq"] }, (t) => assert.match(t, /\b18\b/));
+  await call("extensions", { action: "disable", name: "acme_gap" }, (t) => assert.match(t, /^acme_gap \[off\]/m));
+  await call("extensions", { action: "test", name: "acme_gap" }, (t) => assert.match(t, /extensions action "enable" applies it/));
+  await call("extensions", { action: "list" }, (t) => assert.match(t, /^acme \[loaded\]/m));
 } finally {
   await client.close();
   rmSync(out, { recursive: true, force: true });

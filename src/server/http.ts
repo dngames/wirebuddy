@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
+import { ReportedError } from "./events.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
 import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, RecentFiles, ServerEvent, ViewerEvent } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
@@ -67,6 +68,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
     "/api/capture/activity": () => viewer.capture.activity(),
+    "/api/extensions": () => viewer.extensionList(),
     "/api/events": async (q) => {
       const after = num(q, "after");
       const wait = Math.min(Math.max(Number(q.get("wait") ?? 0) || 0, 0), MAX_EVENT_WAIT_MS);
@@ -91,6 +93,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
     "/api/capture/start": async (_q, b) => (await viewer.capture.start(b as CaptureRequest), ok),
     "/api/capture/stop": () => (viewer.capture.stop(), ok),
+    "/api/extensions/enable": async (_q, b) => (await viewer.setExtensionEnabled(String(b.name ?? ""), flag(b.on, "on")), viewer.extensionList()),
+    "/api/extensions/reload": async () => (await viewer.reloadExtensions(), viewer.extensionList()),
     // Problems in the page itself (exceptions), for the agent
     "/api/events": (_q, b) => (viewer.events.add(eventLevel(b.level), String(b.text ?? "").slice(0, 500), b.details && typeof b.details === "object" ? b.details : undefined), ok),
     "/api/events/take": () => ({ events: viewer.events.take() }),
@@ -155,7 +159,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       const status = err instanceof HttpError ? err.status : 400;
       const path = parseUrl(req.url)?.pathname ?? "";
       // The agent hears about what failed for the user (the events routes are its own)
-      if (status !== 401 && status !== 403 && !path.startsWith("/api/events")) {
+      if (status !== 401 && status !== 403 && !path.startsWith("/api/events") && !(err instanceof ReportedError)) {
         viewer.events.add("ERROR", `${ACTIONS[path] ?? `${req.method} ${path}`} failed: ${(err as Error).message}`);
       }
       send(res, status, { error: (err as Error).message });
@@ -267,6 +271,8 @@ const ACTIONS: Record<string, string> = {
   "/api/wireshark": "Opening Wireshark",
   "/api/capture/start": "Starting the capture",
   "/api/capture/stop": "Stopping the capture",
+  "/api/extensions/enable": "Switching an extension",
+  "/api/extensions/reload": "Reloading the extensions",
   "/api/files": "Listing a folder",
   "/api/stats/phs": "Protocol hierarchy",
   "/api/stats/conv": "Conversations",
@@ -311,6 +317,10 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       return { level: "INFO", text: "The user stopped the capture" };
     case "/api/wireshark":
       return { level: "INFO", text: "The user opened the capture in Wireshark" };
+    case "/api/extensions/enable":
+      return { level: "INFO", text: `The user switched the extension "${String(b.name ?? "")}" ${b.on ? "on" : "off"}` };
+    case "/api/extensions/reload":
+      return { level: "INFO", text: "The user reloaded the extensions" };
     default:
       return null;
   }

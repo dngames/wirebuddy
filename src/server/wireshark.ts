@@ -55,8 +55,8 @@ async function userManagerEnvironment(env: NodeJS.ProcessEnv): Promise<[string, 
  * Starts Wireshark detached and watches it briefly, so a failed start (no
  * display, unknown profile) is reported with Wireshark's own message.
  */
-export async function launchWireshark(bin: string, args: string[]): Promise<void> {
-  const env = await desktopEnvironment();
+export async function launchWireshark(bin: string, args: string[], base: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const env = await desktopEnvironment(base);
   const fd = openLog();
   try {
     const child = spawn(bin, args, { detached: true, stdio: ["ignore", "ignore", fd ?? "ignore"], env });

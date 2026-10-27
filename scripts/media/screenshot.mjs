@@ -21,7 +21,7 @@ const client = new Client({ name: "shot", version: "0" });
 await client.connect(new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "dist/server/main.js"), "--mcp", "--port", "8771", "--capture-dir", mkdtempSync(join(tmpdir(), "wb-shot-"))],
-  env: { ...process.env, HOME: home, WIREBUDDY_TOKEN: TOKEN },
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "", WIREBUDDY_TOKEN: TOKEN },
   stderr: "ignore",
 }));
 const call = (name, args = {}) => client.callTool({ name, arguments: args });

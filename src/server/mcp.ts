@@ -4,10 +4,11 @@ import { z } from "zod";
 import { basename } from "node:path";
 import { eventLines } from "./events.ts";
 import type { HttpServer } from "./http.ts";
-import type { Viewer } from "./viewer.ts";
-import type { PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
+import type { ExtensionTest, Viewer } from "./viewer.ts";
+import type { ExtensionInfo, PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
 import { inRanges, type Ranges } from "../shared/ranges.ts";
 import { VERSION } from "../shared/version.ts";
+import { printable as oneLine } from "./text.ts";
 
 function instructions(watchCommand: string): string {
   return `wirebuddy is a lightweight Wireshark-style capture viewer running in the user's browser pane.
@@ -23,7 +24,8 @@ You and the user look at the same view: the open capture, display filter, select
 - TLS payloads are only readable when the user has set a key log file in the UI; get_view_state tells you whether it is set.
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
-- You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.`;
+- You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.
+- When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.`;
 }
 
 /** Longest selection filter get_view_state prints. */
@@ -50,7 +52,7 @@ function tool<A>(fn: (args: A) => Promise<string> | string, remind = true): (arg
 }
 
 function rowLine(columns: string[], row: PacketRow): string {
-  return row.c.map((v, i) => (i === 0 || columns[i] === "No." ? v : v.length > 160 ? v.slice(0, 157) + "..." : v)).join(" | ");
+  return row.c.map((v, i) => (i === 0 || columns[i] === "No." ? v : v.length > 160 ? oneLine(v.slice(0, 157)) + "..." : oneLine(v))).join(" | ");
 }
 
 function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: number; showBytes: boolean }): string {
@@ -63,7 +65,7 @@ function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: num
         truncated = true;
         return;
       }
-      let label = n.g ? `[${n.l}]` : n.l;
+      let label = oneLine(n.g ? `[${n.l}]` : n.l);
       if (label.length > 200) label = label.slice(0, 197) + "...";
       const field = n.fn && n.fn !== "text" && n.t !== "proto" ? `  {${n.fn}}` : "";
       const bytes = opts.showBytes && n.h ? `  @${n.ds ? `ds${n.ds}:` : ""}${n.h[0]}+${n.h[1]}` : "";
@@ -103,6 +105,42 @@ function phsText(nodes: PhsNode[], totalFrames: number, depth = 0, out: string[]
     phsText(n.children, totalFrames, depth + 1, out);
   }
   return out;
+}
+
+/** Frames whose payload no dissector decoded, over the whole hierarchy. */
+function dataFrames(nodes: PhsNode[]): number {
+  return nodes.reduce((n, p) => n + (p.proto === "data" ? p.frames : dataFrames(p.children)), 0);
+}
+
+function extensionLine(e: ExtensionInfo): string {
+  const protocols = e.protocols.length ? `; protocols: ${e.protocols.join(", ")}` : "";
+  return `${e.name} [${e.status}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${e.error ? `\n    ${e.error}` : ""}`;
+}
+
+function testText(t: ExtensionTest): string {
+  const out = [`Extension "${t.name}": ${t.load}`];
+  // Nothing loaded: nothing was tested either
+  if (t.load !== "loaded" && !t.protocols.length && !t.hierarchy.length && !t.crashed) return [...out, "Fix it and test again before it goes into the user's view."].join("\n");
+  // A crash makes everything else in the result incomplete
+  if (t.crashed) return [...out, `sharkd failed while reading the capture with it: ${t.crashed}`, "Don't reload it like this: the user's view would crash the same way. Find what kills sharkd (e.g. a GUI-only call, os.exit) and test again."].join("\n");
+  if (!t.protocols.length && !t.hierarchy.length && !t.file) return [...out, "No capture is open, so nothing was dissected; open one to test on real packets."].join("\n");
+  if (!t.file) return out.join("\n");
+  out.push(`Tested on ${t.file}:`);
+  if (!t.protocols.length && t.hierarchy.length) {
+    out.push("  It has no protocol of its own (like Decode As); with it the capture decodes as:");
+    for (const line of t.hierarchy) out.push(`    ${line}`);
+  }
+  for (const p of t.protocols) out.push(`  ${p.name}: ${p.error ? `filter failed: ${p.error}` : `${p.frames} packets${p.first ? `, first ${p.first}` : ""}`}`);
+  if (t.protocols.length && t.protocols.every((p) => !p.frames)) {
+    out.push(t.luaErrorCount ? "  No packet shows it because its dissector failed: see the Lua errors below." : "  No packet matched: check the port or heuristic it registers on (query_packets filter \"data\" shows undecoded packets).");
+  }
+  if (t.sample) out.push("", `Frame ${t.sample.frame}, ${t.sample.protocol}:`, treeText(t.sample.tree, { protocols: [t.sample.protocol], maxLines: 40, showBytes: false }));
+  if (t.luaErrorCount) {
+    out.push("", `Lua errors in ${t.luaErrorCount} packets:`);
+    for (const e of t.luaErrors) out.push(`  frame ${e.frame}: ${e.message}`);
+  } else out.push("", "No Lua errors.");
+  out.push("", `The user's view is unchanged; extensions action "${t.enabled ? "reload" : "enable"}" applies it there.`);
+  return out.join("\n");
 }
 
 /** Stream index field per follow protocol (others are followed from a frame). */
@@ -226,7 +264,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const s = viewer.state;
       if (!s.file) throw new Error("no capture is open");
       const out = [`${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s, ${s.fileSize} bytes`, "", "Protocol hierarchy:"];
-      out.push(...phsText(await viewer.phs(), s.totalFrames));
+      const phs = await viewer.phs();
+      out.push(...phsText(phs, s.totalFrames));
       for (const type of ["ipv4", "tcp", "udp"] as const) {
         const convs = (await viewer.conversations(type)).sort((a, b) => b.bytesAB + b.bytesBA - (a.bytesAB + a.bytesBA));
         if (!convs.length) continue;
@@ -246,6 +285,14 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         out.push("", "Expert info (severity / protocol / message: count):");
         for (const [k, n] of sorted.slice(0, 25)) out.push(`  ${k}: ${n}`);
         if (sorted.length > 25) out.push(`  ... ${sorted.length - 25} more kinds`);
+      }
+      const undecoded = dataFrames(phs);
+      if (undecoded) {
+        out.push("", `Undecoded payload ("data"): ${undecoded} frames. If you can work out the format, an extension can decode it (extensions action "guide"):`);
+        for (const type of ["udp", "tcp"] as const) {
+          const convs = (await viewer.conversations(type, "data")).sort((a, b) => b.framesAB + b.framesBA - (a.framesAB + a.framesBA));
+          for (const c of convs.slice(0, 5)) out.push(`  ${type.toUpperCase()} ${c.addrA}:${c.portA} <-> ${c.addrB}:${c.portB}: ${c.framesAB + c.framesBA} frames  filter: (${c.filter}) && data`);
+        }
       }
       return out.join("\n");
     }),
@@ -269,7 +316,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         const { total, rows } = await viewer.extract(f, fields, offset, limit);
         const head = `${total} frames match ${f ? `"${f}"` : "(no filter)"}; showing ${rows.length ? `${offset + 1}-${offset + rows.length}` : "none"}`;
         const more = offset + rows.length < total ? `\n(more: offset=${offset + rows.length})` : "";
-        return [head, ["No.", ...fields].join(" | "), ...rows.map((r) => [r.num, ...r.values].join(" | "))].join("\n") + more;
+        return [head, ["No.", ...fields].join(" | "), ...rows.map((r) => [r.num, ...r.values.map(oneLine)].join(" | "))].join("\n") + more;
       }
       const { total, rows } = await viewer.query(f, offset, limit);
       const cols = viewer.state.columns;
@@ -606,6 +653,53 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ frame }) => {
       await viewer.openInWireshark(frame ?? null);
       return "Wireshark is starting";
+    }),
+  );
+
+  server.registerTool(
+    "extensions",
+    {
+      description:
+        "Teach the viewer protocols Wireshark doesn't decode, with Lua dissectors you write into WireBuddy's extension folder. guide: how, with templates (read it first); list: extensions and their status; test: load one into a separate sharkd with the open capture and report what it decodes, without changing the user's view; reload: the user's view decodes with the extensions as they are on disk; enable / disable: switch one on or off.",
+      inputSchema: {
+        action: z.enum(["guide", "list", "test", "reload", "enable", "disable"]),
+        name: z.string().optional().describe("Extension folder name, for test, enable and disable"),
+      },
+    },
+    tool(async ({ action, name }) => {
+      const named = (): string => {
+        if (!name) throw new Error(`action "${action}" needs the extension's name`);
+        return name;
+      };
+      const listing = (): string => {
+        const l = viewer.extensionList();
+        const lines = [`Folder: ${l.dir}`];
+        if (l.unavailable) lines.push(`Extensions are unavailable: ${l.unavailable}`);
+        lines.push(...(l.extensions.length ? l.extensions.map(extensionLine) : ["No extensions yet."]));
+        for (const why of l.ignored) lines.push(`Not loaded, others could change it: ${why}`);
+        return lines.join("\n");
+      };
+      switch (action) {
+        case "guide":
+          return viewer.extensions.guide();
+        case "list":
+          return listing();
+        case "test":
+          return testText(await viewer.testExtension(named()));
+        case "reload":
+          await viewer.reloadExtensions();
+          viewer.notice("Reloaded the extensions");
+          return `Reloaded.\n${listing()}`;
+        case "enable":
+        case "disable": {
+          const on = action === "enable";
+          await viewer.setExtensionEnabled(named(), on);
+          // One that crashes sharkd while loading is switched off again
+          const off = on && !viewer.extensionList().extensions.find((e) => e.name === name)?.enabled;
+          viewer.notice(off ? `Could not enable the extension "${name}": it crashed sharkd and stays off` : `${on ? "Enabled" : "Disabled"} the extension "${name}"`);
+          return listing();
+        }
+      }
     }),
   );
 

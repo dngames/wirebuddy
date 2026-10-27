@@ -2876,3 +2876,74 @@ button.sb-led:hover {
   color: var(--text-dim);
   font-size: 12px;
 }
+
+/* ------------------------------------------------------------ extensions */
+
+.ext-intro {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ext-dir {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--fs-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.ext-table td {
+  vertical-align: top;
+  white-space: normal;
+}
+
+.ext-table td.ext-on {
+  width: 1px;
+}
+
+.ext-label {
+  font-weight: 600;
+}
+
+.ext-desc {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ext-protos {
+  font-family: var(--mono);
+  font-size: var(--fs-mono);
+}
+
+.ext-status.loaded {
+  color: var(--ok);
+}
+
+.ext-status.error,
+.ext-status.invalid,
+.ext-status.untrusted,
+.ext-error td {
+  color: var(--danger);
+}
+
+.ext-status.new,
+.ext-status.off {
+  color: var(--text-dim);
+}
+
+.ext-error td {
+  font-family: var(--mono);
+  font-size: var(--fs-mono);
+  user-select: text;
+  word-break: break-word;
+}
+
+.sb-ext.failing {
+  color: var(--danger);
+}

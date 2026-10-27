@@ -25,3 +25,6 @@ First version.
   the agent to open the viewer in the browser pane
 - Problems in the viewer go to the agent instead of the screen; `--watch` wakes it when one happens
 - Wireshark dissector plugins, preferences and `--profile` support
+- Extensions: the agent teaches the viewer protocols Wireshark doesn't decode with Lua
+  dissectors, tests them on the open capture and reloads; Analyze › Extensions and
+  Reload Lua Plugins

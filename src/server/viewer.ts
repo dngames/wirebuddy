@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { closeSync, createReadStream, openSync, readSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import type { Transform } from "node:stream";
 import { createGunzip, createZstdDecompress } from "node:zlib";
-import { Sharkd, SharkdError } from "./sharkd.ts";
+import { Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
-import { EventLog } from "./events.ts";
+import { EventLog, ReportedError } from "./events.ts";
+import { Extensions } from "./extensions.ts";
+import { printable } from "./text.ts";
 import { launchWireshark } from "./wireshark.ts";
 import { countRanges, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
@@ -16,6 +18,7 @@ import type {
   CustomColumn,
   EndpointRow,
   ExpertItem,
+  ExtensionList,
   ExpertSeverity,
   ExportRequest,
   ExportResult,
@@ -32,6 +35,26 @@ import type {
   TreeNode,
   ViewState,
 } from "../shared/api.ts";
+
+/** What extensions(action "test") found. */
+export interface ExtensionTest {
+  name: string;
+  /** Switched on for the user's view. */
+  enabled: boolean;
+  /** "loaded", or why not. */
+  load: string;
+  protocols: { name: string; frames: number; first: number | null; error?: string }[];
+  /** First frame of the first matching protocol, dissected with the extension. */
+  sample: { frame: number; protocol: string; tree: TreeNode[] } | null;
+  luaErrors: { frame: number; message: string }[];
+  luaErrorCount: number;
+  /** The capture tested against, or null when none is open. */
+  file: string | null;
+  /** sharkd died while dissecting. */
+  crashed?: string;
+  /** For an extension without a protocol of its own: the capture's protocols with it, deepest first. */
+  hierarchy: string[];
+}
 
 export class StaleGenerationError extends Error {}
 
@@ -80,6 +103,12 @@ const MAX_IO_INTERVAL = 2_000_000;
 const MAX_IO_BUCKETS_HARD = 100_000;
 const MAX_IO_GRAPHS = 4;
 const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+/** Loads tried again after extensions crashed sharkd (each crash switches one off). */
+const MAX_CRASH_RETRIES = 10;
+/** How long requests in flight may finish before their sharkd restarts with new extensions. */
+const RESTART_WAIT_MS = 10_000;
+/** Live reloads that fail in a row before they pause. */
+const MAX_LIVE_FAILURES = 3;
 
 /**
  * Everything the UI and the agent share: the open capture, display filter,
@@ -93,6 +122,13 @@ export class Viewer extends EventEmitter {
   /** Files the agent exported in this session: the only ones it may overwrite. */
   private readonly agentExports = new Set<string>();
   private wiresharkAt = 0;
+  /** Lua dissector extensions sharkd and Wireshark load. */
+  readonly extensions: Extensions;
+  /** sharkd starts an extension crashed; a load is retried after each. */
+  private extensionCrashes = 0;
+  /** Lua errors the extensions reported for the open file, told to the agent in batches. */
+  private luaErrs = { file: "", frames: new Set<number>(), more: false, told: 0, example: null as LuaError | null, timer: null as NodeJS.Timeout | null, since: 0 };
+  private readonly sharkdBin: string;
   /** Problems and user activity for the agent. */
   readonly events = new EventLog((pending) => this.set({ agent: { ...this.state.agent, pending } }));
   private active = 0;
@@ -100,6 +136,7 @@ export class Viewer extends EventEmitter {
   private displayed: Int32Array | null = null;
   private mutation: Promise<unknown> = Promise.resolve();
   private reloadTimer: NodeJS.Timeout | null = null;
+  private liveFailures = 0;
   private loadedSize = -1;
   private noticeId = 0;
   private readonly wiresharkBin: string | null;
@@ -121,10 +158,23 @@ export class Viewer extends EventEmitter {
     profile?: string;
     editcap?: string;
     mergecap?: string;
+    extensions?: Extensions;
   }) {
     super();
-    this.engines = [new Sharkd(opts.sharkd, opts.profile), new Sharkd(opts.sharkd, opts.profile)];
-    for (const e of this.engines) e.onFailure = (message) => this.events.add("WARNING", message);
+    this.extensions = opts.extensions ?? new Extensions();
+    this.sharkdBin = opts.sharkd ?? "sharkd";
+    const env = () => this.extensions.env();
+    const generation = () => this.extensions.generation;
+    this.engines = [new Sharkd(this.sharkdBin, opts.profile, env, generation), new Sharkd(this.sharkdBin, opts.profile, env, generation)];
+    for (const e of this.engines) {
+      e.onFailure = (message) => {
+        // A dissector that crashes sharkd crashes every respawn that reads the same packets
+        const hint = this.extensions.any() && message.startsWith("sharkd exited") ? " — if this repeats, an extension may crash it: test them with extensions(action \"test\") and disable the culprit" : "";
+        this.events.add("WARNING", printable(message) + hint);
+      };
+      e.onLua = (report) => this.luaReport(report);
+      e.onLuaError = (error) => this.luaError(error);
+    }
     this.profile = opts.profile;
     this.editcap = opts.editcap ?? "editcap";
     this.mergecap = opts.mergecap ?? "mergecap";
@@ -157,6 +207,7 @@ export class Viewer extends EventEmitter {
       wiresharkAvailable: !!this.wiresharkBin,
       customColumns: [],
       tlsKeylog: null,
+      extensions: { active: 0, failing: 0, revision: 0 },
     };
     this.capture.on("change", (capture: CaptureState) => {
       if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
@@ -213,13 +264,55 @@ export class Viewer extends EventEmitter {
   }
 
   /** Loads `file` into `engine` and computes the displayed frames for `filter`. */
-  private async loadInto(engine: Sharkd, file: string, filter: string) {
-    const load = await engine.call<{ status: string; err?: number }>("load", { file });
-    // A file still being written ends mid-packet; sharkd reports that but keeps what it read.
-    if (load.status !== "OK" && load.err !== -12) throw new Error(load.status);
-    const status = await engine.call<SharkdStatus>("status");
-    const displayed = filter ? await this.matchingFrames(engine, filter) : null;
-    return { status, displayed };
+  /**
+   * Loads `file` into `engine` and computes the displayed frames for `filter`;
+   * with `fallback`, a filter that doesn't compile (its protocol is gone) is
+   * dropped and the result's `filter` is "".
+   */
+  private async loadInto(engine: Sharkd, file: string, filter: string, fallback = false) {
+    const once = () =>
+      this.crashRetries(async () => {
+        await this.current(engine);
+        const load = await engine.call<{ status: string; err?: number }>("load", { file });
+        // A file still being written ends mid-packet; sharkd reports that but keeps what it read.
+        if (load.status !== "OK" && load.err !== -12) throw new Error(load.status);
+        const status = await engine.call<SharkdStatus>("status");
+        if (!filter) return { status, displayed: null, filter, rolledBack: false };
+        try {
+          return { status, displayed: await this.matchingFrames(engine, filter), filter, rolledBack: false };
+        } catch (err) {
+          if (!(err instanceof SharkdError) || !fallback) throw err;
+          return { status, displayed: null, filter: "", rolledBack: false };
+        }
+      });
+    try {
+      return await once();
+    } catch (err) {
+      // Died reading the packets with extensions: without the last change to them, or without any
+      if (!(err instanceof SharkdExit) || !this.extensions.any()) throw err;
+      const how = this.extensions.revert() ? "the extensions it had before their last change" : "no extensions until they are reloaded";
+      this.events.add("ERROR", `sharkd crashed reading ${basename(file)} with the extensions (${printable(err.message)}); the view uses ${how}. Find the culprit with extensions(action "test")`);
+      return { ...(await once()), rolledBack: true };
+    }
+  }
+
+  /** Runs `fn` again after each extension that crashed sharkd while loading (it is off then). */
+  private async crashRetries<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      const crashes = this.extensionCrashes;
+      try {
+        return await fn();
+      } catch (err) {
+        if (this.extensionCrashes === crashes || attempt >= MAX_CRASH_RETRIES) throw err;
+      }
+    }
+  }
+
+  /** Restarts an engine that runs other extensions than the current ones (once its requests are done). */
+  private async current(engine: Sharkd): Promise<void> {
+    if (!engine.outdated()) return;
+    await engine.idle(RESTART_WAIT_MS);
+    engine.restart();
   }
 
   private async matchingFrames(engine: Sharkd, filter: string): Promise<Int32Array> {
@@ -275,22 +368,16 @@ export class Viewer extends EventEmitter {
         if (!st || !st.isFile()) throw new Error(`no such file: ${file}`);
         // A live capture's file may not have its header yet
         if (!this.capture.state.files.includes(file) && !(await looksLikeCapture(file))) throw new Error(`not a capture file: ${file}`);
-        let result;
-        try {
-          result = await this.loadInto(this.engines[standby], file, filter);
-        } catch (err) {
-          if (!(err instanceof SharkdError) || !filter) throw err;
-          // The filter may not apply to this capture's protocols; show everything instead
-          filter = "";
-          result = await this.loadInto(this.engines[standby], file, filter);
-        }
+        // The filter may not apply to this capture's protocols; then it shows everything
+        const result = await this.loadInto(this.engines[standby], file, filter, true);
+        filter = result.filter;
         this.active = standby;
         this.loadedSize = st.size;
         this.state = { ...this.state, marks: [], selected: null, selectedBy: null };
         this.applyLoad(file, filter, result, false);
         this.remember(file);
       } catch (err) {
-        const message = (err as Error).message;
+        const message = printable((err as Error).message);
         this.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
         throw err;
       }
@@ -300,17 +387,24 @@ export class Viewer extends EventEmitter {
   /** Re-reads the open file into the standby engine, then swaps engines. */
   reload(force = false): Promise<void> {
     return this.exclusive(async () => {
-      const file = this.state.file;
-      if (!file) return;
-      const size = safeSize(file);
-      if (!force && size === this.loadedSize) return;
-      const standby = 1 - this.active;
-      const result = await this.loadInto(this.engines[standby], file, this.state.filter);
-      if (this.state.file !== file) return;
-      this.active = standby;
-      this.loadedSize = size;
-      this.applyLoad(file, this.state.filter, result, true);
+      await this.reloadNow(force);
     });
+  }
+
+  /** `dropped`: the display filter didn't apply any more (only with `fallback`); `rolledBack`: extensions crashed sharkd. */
+  private async reloadNow(force: boolean, fallback = false): Promise<{ dropped: boolean; rolledBack: boolean }> {
+    const file = this.state.file;
+    if (!file) return { dropped: false, rolledBack: false };
+    const size = safeSize(file);
+    if (!force && size === this.loadedSize) return { dropped: false, rolledBack: false };
+    const standby = 1 - this.active;
+    const result = await this.loadInto(this.engines[standby], file, this.state.filter, fallback);
+    if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
+    const dropped = result.filter !== this.state.filter;
+    this.active = standby;
+    this.loadedSize = size;
+    this.applyLoad(file, result.filter, result, true);
+    return { dropped, rolledBack: result.rolledBack };
   }
 
   private scheduleReload(): void {
@@ -318,8 +412,16 @@ export class Viewer extends EventEmitter {
     this.reloadTimer = setTimeout(async () => {
       try {
         if (this.followingCapture()) await this.reload();
+        this.liveFailures = 0;
       } catch (err) {
-        this.problem(`Live reload: ${(err as Error).message}`);
+        // Once, not every second; after a few in a row the live view waits for the capture's end
+        const n = ++this.liveFailures;
+        if (n === 1) this.problem(`Live reload: ${printable((err as Error).message)}`);
+        if (n >= MAX_LIVE_FAILURES) {
+          this.problem(`The live view stopped updating after ${n} failed reloads; it reloads once the capture stops (or with View › Reload)`);
+          this.reloadTimer = null;
+          return;
+        }
       }
       if (this.capture.running) this.scheduleReload();
       else this.reloadTimer = null;
@@ -328,6 +430,8 @@ export class Viewer extends EventEmitter {
 
   close(): Promise<void> {
     return this.exclusive(async () => {
+      // A restarted sharkd needn't read the closed file again
+      for (const e of this.engines) e.forgetFile();
       this.displayed = null;
       this.set({
         file: null,
@@ -716,7 +820,8 @@ export class Viewer extends EventEmitter {
       await this.tapParams("expert", filter),
     );
     return (r.taps[0]?.details ?? [])
-      .map((d) => ({ frame: d.f, severity: d.s as ExpertSeverity, group: d.g, protocol: d.p, message: d.m }))
+      // Lua dissectors can put packet bytes into messages
+      .map((d) => ({ frame: d.f, severity: d.s as ExpertSeverity, group: printable(d.g), protocol: printable(d.p), message: printable(d.m) }))
       .sort((a, b) => a.frame - b.frame);
   }
 
@@ -816,9 +921,12 @@ export class Viewer extends EventEmitter {
       const st = statSync(path, { throwIfNoEntry: false });
       if (!st?.isFile()) throw new Error(`no such file: ${path}`);
     }
-    await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
-    this.set({ tlsKeylog: path });
-    if (this.state.file) await this.reload(true);
+    // With the reloads: a sharkd restarting meanwhile would miss the key
+    await this.exclusive(async () => {
+      await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
+      this.set({ tlsKeylog: path });
+      await this.reloadNow(true);
+    });
   }
 
   /** Writes a subset of the open capture to a new file, like Wireshark's Export Specified Packets. */
@@ -905,7 +1013,7 @@ export class Viewer extends EventEmitter {
     if (this.state.filter) args.push("-Y", this.state.filter);
     const target = frame ?? this.state.selected;
     if (target) args.push("-g", String(target));
-    await launchWireshark(this.wiresharkBin, args);
+    await launchWireshark(this.wiresharkBin, args, this.extensions.env());
   }
 
   private remember(file: string): void {
@@ -919,11 +1027,187 @@ export class Viewer extends EventEmitter {
     if (!this.state.file) throw new Error("no capture is open");
   }
 
+  /** Extensions as the UI lists them. */
+  extensionList(): ExtensionList {
+    return this.extensions.listing();
+  }
+
+  /** Re-counts active and failing extensions for the status bar. */
+  refreshExtensions(): void {
+    const active = this.extensions.active();
+    const failing = this.extensions.failing();
+    if (active !== this.state.extensions.active || failing !== this.state.extensions.failing) this.set({ extensions: { ...this.state.extensions, active, failing } });
+  }
+
+  private luaReport(report: LuaReport): void {
+    if (report.crashedIn) this.extensionCrashes++;
+    for (const e of this.extensions.report(report)) this.events.add(e.level, e.text);
+    this.refreshExtensions();
+  }
+
+  /**
+   * Loads the extensions as they are on disk now (with `change`: switches
+   * just that one) and re-dissects the open capture; the view keeps its
+   * selection and marks. If sharkd then crashes reading the capture, the view
+   * keeps the extensions it had.
+   */
+  reloadExtensions(change?: { name: string; on: boolean }): Promise<void> {
+    if (this.extensions.unavailable) return Promise.reject(new Error(`extensions are unavailable: ${this.extensions.unavailable}`));
+    return this.exclusive(async () => {
+      if (change) this.extensions.include(change.name, change.on);
+      else this.extensions.refresh();
+      this.forgetLuaErrors();
+      const filter = this.state.filter;
+      let rolledBack = false;
+      try {
+        if (this.state.file) {
+          const r = await this.reloadNow(true, true);
+          rolledBack = r.rolledBack;
+          // A filter on a protocol whose extension is gone now
+          if (r.dropped) this.events.add("WARNING", `The display filter "${filter}" doesn't apply with the extensions as they are now and was cleared`);
+        } else {
+          const fresh = this.engines[1 - this.active];
+          await this.crashRetries(async () => {
+            await this.current(fresh);
+            await fresh.call("status");
+          });
+          this.active = 1 - this.active;
+        }
+      } finally {
+        this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
+        this.refreshExtensions();
+      }
+      if (rolledBack) {
+        // The one switched on crashed it: it stays off
+        if (change?.on) this.extensions.setEnabled(change.name, false, "sharkd crashed reading the capture with it");
+        this.refreshExtensions();
+        throw new ReportedError(change?.on ? `"${change.name}" crashed sharkd reading the capture and stays off` : "sharkd crashed reading the capture with the extensions as they are now, so the view keeps the ones it had");
+      }
+      await this.engine.luaLoaded();
+      this.refreshExtensions();
+    });
+  }
+
+  async setExtensionEnabled(name: string, on: boolean): Promise<void> {
+    this.extensions.check(name, on);
+    this.extensions.setEnabled(name, on);
+    await this.reloadExtensions({ name, on });
+  }
+
+  /** An extension failed on a packet while a file was read: the agent hears about new ones in batches. */
+  private luaError(e: LuaError): void {
+    const s = this.luaErrs;
+    if (e.file !== s.file) {
+      this.tellLuaErrors();
+      this.forgetLuaErrors(e.file);
+    }
+    if (e.frame === 0) s.more = true;
+    else if (!s.frames.has(e.frame) && s.frames.size < 100_000) {
+      s.frames.add(e.frame);
+      if (!s.example || e.frame < s.example.frame) s.example = e;
+    }
+    // Once they stop coming for 1.5 s (a looping dissector takes 1 s per packet), at most 8 s after the first
+    if (s.timer) clearTimeout(s.timer);
+    else s.since = Date.now();
+    s.timer = setTimeout(() => this.tellLuaErrors(), Math.max(0, Math.min(1500, s.since + 8000 - Date.now())));
+  }
+
+  private tellLuaErrors(): void {
+    const s = this.luaErrs;
+    s.timer = null;
+    const n = s.frames.size - s.told;
+    if (n <= 0 || !s.example) return;
+    const what = `${s.told ? `${n} more packet${n === 1 ? "" : "s"}` : `${n}${s.more ? "+" : ""} packet${n === 1 ? "" : "s"}`} of ${basename(s.file)}`;
+    this.events.add("ERROR", `Lua errors in ${what}, e.g. frame ${s.example.frame}: ${printable(s.example.message)} — fix the extension, check it with extensions(action "test"), then reload`);
+    s.told = s.frames.size;
+    s.example = null;
+  }
+
+  /** New code or another file: its errors are all new. */
+  private forgetLuaErrors(file = this.state.file ?? ""): void {
+    const s = this.luaErrs;
+    if (s.timer) clearTimeout(s.timer);
+    Object.assign(s, { file, frames: new Set<number>(), more: false, told: 0, example: null, timer: null });
+  }
+
+  /** Loads one extension into a separate sharkd with the open capture and reports what it decodes. */
+  async testExtension(name: string): Promise<ExtensionTest> {
+    if (this.extensions.unavailable) throw new Error(`extensions are unavailable: ${this.extensions.unavailable}`);
+    const file = this.state.file;
+    const enabled = this.extensions.list().find((e) => e.name === name)?.enabled ?? false;
+    const result: ExtensionTest = { name, enabled, load: "", protocols: [], sample: null, luaErrors: [], luaErrorCount: 0, file, hierarchy: [] };
+    const { env, done } = this.extensions.testEnv(name);
+    const sharkd = new Sharkd(this.sharkdBin, this.profile, () => env);
+    try {
+      const started = sharkd.call("status").catch(() => {});
+      const report = await sharkd.luaLoaded();
+      await started;
+      const failed = report?.failed.find((f) => f.name === name);
+      const loaded = report?.loaded.find((l) => l.name === name);
+      if (!report || report.crashedIn === name) result.load = "sharkd crashed while loading it";
+      else if (failed) result.load = `error: ${printable(failed.error)}${failed.protocols.length ? ` (it registered ${failed.protocols.join(", ")} before the error; tested anyway)` : ""}`;
+      else if (!loaded) result.load = "it did not load (no report from the loader)";
+      else result.load = "loaded";
+      // What a failed extension registered before its error works all the same
+      const protocols = loaded?.protocols ?? failed?.protocols ?? [];
+      if ((!loaded && !failed?.protocols.length) || !file) return result;
+      if (this.state.tlsKeylog) await sharkd.setPref("tls.keylog_file", this.state.tlsKeylog);
+      const load = await sharkd.call<{ status: string; err?: number }>("load", { file });
+      if (load.status !== "OK" && load.err !== -12) throw new Error(`could not load ${file}: ${load.status}`);
+      for (const proto of protocols) {
+        try {
+          const frames = await this.matchingFrames(sharkd, proto);
+          result.protocols.push({ name: proto, frames: frames.length, first: frames.length ? frames[0] : null });
+        } catch (err) {
+          result.protocols.push({ name: proto, frames: 0, first: null, error: (err as Error).message });
+        }
+      }
+      const hit = result.protocols.find((p) => p.first !== null);
+      if (hit) {
+        const frame = await sharkd.call<SharkdFrame>("frame", { frame: hit.first, proto: true });
+        result.sample = { frame: hit.first!, protocol: hit.name, tree: frame.tree };
+      }
+      // No protocol of its own (e.g. Decode As): what the capture decodes as with it
+      if (!protocols.length) {
+        const phs = await sharkd.call<{ taps: { protos?: SharkdPhs[] }[] }>("tap", { tap0: "phs" });
+        const leaves: string[] = [];
+        const walk = (nodes: SharkdPhs[], path: string[]) => {
+          for (const n of nodes) n.protos?.length ? walk(n.protos, [...path, n.proto]) : leaves.push(`${[...path, n.proto].join(" > ")}: ${n.frames} frames`);
+        };
+        walk(phs.taps[0]?.protos ?? [], []);
+        result.hierarchy = leaves.slice(0, 12);
+      }
+      const errors = await luaErrors(sharkd);
+      result.luaErrorCount = errors.length;
+      result.luaErrors = errors.slice(0, 5);
+    } catch (err) {
+      result.crashed = (err as Error).message;
+    } finally {
+      sharkd.close();
+      done();
+    }
+    return result;
+  }
+
   shutdown(): void {
     this.capture.stop();
     this.capture.stopActivity();
     for (const e of this.engines) e.close();
+    this.extensions.close();
   }
+}
+
+/** Packets an extension's dissector failed on, from the expert items Lua errors leave. */
+async function luaErrors(engine: Sharkd): Promise<{ frame: number; message: string }[]> {
+  const r = await engine.call<{ taps: { details?: { f: number; m: string }[] }[] }>("tap", { tap0: "expert", filter: "_ws.lua.error" });
+  const seen = new Set<number>();
+  const out: { frame: number; message: string }[] = [];
+  for (const d of r.taps[0]?.details ?? []) {
+    if (!d.m.startsWith("Lua Error") || seen.has(d.f)) continue;
+    seen.add(d.f);
+    out.push({ frame: d.f, message: printable(d.m.replace(/^Lua Error: /, "")) });
+  }
+  return out.sort((a, b) => a.frame - b.frame);
 }
 
 /** sharkd custom columns: column0..N as "<field>:0" (all occurrences). */

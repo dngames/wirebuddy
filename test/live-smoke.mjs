@@ -16,7 +16,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
 const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token, "--capture-dir", captureDir], {
   stdio: ["ignore", "pipe", "inherit"],
-  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") },
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
 });
 const base = await new Promise((resolve, reject) => {
   server.stdout.setEncoding("utf8");

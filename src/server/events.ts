@@ -14,6 +14,9 @@ const MAX_TAKE = 30;
 /** The same event again within this time counts up the first one. */
 const REPEAT_MS = 30_000;
 
+/** An error the agent already heard about as an event: its request's failure isn't logged again. */
+export class ReportedError extends Error {}
+
 export class EventLog {
   private events: (ViewerEvent & { at: number })[] = [];
   private seq = 0;
