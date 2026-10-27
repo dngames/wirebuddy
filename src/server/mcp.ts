@@ -296,7 +296,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       }
       lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
       if (s.panels.length) lines.push(`Panels open: ${s.panels.map((p) => `${p.name} (${p.state}, opened by ${p.by}${p.errors ? `, ${p.errors} errors` : ""})`).join(", ")}`);
-      if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.map((o) => `${o.name} ("${o.text}")`).join(", ")}`);
+      // The status bar shows the first three
+      if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.slice(0, 3).map((o) => `${o.name} ("${o.text}")`).join(", ")}${s.panelOffers.length > 3 ? ` (${s.panelOffers.length - 3} more not shown)` : ""}`);
       if (c.status !== "idle" || c.files.length) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
         lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);

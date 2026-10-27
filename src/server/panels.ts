@@ -366,7 +366,8 @@ export class Panels extends EventEmitter {
   /** What a panel did to the view, for the agent. */
   acted(name: string, text: string): void {
     const inst = this.open.get(name);
-    if (inst) this.tell(inst, "INFO", `${text} (the user clicked in it)`);
+    // Always told: a panel can't hide a change by using up its events first
+    if (inst) this.tell(inst, "INFO", `${text} (the user clicked in it)`, true);
   }
 
   /** Asks the panel's page for an image of it: a PNG, or why there is none. */
@@ -426,10 +427,10 @@ export class Panels extends EventEmitter {
   }
 
   /** Adds an event for the agent about a panel, at most a few per minute. */
-  private tell(inst: Instance, level: "INFO" | "WARNING" | "ERROR", text: string): void {
+  private tell(inst: Instance, level: "INFO" | "WARNING" | "ERROR", text: string, always = false): void {
     const now = Date.now();
     inst.events = inst.events.filter((t) => now - t < 60_000);
-    if (inst.events.length >= MAX_EVENTS_PER_MINUTE) return;
+    if (inst.events.length >= MAX_EVENTS_PER_MINUTE && !always) return;
     inst.events.push(now);
     this.events.add(level, `Panel "${inst.name}" ${text}`);
   }
@@ -724,9 +725,13 @@ export class Panels extends EventEmitter {
         if (!answer) return;
         const png = typeof r.png === "string" ? Buffer.from(r.png, "base64") : null;
         if (!png) answer({ none: text(r.none, 300) || "the panel has nothing to show" });
-        else if (png.length < 24 || !png.subarray(0, 8).equals(PNG_SIGNATURE)) answer({ none: "the panel's snapshot is not a PNG" });
+        else if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIGNATURE) || png.toString("latin1", 12, 16) !== "IHDR") answer({ none: "the panel's snapshot is not a PNG" });
         else if (png.length > MAX_SNAPSHOT) answer({ none: `the panel's snapshot is larger than ${MAX_SNAPSHOT / 1024 / 1024} MiB` });
-        else answer({ png, width: png.readUInt32BE(16), height: png.readUInt32BE(20) });
+        else {
+          const [width, height] = [png.readUInt32BE(16), png.readUInt32BE(20)];
+          if (!width || !height || width > SNAPSHOT_SIDE || height > SNAPSHOT_SIDE) answer({ none: `the panel's snapshot is ${width}x${height}, not 1 to ${SNAPSHOT_SIDE} pixels a side` });
+          else answer({ png, width, height });
+        }
         return;
       }
       case "error": {

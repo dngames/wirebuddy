@@ -147,8 +147,10 @@ export class FrameStore {
     });
   }
 
+  /** Where the record's block ends at the latest: other blocks between two records are not read with it. */
   private recordEnd(frame: number): number {
-    return frame < this.count ? this.offsets[frame] : this.end;
+    const next = frame < this.count ? this.offsets[frame] : this.end;
+    return Math.min(next, this.offsets[frame - 1] + MAX_BLOCK + 16);
   }
 
   /** Reads the record of `frame` from `buf` (the file from `base` on). */

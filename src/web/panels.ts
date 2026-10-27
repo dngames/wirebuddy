@@ -37,7 +37,14 @@ interface Win {
   probing: ((done: boolean) => void) | null;
   footer: HTMLElement;
   maximized: boolean;
+  /** When the pointer entered the frame, or 0 while it is outside. */
+  pointerIn: number;
 }
+
+/** The last click or key press in this page itself (never one in a panel: those stay in its frame). */
+let pageInput = 0;
+/** How long a click or key press gives transient activation (Chrome: 5 s). */
+const ACTIVATION_MS = 5000;
 
 const wins = new Map<string, Win>();
 /** Extensions with a panel, for the menus. */
@@ -46,6 +53,15 @@ let available: { name: string; title: string }[] = [];
 export function initPanels(): void {
   bus.on("state", sync);
   window.addEventListener("message", onMessage);
+  for (const type of ["pointerdown", "keydown"]) {
+    window.addEventListener(
+      type,
+      (e) => {
+        if (e.isTrusted) pageInput = performance.now();
+      },
+      true,
+    );
+  }
   // Frames must not catch the pointer while a window moves or resizes
   document.addEventListener("pointerup", () => document.body.classList.remove("dlg-moving"), true);
   let extKey = "";
@@ -128,7 +144,7 @@ function open(p: PanelState): void {
   const dialog = new Dialog(p.title, { width: geo?.w ?? p.size[0], height: geo?.h ?? p.size[1], cls: "dlg-panel", modal: false });
   const footer = h("span", { class: "pn-status" });
   dialog.footerLeft.append(footer);
-  const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, footer, maximized: false };
+  const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, footer, maximized: false, pointerIn: 0 };
   dialog.button("Reload", () => void post("api/panels/reload", { name: p.name }).catch((e) => toast("error", errorText(e))), { title: "Read the panel's files again and restart it" });
   const maxBtn = dialog.button("Maximize", () => {
     w.maximized = !w.maximized;
@@ -179,6 +195,10 @@ function restart(w: Win, p: PanelState): void {
     // The first load is the panel; any other means it navigated
     if (++w.loads > 1) kill(w, "navigated");
   });
+  // The page sees the pointer enter and leave a frame, which the panel can't fake
+  w.pointerIn = 0;
+  frame.addEventListener("pointerenter", () => (w.pointerIn = performance.now()));
+  frame.addEventListener("pointerleave", () => (w.pointerIn = 0));
   frame.src = p.src;
   w.frame = frame;
   w.dialog.body.replaceChildren(frame);
@@ -242,7 +262,10 @@ function onMessage(e: MessageEvent): void {
 /**
  * A panel's wb.select or wb.setFilter. A click or key press in the panel
  * focuses its frame and gives this page transient activation (Chrome passes
- * it up from the frame), so both together mean the user just used this panel.
+ * it up from the frame). A panel can take the focus itself, though, right
+ * after the user clicked elsewhere: so an activation this page may have got
+ * from its own click or key press doesn't count, unless the pointer entered
+ * the panel since; nor does one while the pointer is over another panel.
  * The server applies it, refuses setFilter without "control", and tells the
  * agent about refusals.
  */
@@ -250,7 +273,10 @@ async function act(w: Win, id: unknown, m: unknown, a: unknown): Promise<void> {
   const frame = w.frame;
   const reply = (r: { ok: boolean; code?: string; error?: string }): void => frame?.contentWindow?.postMessage({ wb: 1, t: "actres", id, ...r }, w.origin);
   if (m !== "select" && m !== "setFilter") return reply({ ok: false, code: "bad-args", error: "a panel can only select a frame or set the display filter" });
-  const clicked = !!frame && document.activeElement === frame && navigator.userActivation?.isActive === true;
+  const now = performance.now();
+  const ownActivation = pageInput > 0 && now - pageInput < ACTIVATION_MS && !(w.pointerIn > pageInput);
+  const overOther = [...wins.values()].some((x) => x !== w && x.pointerIn > 0);
+  const clicked = !!frame && document.activeElement === frame && navigator.userActivation?.isActive === true && !ownActivation && !overOther;
   try {
     await post("api/panels/act", { name: w.name, label: w.label, m, a, clicked });
     reply({ ok: true });

@@ -73,6 +73,8 @@ const TAPS: Record<string, string> = {
 /** Follow protocols whose streams are numbered by TCP's or UDP's stream index. */
 const STREAM_OF: Record<string, string> = { TCP: "tcp", TLS: "tcp", HTTP: "tcp", UDP: "udp" };
 const LUA_HINT = 'is the extension\'s Lua loaded? extensions action "reload"';
+/** The turn label of offer checks; panel labels are base32. */
+const OFFERS = "_offers";
 
 /** A failed panel request: HTTP status, a code the bridge acts on, and help for the agent. */
 export class ApiError extends Error {
@@ -166,6 +168,8 @@ export class PanelData {
   private readonly tailers = new Set<string>();
   /** While the view reads with other extensions or keys: requests wait. */
   private holding = false;
+  /** Offer checks running: they take turns like a panel. */
+  private offerChecks = 0;
   /** Frames whose sharkd answer is too long to read, per file and epoch; then bytes are asked for one frame at a time. */
   private oversized = { key: "", frames: new Set<number>(), single: false };
 
@@ -219,6 +223,33 @@ export class PanelData {
     if (this.open.size || (!this.engine && !this.store)) return;
     this.idleTimer = setTimeout(() => this.close(), IDLE_STOP_MS);
     this.idleTimer.unref();
+  }
+
+  /**
+   * Which of `filters` match a packet of the view's file, read by the panel
+   * engine so the view's own sharkd never waits for it. Throws ApiError when
+   * the file changed meanwhile.
+   */
+  async anyMatch(filters: string[]): Promise<Map<string, boolean>> {
+    this.offerChecks++;
+    this.open.add(OFFERS);
+    try {
+      const loaded = await this.load(OFFERS, this.opts.source.epoch());
+      const out = new Map<string, boolean>();
+      for (const filter of filters) {
+        const rows = await this.run(OFFERS, (e) => e.call<{ num: number }[]>("frames", { filter, limit: 1, column0: "frame.number:0" }), CALL_BUDGET_MS, loaded).catch((err) => {
+          if (err instanceof SharkdError) return [];
+          throw err;
+        });
+        out.set(filter, rows.length > 0);
+      }
+      return out;
+    } finally {
+      if (--this.offerChecks === 0) {
+        this.open.delete(OFFERS);
+        this.idle();
+      }
+    }
   }
 
   /** The view is about to read with other extensions or TLS keys (true) or has (false): until then, requests wait. */

@@ -34,7 +34,8 @@ ctx.fillStyle = "#e33";
 ctx.fillRect(0, 0, 4000, 4000);
 document.getElementById("select").addEventListener("click", () => said("click", wb.select(3)));
 document.getElementById("filter").addEventListener("click", () => said("filter", wb.setFilter("http")));
-wb.on("select", (frame) => frame === 7 && said("follow", wb.select(8)));
+// Takes the focus first, as a panel trying to act on the user's click elsewhere would
+wb.on("select", (frame) => frame === 7 && (window.focus(), said("follow", wb.select(8))));
 await wb.storage.set({ runs: ((await wb.storage.get())?.runs ?? 0) + 1 });
 await said("early", wb.select(2));
 wb.ready();
@@ -141,7 +142,7 @@ try {
     assert.match(s.agentNotice.text, /^Panel "Clicker" selected frame 3$/);
   });
 
-  await check("browser: a click in WireBuddy's own page doesn't count for the panel", async () => {
+  await check("browser: a click in WireBuddy's own page doesn't count for the panel, also when it takes the focus", async () => {
     const bar = await evaluate("JSON.stringify(document.querySelector('.sb-flex').getBoundingClientRect())").then(JSON.parse);
     await click(bar.left + bar.width / 2, bar.top + bar.height / 2);
     await fetch(new URL("/api/select", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: JSON.stringify({ frame: 7 }) });

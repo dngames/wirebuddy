@@ -117,8 +117,7 @@ const MAX_CRASH_RETRIES = 10;
 const RESTART_WAIT_MS = 10_000;
 /** Live reloads that fail in a row before they pause. */
 const MAX_LIVE_FAILURES = 3;
-/** Panel offers one sharkd iograph pass checks, and how often unmatched ones are checked during a live capture. */
-const OFFERS_PER_PASS = 10;
+/** How often unmatched panel offers are checked again during a live capture. */
 const OFFER_LIVE_MS = 30_000;
 
 /**
@@ -1190,7 +1189,10 @@ export class Viewer extends EventEmitter {
     if (this.offerTimer) clearTimeout(this.offerTimer);
     this.offerTimer = null;
     this.offerRun = this.offerPass(seq, all).catch((err) => {
-      if (seq === this.offerSeq) this.events.add("WARNING", `Checking the panels' offers failed: ${printable((err as Error).message)}`);
+      if (seq !== this.offerSeq) return;
+      this.showOffers();
+      // Another file or extensions meanwhile: the pass that follows checks again
+      if (!(err instanceof ApiError && ["stale", "busy", "no-capture", "gone"].includes(err.code))) this.events.add("WARNING", `Checking the panels' offers failed: ${printable((err as Error).message)}`);
     });
     return this.offerRun;
   }
@@ -1201,6 +1203,7 @@ export class Viewer extends EventEmitter {
       this.offerFile = file;
       this.offerMatched.clear();
       this.offerDismissed.clear();
+      this.showOffers();
     }
     const offers = this.extensions.offers();
     // Offers gone or changed since are no offers any more
@@ -1220,19 +1223,12 @@ export class Viewer extends EventEmitter {
       this.offerErrors.set(o.name, { filter: o.filter, error });
       this.offerMatched.delete(o.name);
     }
-    if (file && this.state.totalFrames > 0) {
-      const interval = Math.min(Math.max(Math.round(this.state.duration * 1000), 1), MAX_IO_INTERVAL);
-      for (let i = 0; i < valid.length; i += OFFERS_PER_PASS) {
-        const batch = valid.slice(i, i + OFFERS_PER_PASS);
-        const params = Object.fromEntries(batch.flatMap((o, k) => [[`graph${k}`, "packets"], [`filter${k}`, o.filter]]));
-        const r = await this.engine.call<{ iograph: { items?: (number | string)[] }[] }>("iograph", { interval, ...params });
-        if (seq !== this.offerSeq || this.state.file !== file) return;
-        for (const [k, o] of batch.entries()) {
-          // Strings are bucket indices, numbers packet counts
-          const packets = (r.iograph[k]?.items ?? []).reduce<number>((a, v) => a + (typeof v === "number" ? v : 0), 0);
-          if (packets > 0) this.offerMatched.set(o.name, { offer: { name: o.name, label: o.label, text: o.text }, filter: o.filter });
-          else this.offerMatched.delete(o.name);
-        }
+    if (file && this.state.totalFrames > 0 && valid.length) {
+      const found = await this.panelData.anyMatch(valid.map((o) => o.filter));
+      if (seq !== this.offerSeq || this.state.file !== file) return;
+      for (const o of valid) {
+        if (found.get(o.filter)) this.offerMatched.set(o.name, { offer: { name: o.name, label: o.label, text: o.text }, filter: o.filter });
+        else this.offerMatched.delete(o.name);
       }
     }
     this.showOffers();
@@ -1248,9 +1244,13 @@ export class Viewer extends EventEmitter {
 
   /** The matched offers the user sees: not of open panels, not dismissed. */
   private showOffers(): void {
-    const offers = [...this.offerMatched.values()].map((m) => m.offer).filter((o) => !this.panels.isOpen(o.name) && !this.offerDismissed.has(o.name));
-    offers.sort((a, b) => a.name.localeCompare(b.name));
+    const offers = this.shownOffers();
     if (JSON.stringify(offers) !== JSON.stringify(this.state.panelOffers)) this.set({ panelOffers: offers });
+  }
+
+  private shownOffers(): PanelOffer[] {
+    const offers = [...this.offerMatched.values()].map((m) => m.offer).filter((o) => !this.panels.isOpen(o.name) && !this.offerDismissed.has(o.name));
+    return offers.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /** The user dismissed a panel's offer: not offered again for this file. */
@@ -1264,7 +1264,7 @@ export class Viewer extends EventEmitter {
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([this.offerRun, new Promise<void>((done) => (timer = setTimeout(done, ms)))]);
     clearTimeout(timer);
-    return [...this.offerMatched.values()].map((m) => m.offer);
+    return this.shownOffers();
   }
 
   /**
