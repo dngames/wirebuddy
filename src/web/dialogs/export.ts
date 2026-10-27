@@ -48,6 +48,14 @@ export function openExportDialog(initial: Which = "displayed"): void {
   const pathIn = h("input", { type: "text", class: "ex-path", spellcheck: false, value: defaultPath(file, which), attrs: { "aria-label": "Output file" } });
   const browse = h("button", { class: "btn" }, "Browse…");
   const err = h("div", { class: "of-err", hidden: true });
+  const commentsBox = h("input", { type: "checkbox", checked: true });
+  const commentsOpt = h("label", { class: "ex-opt", hidden: marked === 0 }, commentsBox, h("span", null, "Marks and their notes as packet comments"));
+  // pcap has no packet comments
+  const syncComments = (): void => {
+    const pcap = /\.pcap$/i.test(pathIn.value.trim());
+    commentsBox.disabled = pcap;
+    commentsOpt.classList.toggle("disabled", pcap);
+  };
 
   const showErr = (m: string | null): void => {
     err.textContent = m ?? "";
@@ -68,6 +76,7 @@ export function openExportDialog(initial: Which = "displayed"): void {
   rangeIn.addEventListener("focus", () => setWhich("range"));
   pathIn.addEventListener("input", () => {
     pathEdited = true;
+    syncComments();
   });
   browse.addEventListener("click", () =>
     openFilePicker({
@@ -79,6 +88,7 @@ export function openExportDialog(initial: Which = "displayed"): void {
       onPick: (p) => {
         pathIn.value = p;
         pathEdited = true;
+        syncComments();
         return null;
       },
     }),
@@ -100,8 +110,10 @@ export function openExportDialog(initial: Which = "displayed"): void {
     ),
     h("div", { class: "dlg-field ex-pathrow" }, h("label", null, "Save as:", pathIn), browse),
     h("div", { class: "goto-hint" }, "The format follows the file extension: .pcapng or .pcap."),
+    commentsOpt,
     err,
   );
+  syncComments();
 
   const exportBtn = d.button("Export", () => void run(false), { primary: true });
   d.button("Cancel", () => d.close());
@@ -123,9 +135,11 @@ export function openExportDialog(initial: Which = "displayed"): void {
       const req: ExportRequest = { path, which };
       if (which === "range") req.range = range;
       if (overwrite) req.overwrite = true;
+      if (commentsBox.checked && !commentsBox.disabled) req.markComments = true;
       const r = await act.exportPackets(req);
       d.close();
-      toast("info", `Exported ${fmtInt(r.frames)} packet${r.frames === 1 ? "" : "s"} (${fmtSize(r.size)}) to ${baseName(r.path)}`, {
+      const comments = r.comments ? `, ${fmtInt(r.comments)} mark${r.comments === 1 ? "" : "s"} as comments` : "";
+      toast("info", `Exported ${fmtInt(r.frames)} packet${r.frames === 1 ? "" : "s"} (${fmtSize(r.size)}${comments}) to ${baseName(r.path)}`, {
         label: "Open",
         run: () =>
           void act.openFile(r.path).then((e) => {

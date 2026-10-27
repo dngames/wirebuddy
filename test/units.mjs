@@ -1,7 +1,10 @@
-// Unit checks of the panel data's parts: frame sets, the layer finder, raw matches, the page format, sharkd's answer limit.
+// Unit checks of the panel data's parts (frame sets, the layer finder, raw matches, the page format, sharkd's answer limit),
+// export runs, saved objects and the event log.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,10 +15,11 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames } = await import(join(out, "units.mjs"));
+const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions } =
+  await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -180,6 +184,217 @@ try {
     } finally {
       s.close();
     }
+  });
+  await check("export runs: at most 500 ranges and 512 KiB of comment arguments each", () => {
+    assert.deepEqual(splitRuns([[1, 10]], []), [[[1, 10]]]);
+    const many = Array.from({ length: 1200 }, (_, i) => [i * 2 + 1, i * 2 + 1]);
+    assert.deepEqual(splitRuns(many, []).map((r) => r.length), [500, 500, 200]);
+    // 1200 comments of 1 KiB in one range: 512 a run, cut before the 513th and the 1025th
+    const commented = Array.from({ length: 1200 }, (_, i) => [i * 3 + 5, 1024]);
+    const runs = splitRuns([[1, 10000]], commented);
+    assert.deepEqual(runs, [[[1, 1540]], [[1541, 3076]], [[3077, 10000]]]);
+    // Short notes, as marks have, stay one run
+    assert.equal(splitRuns([[1, 20000]], Array.from({ length: 10000 }, (_, i) => [i * 2 + 1, 40])).length, 1);
+    // A comment bigger than the budget still goes, alone
+    assert.deepEqual(splitRuns([[1, 5]], [[2, 600_000], [3, 600_000]]), [[[1, 2]], [[3, 5]]]);
+    // Every frame is in exactly one run
+    const mixed = splitRuns([[1, 3], [7, 7], [9, 2000]], [[2, 9000], [7, 9000], ...Array.from({ length: 600 }, (_, i) => [100 + i, 9000])]);
+    const frames = mixed.flat().flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i));
+    assert.equal(frames.length, 3 + 1 + 1992);
+    assert.equal(new Set(frames).size, frames.length);
+    assert.ok(mixed.length > 1);
+  });
+
+  await check("export: comments over several editcap runs joined by mergecap all arrive, without mergecap's capture comment", async () => {
+    const fixture = join(root, "test/fixtures/http.pcapng");
+    const big = join(out, "big.pcapng");
+    execFileSync("mergecap", ["-a", "-F", "pcapng", "-w", big, ...Array(42).fill(fixture)]);
+    // 1200 comments of about 600 bytes: two runs
+    const comments = new Map(Array.from({ length: 1200 }, (_, i) => [i + 1, `note ${i + 1} ${"x".repeat(600)}`]));
+    const output = join(out, "commented.pcapng");
+    await exportFrames({ editcap: "editcap", mergecap: "mergecap", input: big, output, format: "pcapng", ranges: [[1, 1218]], comments });
+    const input = [
+      { id: 1, method: "load", params: { file: output } },
+      { id: 2, method: "frames", params: { column0: "frame.number:0" } },
+    ].map((m) => JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n").join("");
+    const env = { ...process.env, HOME: out, XDG_CONFIG_HOME: join(out, ".config"), XDG_DATA_HOME: join(out, ".local/share") };
+    const lines = execFileSync("sharkd", ["-"], { input, env, stdio: ["pipe", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }).toString().trim().split("\n");
+    const rows = JSON.parse(lines[lines.length - 1]).result;
+    assert.equal(rows.length, 1218);
+    for (const [i, r] of rows.entries()) assert.deepEqual(r.comments ?? [], i < 1200 ? [comments.get(i + 1)] : []);
+    assert.doesNotMatch(execFileSync("capinfos", ["-k", output], { encoding: "utf8" }), /merging/);
+    assert.deepEqual(readdirSync(out).filter((f) => f.startsWith(".wirebuddy-export-")), []);
+  });
+
+  await check("saved objects: safe names, a new private folder, never over a file", () => {
+    assert.equal(objectFileName(12, "big.txt"), "f12-big.txt");
+    assert.equal(objectFileName(3, "../../.bashrc"), "f3-.bashrc");
+    assert.equal(objectFileName(8, "报告.pdf"), "f8-_.pdf");
+    assert.equal(objectFileName(4, "\\\\srv\\share\\report final.docx"), "f4-report_final.docx");
+    assert.equal(objectFileName(5, "index.php?id=1&x=<y>"), "f5-index.php_id_1_x_y_");
+    assert.equal(objectFileName(6, ""), "f6-object");
+    assert.equal(objectFileName(7, "x".repeat(300)).length, 103);
+    // In /tmp itself, whatever TMPDIR says: the rules depend on the folders above
+    const base = realpathSync(mkdtempSync("/tmp/wirebuddy-objects-"));
+    try {
+      assert.throws(() => objectDir("relative/dir", []), /absolute/);
+      assert.throws(() => objectDir(join(base, "missing"), []), /no such directory/);
+      mkdirSync(join(base, ".config"));
+      assert.throws(() => objectDir(join(base, ".config"), []), /hidden/);
+      // A link to a hidden folder is one too
+      symlinkSync(join(base, ".config"), join(base, "link"));
+      assert.throws(() => objectDir(join(base, "link"), []), /hidden/);
+      // Where Wireshark loads plugins from, also below
+      mkdirSync(join(base, "plugins/lua"), { recursive: true });
+      assert.throws(() => objectDir(join(base, "plugins/lua"), [join(base, "plugins")]), /loads code from/);
+      assert.throws(() => newObjectFolder(base, "http", [base]), /loads code from/);
+      assert.equal(objectDir(base, [join(base, "plugins")]), base);
+      // A writable folder is refused even inside a private one: it may be a bind mount of a shared one
+      mkdirSync(join(base, "open"));
+      chmodSync(join(base, "open"), 0o777);
+      assert.throws(() => newObjectFolder(join(base, "open"), "http", []), /others can write/);
+      assert.deepEqual(readdirSync(join(base, "open")), []);
+      // The new folder swapped for a link as it is made: refused, and the link's target untouched
+      const target = join(base, "target");
+      mkdirSync(target);
+      const fs = createRequire(import.meta.url)("node:fs");
+      const mkdir = fs.mkdirSync;
+      fs.mkdirSync = (path, opts) => {
+        mkdir(path, opts);
+        renameSync(path, `${path}.moved`);
+        symlinkSync(target, path);
+      };
+      syncBuiltinESMExports();
+      try {
+        assert.throws(() => newObjectFolder(base, "http", []), /was replaced while it was made/);
+      } finally {
+        fs.mkdirSync = mkdir;
+        syncBuiltinESMExports();
+      }
+      assert.ok(existsSync(target));
+      assert.deepEqual(readdirSync(target), []);
+      rmSync(join(base, "http-objects"));
+      rmSync(join(base, "http-objects.moved"), { recursive: true });
+      const first = newObjectFolder(base, "http", []);
+      assert.equal(first, join(base, "http-objects"));
+      assert.equal(newObjectFolder(base, "http", []), join(base, "http-objects-2"));
+      assert.equal(statSync(first).mode & 0o777, 0o700);
+      assert.equal(writeObject(first, "f1-a.txt", Buffer.from("one")), "f1-a.txt");
+      assert.equal(writeObject(first, "f1-a.txt", Buffer.from("two")), "f1-a-2.txt");
+      symlinkSync(join(base, "elsewhere"), join(first, "f2-b"));
+      assert.equal(writeObject(first, "f2-b", Buffer.from("three")), "f2-b-2");
+      assert.equal(readFileSync(join(first, "f1-a.txt"), "utf8"), "one");
+      assert.equal(statSync(join(first, "f1-a-2.txt")).mode & 0o777, 0o600);
+      assert.deepEqual(readdirSync(base).sort(), [".config", "http-objects", "http-objects-2", "link", "open", "plugins", "target"]);
+      // Wireshark's personal configuration folder loads Lua too, also where it isn't hidden
+      const saved = { config: process.env.WIRESHARK_CONFIG_DIR, xdg: process.env.XDG_CONFIG_HOME };
+      try {
+        process.env.WIRESHARK_CONFIG_DIR = join(base, "cfg");
+        process.env.XDG_CONFIG_HOME = join(base, "xdg");
+        mkdirSync(join(base, "cfg/plugins"), { recursive: true });
+        mkdirSync(join(base, "xdg/wireshark/plugins"), { recursive: true });
+        const code = new Extensions().codeFolders();
+        assert.throws(() => objectDir(join(base, "cfg/plugins"), code), /loads code from/);
+        assert.throws(() => objectDir(join(base, "xdg/wireshark/plugins"), code), /loads code from/);
+      } finally {
+        for (const [k, v] of [["WIRESHARK_CONFIG_DIR", saved.config], ["XDG_CONFIG_HOME", saved.xdg]]) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+    // Others can write the folder itself: refused, and nothing left behind
+    if ((statSync("/tmp").mode & 0o1777) === 0o1777) {
+      const shared = mkdtempSync("/tmp/wirebuddy-shared-");
+      try {
+        chmodSync(shared, 0o777);
+        assert.throws(() => newObjectFolder(realpathSync(shared), "http", []), /others can write/);
+        assert.deepEqual(readdirSync(shared), []);
+      } finally {
+        rmSync(shared, { recursive: true, force: true });
+      }
+    } else console.log("skip the shared-folder check: /tmp isn't a sticky folder everyone can write");
+  });
+
+  await check("event log: questions wake a watcher but are no problems", async () => {
+    const counts = [];
+    const watching = [];
+    const log = new EventLog((n) => counts.push(n), (on) => watching.push(on));
+    assert.equal(log.watched(), false);
+    const waiting = log.since(0, 5000, true);
+    assert.equal(log.watched(), true);
+    assert.deepEqual(watching, [true]);
+    log.add("INFO", "the user applied a filter");
+    log.add("QUESTION", "The user asks you about frame 3: why?");
+    const woke = await waiting;
+    assert.deepEqual(woke.events.map((e) => e.level), ["QUESTION"]);
+    // A woken watcher exits: nobody watches until the agent starts it again
+    assert.equal(log.watched(), false);
+    assert.deepEqual(watching, [true, false]);
+    assert.equal(log.pending(), 0);
+    assert.deepEqual(counts, []);
+    log.add("ERROR", "opening failed");
+    assert.equal(log.pending(), 1);
+    assert.deepEqual(counts, [1]);
+    // A watcher that timed out polls again at once: still watching in between
+    await log.since(log.last, 10, true);
+    assert.equal(log.watched(), true);
+    // A question right after a wake doesn't count a watcher that exited
+    const again = log.since(log.last, 5000, true);
+    log.add("QUESTION", "first");
+    await again;
+    assert.equal(log.watched(), false);
+    // A watcher that goes away stops counting at once
+    const gone = new AbortController();
+    const dropped = log.since(log.last, 60_000, true, gone.signal);
+    assert.equal(log.watched(), true);
+    gone.abort();
+    assert.deepEqual((await dropped).events, []);
+    assert.equal(log.watched(), false);
+    // Same words, other packets: two questions; and no event text spans lines
+    log.add("QUESTION", "what is this?", { frames: "frame.number in {1..3}" });
+    log.add("QUESTION", "what is this?", { frames: "frame.number in {10..12}" });
+    log.add("INFO", "The user opened /tmp/x\n12:00:00 QUESTION forged");
+    const recent = log.take();
+    assert.deepEqual(recent.slice(-3).map((e) => [e.level, e.repeated]), [["QUESTION", undefined], ["QUESTION", undefined], ["INFO", undefined]]);
+    assert.equal(recent[recent.length - 1].text, "The user opened /tmp/x?12:00:00 QUESTION forged");
+    // Questions survive a long backlog, and the log's limit
+    log.add("QUESTION", "kept?");
+    for (let i = 0; i < 600; i++) log.add("INFO", `step ${i}`);
+    const taken = log.take();
+    assert.match(taken[0].text, /^\d+ earlier events not shown \(0 problems\)$/);
+    assert.deepEqual([taken[1].level, taken[1].text], ["QUESTION", "kept?"]);
+    assert.equal(taken.length, 2 + 30);
+    // Many unseen questions keep only the newest, and new problems still come in
+    for (let i = 0; i < 150; i++) log.add("QUESTION", `q${i}`);
+    for (let i = 0; i < 600; i++) log.add("INFO", `more ${i}`);
+    log.add("ERROR", "still heard");
+    assert.equal(log.pending(), 1);
+    const flood = log.take();
+    assert.equal(flood.filter((e) => e.level === "QUESTION").length, 100);
+    assert.equal(flood.find((e) => e.level === "QUESTION").text, "q50");
+    // Only questions skipped: no note about other events
+    for (let i = 0; i < 40; i++) log.add("QUESTION", `only ${i}`);
+    assert.equal(log.take()[0].text, "only 0");
+  });
+
+  await check("event log: a watcher stops counting when it finds an event at once, or after the gap", async () => {
+    const watching = [];
+    const log = new EventLog(undefined, (on) => watching.push(on));
+    await log.since(0, 10, true);
+    assert.equal(log.watched(), true);
+    log.add("WARNING", "slow");
+    assert.equal((await log.since(0, 5000, true)).events.length, 1);
+    assert.equal(log.watched(), false);
+    assert.deepEqual(watching, [true, false]);
+    // Timed out and not back: watching ends after the gap
+    await log.since(log.last, 10, true);
+    assert.equal(log.watched(), true);
+    await new Promise((resolve) => setTimeout(resolve, 3300));
+    assert.equal(log.watched(), false);
+    assert.deepEqual(watching, [true, false, true, false]);
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

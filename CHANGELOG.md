@@ -25,6 +25,9 @@ First version.
 - MCP server with tools to start and stop captures, read, filter, select and mark packets and
   follow streams; it reminds the agent to open the viewer in the browser pane
 - Problems in the viewer go to the agent instead of the screen; `--watch` wakes it when one happens
+- Ask the agent about packets from the packet list's context menu; the question wakes `--watch`
+- Marks and their notes are written as packet comments when exporting to pcapng
+- `export_objects` MCP tool: list and save the files carried in the traffic
 - Wireshark dissector plugins, preferences and `--profile` support
 - Extensions: the agent teaches the viewer protocols Wireshark doesn't decode with Lua
   dissectors, tests them on the open capture and reloads; Analyze › Extensions and

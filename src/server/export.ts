@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, extname, isAbsolute, join } from "node:path";
-import { mergeRanges, type Ranges } from "../shared/ranges.ts";
+import { inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 
 /** editcap refuses more than 512 selections per run. */
 const SELECTIONS_PER_RUN = 500;
+/** Bytes of packet comment arguments per editcap run, well within what a command line may hold. */
+const COMMENT_BYTES_PER_RUN = 512 * 1024;
 
 function run(bin: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -62,9 +63,41 @@ export function checkTarget(path: string, protectedFiles: string[], overwrite: b
 }
 
 /**
+ * Splits `ranges` into one list per editcap run: at most SELECTIONS_PER_RUN
+ * ranges, and commented frames (sorted, each with the bytes of its comment
+ * argument) up to COMMENT_BYTES_PER_RUN, but at least one.
+ */
+export function splitRuns(ranges: Ranges, commented: [number, number][]): Ranges[] {
+  const out: Ranges[] = [[]];
+  let bytes = 0;
+  let c = 0;
+  const fits = (k: number) => bytes === 0 || bytes + commented[k][1] <= COMMENT_BYTES_PER_RUN;
+  for (const range of ranges) {
+    let a = range[0];
+    const b = range[1];
+    while (a <= b) {
+      while (c < commented.length && commented[c][0] < a) c++;
+      if (out[out.length - 1].length === SELECTIONS_PER_RUN || (c < commented.length && commented[c][0] === a && !fits(c))) {
+        out.push([]);
+        bytes = 0;
+      }
+      let k = c;
+      for (; k < commented.length && commented[k][0] <= b && fits(k); k++) bytes += commented[k][1];
+      // A full run ends before the next commented frame
+      const end = k < commented.length && commented[k][0] <= b ? commented[k][0] - 1 : b;
+      out[out.length - 1].push([a, end]);
+      c = k;
+      a = end + 1;
+    }
+  }
+  return out;
+}
+
+/**
  * Writes the frames in `ranges` of `input` to `output` with editcap, splitting
- * large selections into several runs joined by mergecap. The result appears
- * atomically.
+ * large selections into several runs joined by mergecap. `comments` (by input
+ * frame number) become packet comments next to the ones the frames have; pcap
+ * can't hold them. The result appears atomically.
  */
 export async function exportFrames(opts: {
   editcap: string;
@@ -73,23 +106,38 @@ export async function exportFrames(opts: {
   output: string;
   format: "pcapng" | "pcap";
   ranges: Ranges;
+  comments?: Map<number, string>;
 }): Promise<number> {
   const { editcap, mergecap, input, output, format, ranges } = opts;
+  const comments = format === "pcapng" ? (opts.comments ?? new Map<number, string>()) : new Map<number, string>();
   const partial = `${output}.partial-${randomBytes(6).toString("hex")}`;
   const sel = (r: [number, number]) => (r[0] === r[1] ? String(r[0]) : `${r[0]}-${r[1]}`);
+  const commented = [...comments].map(([f, text]): [number, number] => [f, Buffer.byteLength(`${f}:${text}`) + 4]).sort((x, y) => x[0] - y[0]);
+  const runs = splitRuns(ranges, commented);
+  const args = (part: Ranges, to: string, fmt: string): string[] => {
+    const add = [...comments].filter(([f]) => inRanges(part, f)).flatMap(([f, text]) => ["-a", `${f}:${text}`]);
+    return ["-F", fmt, ...(add.length ? ["--preserve-packet-comments", ...add] : []), "-r", input, to, ...part.map(sel)];
+  };
   try {
-    if (ranges.length <= SELECTIONS_PER_RUN) await run(editcap, ["-F", format, "-r", input, partial, ...ranges.map(sel)]);
+    if (runs.length === 1) await run(editcap, args(runs[0], partial, format));
     else {
-      const dir = mkdtempSync(join(tmpdir(), "wirebuddy-export-"));
+      // Next to the export, where there is room for it, rather than a small tmpfs
+      const dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
       try {
         const parts: string[] = [];
-        for (let i = 0; i < ranges.length; i += SELECTIONS_PER_RUN) {
-          const part = join(dir, `part${String(parts.length).padStart(5, "0")}.pcapng`);
-          await run(editcap, ["-F", "pcapng", "-r", input, part, ...ranges.slice(i, i + SELECTIONS_PER_RUN).map(sel)]);
-          parts.push(part);
+        for (const part of runs) {
+          const file = join(dir, `part${String(parts.length).padStart(5, "0")}.pcapng`);
+          await run(editcap, args(part, file, "pcapng"));
+          parts.push(file);
         }
         // Parts are in frame order; -a concatenates instead of merging by time
-        await run(mergecap, ["-a", "-F", format, "-w", partial, ...parts]);
+        if (format === "pcap") await run(mergecap, ["-a", "-F", "pcap", "-w", partial, ...parts]);
+        else {
+          const merged = join(dir, "merged.pcapng");
+          await run(mergecap, ["-a", "-F", "pcapng", "-w", merged, ...parts]);
+          // mergecap names the parts in a capture comment
+          await run(editcap, ["-F", "pcapng", "--discard-capture-comment", merged, partial]);
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

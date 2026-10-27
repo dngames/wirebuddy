@@ -18,7 +18,8 @@ decode or a packet list can't show, the agent extends the viewer itself.
 - **One view for both of you.** The agent's filters, selected packet, marks and columns show up
   in your view as it works, each with a notice; what you do there (open a file, apply a filter,
   start a capture) reaches the agent with its next call, and it sees which packets you selected.
-  You check its findings in the packets instead of taking a summary on trust.
+  Right-click packets to ask the agent about them without leaving the view. You check its
+  findings in the packets instead of taking a summary on trust.
 - **The agent extends the viewer.** Traffic Wireshark doesn't know, such as a company's sensor
   stream or a game's protocol, shows up as "Data". The agent writes a Lua dissector for it from
   the bytes or a spec, tests it against the open capture and reloads the view, which then
@@ -42,7 +43,8 @@ The viewer itself works like Wireshark:
 - **Statistics:** Expert Information, I/O Graph, protocol hierarchy, conversations and
   endpoints, optionally limited to the display filter.
 - **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
-  (displayed, marked, selected or a range) to a new pcapng/pcap.
+  (displayed, marked, selected or a range) to a new pcapng/pcap; in pcapng the marks and their
+  notes go along as packet comments, which Wireshark shows.
 - **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
   checked as you type, new files automatically, a ring buffer and stop conditions; the view
   updates about once a second.
@@ -114,7 +116,7 @@ Options (`--help` shows the same):
 | `--tls-keylog <file>` | | decrypt TLS with this key log file |
 | | `WIREBUDDY_EXTENSIONS` | more folders of extensions, separated by `:` |
 | `--mcp` | | also serve MCP over stdio; logs go to stderr |
-| `--watch <file>` | | wait for the next problem in a running viewer, print it, exit (see below) |
+| `--watch <file>` | | wait for the next problem or question in a running viewer, print it, exit (see below) |
 | `--version` | | print the version |
 
 ## TLS decryption
@@ -222,7 +224,13 @@ While Claude is attached, the viewer shows you no error messages. Problems (a fi
 open, a rejected filter, a failed capture, a crashed `sharkd`) and what you do in the viewer go
 to Claude instead, with its next WireBuddy tool call; the status bar only counts the problems
 waiting for it. To react while you work, Claude runs `wirebuddy --watch <instance-file>` as a
-background command: it waits for the next problem, prints it and exits, which wakes Claude.
+background command: it waits for the next problem or question, prints it and exits, which wakes
+Claude.
+
+To ask about packets without switching to the chat, right-click them in the packet list and
+choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packets…**). The question
+goes to Claude with the packet numbers and wakes it if its watch is running (the dialog says
+whether it is); otherwise it comes with Claude's next step. Claude answers in the chat.
 
 Example prompts:
 
@@ -230,6 +238,7 @@ Example prompts:
 - "Explain the packet I have selected."
 - "Mark all DNS failures and filter to them."
 - "Capture on eth0 for a minute and tell me when you see TCP retransmissions."
+- "Save the files that were downloaded over HTTP and check them against these hashes."
 
 ### Example: a robot arm that stutters
 
@@ -299,7 +308,8 @@ time, and lists the CDN and third parties (consent managers, trackers) the page 
 | `follow_stream` | Reassembled stream payload as text |
 | `expert_info` | Expert Information grouped by severity and message, with example frames |
 | `io_graph` | Packets/bytes/bits over time for up to 4 filters: peaks, empty stretches, a downsampled series |
-| `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file |
+| `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file, marks as packet comments |
+| `export_objects` | List the files carried in the traffic (HTTP, email, SMB, TFTP, DICOM, FTP), or save them to a new folder |
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
@@ -313,7 +323,8 @@ time, and lists the CDN and third parties (consent managers, trackers) the page 
 | `panel` | Open, reload, check on, snapshot or close an extension's panel in the user's view |
 
 Every agent action that changes the view shows a notice in the UI. Every tool result also
-carries what happened in the viewer since the agent's last call: problems and what you did.
+carries what happened in the viewer since the agent's last call: problems, what you did and
+the questions you asked it.
 
 ## How it works
 
@@ -345,9 +356,20 @@ carries what happened in the viewer since the agent's last call: problems and wh
   change the filter, marks, selection and columns, open Wireshark, and write new
   `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced unless the
   agent exported it itself in the same session.
+- `export_objects` saves files from the traffic, whose names and contents a sender chose, only
+  into a new folder it creates (`http-objects`, `http-objects-2`, …) in a directory the agent
+  names, under names of its own (`f12-report.pdf`). No other user may be able to change that
+  folder or any folder above it: `/tmp` works, and so do your own folders unless one of them is
+  writable by others; network and FUSE filesystems are refused. It is never a hidden folder
+  such as `~/.config`, nor one Wireshark or WireBuddy loads code or configuration from. It
+  never replaces or follows an existing file.
+- Text from a capture can't pose as WireBuddy's own messages to the agent: every event is one
+  line, the real events block carries a random tag the agent learns at startup, and followed
+  stream payload lines start with `| `.
 - Open only accepts files whose content is a capture (pcap, pcapng, snoop, Network Monitor; also
   gzip- or zstd-compressed), whatever their name, so it can't be used to read other files.
-- Live captures and exports are readable only by you (files `0600`, capture folder `0700`).
+- Live captures, exports and saved objects are readable only by you (files `0600`, folders
+  `0700`).
 - Extensions are Lua code that runs as you inside `sharkd` and the Wireshark WireBuddy opens. The
   MCP tools can test, reload and switch extensions, not write them: an agent writes them with its
   own file tools, so it needs file access anyway. Extensions another user could have changed are
@@ -373,7 +395,8 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
 
 - A live capture re-reads the whole current file on every update, so very long or busy captures
   get slower to refresh; use a ring buffer or a capture filter for those.
-- No packet comments or time references yet.
+- Packet comments can't be added or edited in the viewer (marks go into pcapng exports as
+  comments), and there are no time references yet.
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
   Capture → Refresh Interfaces (F5): Wireshark skips the scan when it starts with a file.
 

@@ -14,6 +14,7 @@ import { get, HttpError } from "./api.ts";
 import * as act from "./actions.ts";
 import { agentName, app, bus, captureActive, hooks } from "./app.ts";
 import { promptDialog } from "./dialog.ts";
+import { openAskDialog } from "./dialogs/ask.ts";
 import { openExportDialog } from "./dialogs/export.ts";
 import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
@@ -645,7 +646,11 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
   const conv = fd ? conversationFilters(fd) : [];
   const filterItems = (apply: boolean): MenuItem[] =>
     conv.map((c) => ({ label: `${c.label} Conversation`, action: () => hooks.setFilter(c.filter, apply) }));
+  const ask: MenuItem[] = s?.agent.attached
+    ? [{ label: n > 1 ? `Ask ${agentName()} about These ${n} Packets…` : `Ask ${agentName()} about This Packet…`, action: openAskDialog }, SEP]
+    : [];
   const items: MenuItem[] = [
+    ...ask,
     {
       label: n > 1 ? `Mark/Unmark ${n} Packets` : marked ? "Unmark Packet" : "Mark Packet",
       shortcut: keyLabel("Ctrl+M"),

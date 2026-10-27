@@ -382,7 +382,7 @@ interface State {
  * `privateDev`: set below a folder of the user's that others can't enter,
  * for entries on that folder's filesystem.
  */
-interface RootTrust {
+export interface RootTrust {
   problem: string | null;
   real: string;
   dev: number;
@@ -446,6 +446,9 @@ export class Extensions {
   /** WireBuddy's private folder: plugins/ for WIRESHARK_PLUGIN_DIR, copies/ for the loaded extensions. */
   private home: string | null = null;
   private overlay: string | null = null;
+  /** Where every WireBuddy's plugin folders live, and Wireshark's global plugin folder. */
+  private base: string | null = null;
+  private globalDir: string | null = null;
   /** The loader's line per extension, for its copy: every sharkd start loads exactly this code. */
   private loaded = new Map<string, string>();
   /** The set (and what was said about it) before the last change, to go back to when it crashed sharkd. */
@@ -468,6 +471,27 @@ export class Extensions {
     this.state = readState(this.stateFile);
   }
 
+  /**
+   * Folders whose files Wireshark or WireBuddy load as code: the extensions',
+   * every WireBuddy's plugin folders, Wireshark's global and personal plugin
+   * and configuration folders.
+   */
+  codeFolders(): string[] {
+    const config = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+    return [
+      this.dir,
+      ...this.shared,
+      this.home,
+      this.base,
+      this.globalDir,
+      process.env.WIRESHARK_PLUGIN_DIR,
+      process.env.WIRESHARK_CONFIG_DIR,
+      join(config, "wireshark"),
+      join(homedir(), ".wireshark"),
+      join(homedir(), ".local/lib/wireshark"),
+    ].filter((d): d is string => !!d);
+  }
+
   /** Finds the real global plugin folder and builds WireBuddy's plugin folder next to it. */
   async init(sharkd: string): Promise<void> {
     // The checks that keep others' Lua out rely on Linux owners, modes, ACLs and filesystem types
@@ -478,7 +502,9 @@ export class Extensions {
     try {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 });
       const probe = await probeSharkd(sharkd);
-      const home = mkdtempSync(join(this.overlayBase(), `${OVERLAY_PREFIX}${process.pid}-`));
+      this.globalDir = probe.globalDir;
+      this.base = this.overlayBase();
+      const home = mkdtempSync(join(this.base, `${OVERLAY_PREFIX}${process.pid}-`));
       this.home = home;
       // Wireshark loads every .lua below its plugin folder: the copies live next to it
       const overlay = join(home, "plugins");
@@ -1226,9 +1252,10 @@ const UNCHECKABLE_FS = new Set([
  * it must belong to root or the user and be closed to other writers, except
  * sticky ones (like /tmp), below which only the user's own entries count. A
  * folder of the user's that others can't enter makes everything below it on
- * the same filesystem private.
+ * the same filesystem private, unless `strict`: then every folder is checked,
+ * since one below may be a bind mount of a shared folder.
  */
-function rootTrust(root: string): RootTrust {
+export function rootTrust(root: string, strict = false): RootTrust {
   const fail = (problem: string): RootTrust => ({ problem, real: root, dev: -1, privateDev: null });
   let real: string;
   try {
@@ -1252,7 +1279,7 @@ function rootTrust(root: string): RootTrust {
         if (st.uid !== uid && st.uid !== 0) return fail("another user owns it");
         if (othersCanWrite(st, path)) return fail("others can write to it");
       }
-      if (privateDev !== null && st.dev === privateDev) continue;
+      if (!strict && privateDev !== null && st.dev === privateDev) continue;
       // Another filesystem mounted below the private folder: check it from here
       privateDev = null;
       if (st.uid !== uid && (st.uid !== 0 || sticky)) return fail("another user owns it or a folder above it");

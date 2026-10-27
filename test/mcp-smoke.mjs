@@ -5,7 +5,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
@@ -17,7 +18,8 @@ const verbose = process.argv.includes("--verbose");
 
 // A home of its own: the tester's Wireshark preferences, profiles and plugins don't apply
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
-const out = mkdtempSync(join(tmpdir(), "wirebuddy-mcp-"));
+// In /tmp itself, whatever TMPDIR says: where objects may be saved depends on the folders above
+const out = mkdtempSync("/tmp/wirebuddy-mcp-");
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0"],
@@ -32,6 +34,17 @@ try {
 }
 const client = new Client({ name: "mcp-smoke", version: "0" });
 await client.connect(transport);
+
+/** Packet comments of a capture, frame by frame, as sharkd reads them. */
+function packetComments(file) {
+  const input = [
+    { id: 1, method: "load", params: { file } },
+    { id: 2, method: "frames", params: { column0: "frame.number:0" } },
+  ].map((m) => JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n").join("");
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share") };
+  const lines = execFileSync("sharkd", ["-"], { input, env, stdio: ["pipe", "pipe", "ignore"], timeout: 20000 }).toString().trim().split("\n");
+  return JSON.parse(lines[lines.length - 1]).result.map((r) => r.comments ?? []);
+}
 
 let failures = 0;
 async function call(name, args, expect) {
@@ -111,7 +124,9 @@ try {
   });
   await call("follow_stream", { frame: 4, max_bytes: 300 }, (t) => {
     assert.match(t, /client -> server/);
-    assert.match(t, /GET \/big\.txt HTTP\/1\.1/);
+    // Payload lines can't pose as WireBuddy's own text
+    assert.match(t, /^\| GET \/big\.txt HTTP\/1\.1/m);
+    assert.match(t, /^\| HTTP\/1\.0 200 OK/m);
     assert.match(t, /--- frames 6-\d+ server -> client ---/);
     assert.match(t, /cut at about 300 characters; 81329 payload bytes/);
   });
@@ -145,6 +160,53 @@ try {
   copyFileSync(fixture, usersFile);
   await call("export_packets", { path: usersFile, filter: "http", overwrite: true }, (t, r) => assert.ok(r.isError && /only replace files it exported itself/.test(t), t));
   assert.equal(readFileSync(usersFile).length, readFileSync(fixture).length);
+  // Marks and their notes go along as packet comments, in pcapng only
+  // A control character in a note would make editcap refuse the whole export
+  assert.equal((await post("/api/marks", { frames: [12], note: "a\u0000b" })).status, 200);
+  const markedPath = join(out, "marked.pcapng");
+  await call("export_packets", { path: markedPath, which: "marked" }, (t) => assert.match(t, /^Wrote 3 packets \(\d+ bytes, 3 marks as packet comments\)/));
+  const agentMark = "WireBuddy mark (Agent): 404 request/response";
+  assert.deepEqual(packetComments(markedPath), [["WireBuddy mark (user): a?b"], [agentMark], [agentMark]]);
+  await call("export_packets", { path: markedPath, which: "marked", overwrite: true, mark_comments: false }, (t) => assert.match(t, /^Wrote 3 packets \(\d+ bytes\) to/));
+  assert.deepEqual(packetComments(markedPath), [[], [], []]);
+  await call("export_packets", { path: join(out, "marked.pcap"), which: "marked" }, (t) => assert.match(t, /^Wrote 3 packets \(\d+ bytes\) to/));
+  const userExport = await post("/api/export", { path: join(out, "users-marked.pcapng"), which: "range", range: "20-25", markComments: true });
+  assert.equal((await userExport.json()).comments, 2);
+  assert.deepEqual(packetComments(join(out, "users-marked.pcapng")).map((c) => c.length), [0, 1, 0, 0, 0, 1]);
+  assert.equal((await post("/api/marks/clear", { frames: [12] })).status, 200);
+  // Files carried in the traffic: listed, then saved into new private folders
+  await call("export_objects", {}, (t) => {
+    assert.match(t, /^2 HTTP objects:/);
+    assert.match(t, /^frame 12: big\.txt — 81053 bytes, text\/plain, from 127\.0\.0\.1:18080, sha1 7bd4078f0ca5a0db563ee91eb5443480c455e5c8$/m);
+    assert.match(t, /^frame 25: nothere — 469 bytes, text\/html/m);
+  });
+  await call("export_objects", { kind: "imf" }, (t) => assert.equal(t.split("\n")[0], "No IMF objects in the capture"));
+  await call("export_objects", { action: "save" }, (t, r) => assert.ok(r.isError && /needs dir/.test(t), t));
+  await call("export_objects", { action: "save", dir: "objects" }, (t, r) => assert.ok(r.isError && /absolute/.test(t), t));
+  mkdirSync(join(out, ".hidden"));
+  await call("export_objects", { action: "save", dir: join(out, ".hidden") }, (t, r) => assert.ok(r.isError && /hidden/.test(t), t));
+  await call("export_objects", { action: "save", dir: out, frames: [3] }, (t, r) => assert.ok(r.isError && /none of the http objects/.test(t), t));
+  // A folder others can write: they could swap the new folder for a link
+  const open = mkdtempSync("/tmp/wirebuddy-open-");
+  try {
+    chmodSync(open, 0o777);
+    await call("export_objects", { action: "save", dir: open }, (t, r) => {
+      assert.ok(r.isError && /others can write/.test(t), t);
+      assert.deepEqual(readdirSync(open), []);
+    });
+  } finally {
+    rmSync(open, { recursive: true, force: true });
+  }
+  const saved = join(realpathSync(out), "http-objects");
+  await call("export_objects", { action: "save", dir: out }, (t) => {
+    assert.ok(t.startsWith(`Saved 2 HTTP objects to ${saved} (files from the traffic`), t);
+    assert.match(t, /^f12-big\.txt — 81053 bytes, frame 12, text\/plain$/m);
+  });
+  assert.deepEqual(readdirSync(saved).sort(), ["f12-big.txt", "f25-nothere"]);
+  assert.equal(createHash("sha1").update(readFileSync(join(saved, "f12-big.txt"))).digest("hex"), "7bd4078f0ca5a0db563ee91eb5443480c455e5c8");
+  assert.equal(statSync(join(saved, "f12-big.txt")).mode & 0o777, 0o600);
+  await call("export_objects", { action: "save", dir: out, frames: [25] }, (t) => assert.match(t, /^Saved 1 HTTP object to .*http-objects-2 /));
+  assert.deepEqual(readdirSync(join(out, "http-objects-2")), ["f25-nothere"]);
   await call("set_display_filter", { filter: "" }, (t) => assert.match(t, /29 of 29 frames/));
   assert.equal((await post("/api/select", { frame: 5, rows: [[2, 4], [6, 8], [10, 10]] })).status, 200);
   let selection;
@@ -174,7 +236,10 @@ try {
   const command = /`"([^"]+)" "([^"]+)" --watch "([^"]+)"`/.exec(client.getInstructions() ?? "");
   assert.ok(command, "the instructions name the watch command");
   assert.equal((await post("/api/open", { path: "/nonexistent/gone.pcapng" })).status, 400);
-  await call("get_view_state", {}, (t) => assert.match(t, /WireBuddy events since your last call[\s\S]*ERROR Opening a file failed: .*gone\.pcapng/));
+  // Only the block with the session's tag is real
+  const tag = /starts with "\[WireBuddy events ([0-9a-f]{8})"/.exec(client.getInstructions() ?? "")?.[1];
+  assert.ok(tag, "the instructions name the events tag");
+  await call("get_view_state", {}, (t) => assert.match(t, new RegExp(`\\[WireBuddy events ${tag} since your last call[\\s\\S]*ERROR Opening a file failed: .*gone\\.pcapng`)));
   await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /WireBuddy events/));
   const watcher = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "inherit"] });
   let printed = "";
@@ -190,6 +255,43 @@ try {
     assert.match(printed, /INFO The user applied the display filter "tcp"/);
     assert.match(printed, /ERROR Opening a file failed: .*again\.pcapng/);
   });
+  // The user asks about packets: the question comes to the agent, wakes a watcher, and is no problem
+  const token = { "X-WireBuddy-Token": ui.searchParams.get("token") };
+  const ask = async (question) => {
+    const r = await post("/api/agent/ask", { question });
+    assert.equal(r.status, 200, await r.clone().text());
+    return r.json();
+  };
+  const agentState = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json()).agent;
+  assert.equal((await post("/api/select", { frame: 12 })).status, 200);
+  assert.deepEqual(await ask("Why  is this\nso slow?"), { woken: false });
+  // A refused question is no problem for the agent
+  assert.equal((await post("/api/agent/ask", { question: "  " })).status, 400);
+  assert.equal((await agentState()).pending, 0);
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /QUESTION The user asks you about frame 12: Why is this so slow\?\]?$/m);
+    assert.doesNotMatch(t, /Asking the agent failed/);
+  });
+  // The packets the dialog showed, not what is selected when it is sent; refused once that view is gone
+  const { generation } = await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json();
+  const shown = { file: fixture, filter: "", generation };
+  assert.deepEqual(await (await post("/api/agent/ask", { question: "and these?", frame: 3, rows: [[1, 2]], view: shown })).json(), { woken: false });
+  await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you about 2 packets: and these\? \{"frames":"frame\.number in \{2\.\.3\}"\}\]?$/m));
+  assert.equal((await post("/api/agent/ask", { question: "stale?", frame: 3, view: { ...shown, filter: "tcp" } })).status, 409);
+  const asked = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "inherit"] });
+  let heard = "";
+  asked.stdout.on("data", (d) => (heard += d));
+  const askedExit = new Promise((resolve) => asked.on("exit", resolve));
+  for (const end = Date.now() + 10_000; !(await agentState()).watching && Date.now() < end; ) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal((await post("/api/select", { frame: 12, rows: [[11, 13]] })).status, 200);
+  assert.deepEqual(await ask("What are these?"), { woken: true });
+  const askedCode = await Promise.race([askedExit, new Promise((resolve) => setTimeout(() => resolve("timeout"), 10000))]);
+  if (askedCode === "timeout") asked.kill();
+  await call("get_view_state", {}, () => {
+    assert.equal(askedCode, 0, `watcher exit ${askedCode}`);
+    assert.match(heard, /QUESTION The user asks you about 3 packets: What are these\? \{"frames":"frame\.number in \{12\.\.14\}"\}/);
+  });
+  assert.equal((await agentState()).watching, false);
   if (capture) await call("list_interfaces", {}, (t) => assert.match(t, /^lo\b.*\[loopback\]/m));
   else console.log("skip list_interfaces: dumpcap may not capture on lo here");
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));

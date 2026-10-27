@@ -1,8 +1,8 @@
 /**
  * `wirebuddy --watch <instance file>`: waits for the running viewer's next
- * problem, prints it with what the user did since the agent last looked, and
- * exits. An agent runs it as a background command to be woken when the user
- * runs into trouble.
+ * problem or question for the agent, prints it with what the user did since
+ * the agent last looked, and exits. An agent runs it as a background command
+ * to be woken when the user runs into trouble or asks it something.
  */
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { ViewerEvent } from "../shared/api.ts";
 import { eventLines } from "./events.ts";
 
-/** One long-poll request; the watcher loops until a problem comes. */
+/** One long-poll request; the watcher loops until a problem or question comes. */
 const POLL_MS = 50_000;
 
 interface Instance {
@@ -53,7 +53,7 @@ export async function watch(file: string, out: (line: string) => void = (l) => c
   };
   type Since = { events: ViewerEvent[]; last: number; taken: number };
   try {
-    // From what the agent saw last: a problem since its last tool call wakes it at once
+    // From what the agent saw last: a problem or question since its last tool call wakes it at once
     let after = (await call<Since>(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).taken;
     for (;;) {
       const r = await call<Since>(`/api/events?after=${after}&wait=${POLL_MS}&problems=1`);

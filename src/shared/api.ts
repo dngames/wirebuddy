@@ -62,6 +62,7 @@
  * | GET    | /api/events                   | ?after=<seq>&wait=<ms>&problems=1    | { events, last, taken } |
  * | POST   | /api/events                   | { level, text, details? } (from the page) | { ok: true }      |
  * | POST   | /api/events/take              |                                      | { events }             |
+ * | POST   | /api/agent/ask                | { question, frame?, rows?, view? } (409 if view is stale) | AskResult |
  * | GET    | /api/capture/interfaces       |                                      | CaptureInterface[]     |
  * | GET    | /api/capture/check            | ?iface=&filter=                      | FilterCheck            |
  * | GET    | /api/capture/activity         |                                      | InterfaceActivity      |
@@ -135,9 +136,10 @@ export interface ViewState {
   /**
    * An MCP agent is attached: problems go to it instead of the page, which
    * only shows how many are waiting (`pending`). `name` labels it in the UI
-   * ("Claude" for Claude clients, else "Agent").
+   * ("Claude" for Claude clients, else "Agent"); `watching`: its `--watch`
+   * waits, so a problem or question wakes it at once.
    */
-  agent: { attached: boolean; pending: number; name: string };
+  agent: { attached: boolean; pending: number; name: string; watching: boolean };
   /** Whether a `wireshark` executable was found for "Open in Wireshark". */
   wiresharkAvailable: boolean;
   /**
@@ -479,6 +481,8 @@ export interface ExportRequest {
   range?: string;
   /** Replace an existing file. */
   overwrite?: boolean;
+  /** Write the marks of the exported packets, with their notes, as packet comments (pcapng only). */
+  markComments?: boolean;
 }
 
 /** Something that happened in the viewer, for the agent: a problem or what the user did. */
@@ -486,8 +490,8 @@ export interface ViewerEvent {
   seq: number;
   /** ISO time. */
   time: string;
-  /** INFO: what the user did; WARNING and ERROR: problems. */
-  level: "INFO" | "WARNING" | "ERROR";
+  /** INFO: what the user did; WARNING and ERROR: problems; QUESTION: the user asks the agent. */
+  level: "INFO" | "WARNING" | "ERROR" | "QUESTION";
   text: string;
   details?: Record<string, unknown>;
   /** It happened this many times in a row. */
@@ -504,10 +508,17 @@ export interface FindResult {
   wrapped: boolean;
 }
 
+/** A question for the agent: `woken` when its `--watch` was waiting, else it sees the question with its next tool call. */
+export interface AskResult {
+  woken: boolean;
+}
+
 export interface ExportResult {
   path: string;
   frames: number;
   size: number;
+  /** Marks written as packet comments. */
+  comments: number;
 }
 
 export type ServerEvent =

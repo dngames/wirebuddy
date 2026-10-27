@@ -44,3 +44,13 @@ export function toggleInRanges(ranges: Ranges, i: number): Ranges {
   }
   return out;
 }
+
+/** "frame.number in {3, 7..9}" for frame `ranges`, or null once it would exceed `maxLength`. */
+export function framesFilter(ranges: Ranges, maxLength: number): string | null {
+  let set = "";
+  for (const [a, b] of ranges) {
+    set += `${set ? ", " : ""}${a === b ? a : `${a}..${b}`}`;
+    if (set.length > maxLength) return null;
+  }
+  return `frame.number in {${set}}`;
+}

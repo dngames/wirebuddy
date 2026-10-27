@@ -1768,6 +1768,23 @@ input[type="checkbox"] {
   font-size: 12px;
 }
 
+.ask-in {
+  font: inherit;
+  color: inherit;
+  resize: vertical;
+  min-height: 72px;
+  padding: 4px 6px;
+  border: 1px solid var(--btn-border);
+  border-radius: 2px;
+  background: var(--panel);
+  outline: none;
+}
+
+.ask-in:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
 /* open file */
 
 .dlg-open .dlg-body {

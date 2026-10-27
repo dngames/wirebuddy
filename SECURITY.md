@@ -31,9 +31,21 @@ Supported versions: the latest `main` and the latest release.
   `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
   file, except one the agent exported itself in the same session and WireBuddy's own record of
   switched-off extensions.
+- `export_objects` saves files carried in the traffic only into a new folder it creates in a
+  directory the agent names, under names made of the frame number and the object's name
+  reduced to letters, digits, `.`, `_` and `-`. The new folder must not be in or below a hidden
+  folder or a folder Wireshark or WireBuddy loads code or configuration from (the extension
+  folders, every WireBuddy's plugin folders, Wireshark's global plugin folder, its personal
+  configuration and plugin folders, `WIRESHARK_PLUGIN_DIR` and `WIRESHARK_CONFIG_DIR`). Every
+  folder from `/` down to it must belong to root or the user and be closed to other writers,
+  except sticky ones like `/tmp`, below which only the user's own entries count; unlike for
+  extensions, a private folder doesn't vouch for the ones below it, since one of them may be a
+  bind mount. The folder is checked as made, so one swapped for a link is refused and its
+  target left alone. Each file is created exclusively, so it never replaces an existing file
+  or follows a link in its own name.
 - Open accepts only files whose content is a capture (pcap, pcapng, snoop, Network Monitor;
   also gzip- or zstd-compressed), whatever the name.
-- Live captures and exports are created readable only by the user.
+- Live captures, exports and saved objects are created readable only by the user.
 - Extensions are Lua code that runs as the user inside `sharkd` and the Wireshark WireBuddy
   opens. The MCP tools and the UI can test, reload and switch them on and off, not write them;
   switching one off doesn't stop the agent from testing it or switching it on again.
@@ -74,8 +86,11 @@ Supported versions: the latest `main` and the latest release.
   a browser that puts each `*.localhost` site into a process of its own (the page checks this and
   reports a panel that isn't).
 - Packet contents are untrusted and are always rendered as text, never as HTML.
-- Problems in the viewer and what the user does there are reported to the attached agent
-  (`--watch` reads them through an instance file only the user can read).
+- Problems in the viewer, what the user does there and the questions the user asks the agent
+  are reported to the attached agent (`--watch` reads them through an instance file only the
+  user can read). Every event is one line; the block of events in tool results carries a random
+  tag named in the server's instructions, and followed stream payload lines start with `| `, so
+  text from a capture can't pose as an event or a question from the user.
 
 In scope: anything that lets a web page, another local user, a crafted capture file, or an MCP
 client limited to WireBuddy's tools break these rules (for example capture outside WireBuddy's

@@ -27,7 +27,8 @@ class HttpError extends Error {
   }
 }
 
-type Handler = (q: URLSearchParams, body: any) => unknown | Promise<unknown>;
+/** `signal` aborts when the client goes away. */
+type Handler = (q: URLSearchParams, body: any, signal: AbortSignal) => unknown | Promise<unknown>;
 
 export interface HttpServer {
   url: string;
@@ -70,10 +71,10 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
     "/api/capture/activity": () => viewer.capture.activity(),
     "/api/extensions": () => viewer.extensionList(),
-    "/api/events": async (q) => {
+    "/api/events": async (q, _b, signal) => {
       const after = num(q, "after");
       const wait = Math.min(Math.max(Number(q.get("wait") ?? 0) || 0, 0), MAX_EVENT_WAIT_MS);
-      return { ...(await viewer.events.since(after, wait, q.get("problems") === "1")), taken: viewer.events.taken };
+      return { ...(await viewer.events.since(after, wait, q.get("problems") === "1", signal)), taken: viewer.events.taken };
     },
   };
 
@@ -106,6 +107,11 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     // Problems in the page itself (exceptions), for the agent
     "/api/events": (_q, b) => (viewer.events.add(eventLevel(b.level), String(b.text ?? "").slice(0, 500), b.details && typeof b.details === "object" ? b.details : undefined), ok),
     "/api/events/take": () => ({ events: viewer.events.take() }),
+    "/api/agent/ask": (_q, b) => {
+      // The packets the dialog was opened for, in the view it showed
+      const view = viewKey(b.view);
+      return viewer.askAgent(String(b.question ?? ""), view && { frame: b.frame ?? null, rows: rowRanges(b.rows), view });
+    },
   };
 
   let port = opts.port;
@@ -157,7 +163,9 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
         return send(res, 415, { error: "requests must be application/json" });
       }
       const body = req.method === "POST" ? await readJson(req) : undefined;
-      const result = await handler(url.searchParams, body);
+      const gone = new AbortController();
+      res.on("close", () => gone.abort());
+      const result = await handler(url.searchParams, body, gone.signal);
       if (req.method === "POST") {
         const did = userActivity(url.pathname, body, result);
         if (did) viewer.events.add(did.level, did.text);
@@ -170,8 +178,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       if (err instanceof ApiError) return send(res, err.status, { error: err.message, code: err.code, ...err.extra });
       const status = err instanceof HttpError ? err.status : 400;
       const path = parseUrl(req.url)?.pathname ?? "";
-      // The agent hears about what failed for the user (the events routes are its own)
-      if (status !== 401 && status !== 403 && !path.startsWith("/api/events") && !(err instanceof ReportedError)) {
+      // The agent hears about what failed for the user (the events routes are its own, a refused question isn't news)
+      if (status !== 401 && status !== 403 && !path.startsWith("/api/events") && path !== "/api/agent/ask" && !(err instanceof ReportedError)) {
         viewer.events.add("ERROR", `${ACTIONS[path] ?? `${req.method} ${path}`} failed: ${(err as Error).message}`);
       }
       send(res, status, { error: (err as Error).message });
@@ -283,6 +291,7 @@ const ACTIONS: Record<string, string> = {
   "/api/columns": "Changing the columns",
   "/api/tls": "Setting the TLS key log",
   "/api/export": "Exporting packets",
+  "/api/agent/ask": "Asking the agent",
   "/api/follow": "Following the stream",
   "/api/find": "Finding a packet",
   "/api/wireshark": "Opening Wireshark",
@@ -396,7 +405,7 @@ function columnList(value: unknown): CustomColumn[] {
 }
 
 function exportRequest(b: any): ExportRequest {
-  return { path: String(b.path ?? ""), which: b.which, range: b.range === undefined ? undefined : String(b.range), overwrite: !!b.overwrite };
+  return { path: String(b.path ?? ""), which: b.which, range: b.range === undefined ? undefined : String(b.range), overwrite: !!b.overwrite, markComments: !!b.markComments };
 }
 
 /** Request URLs are client input: malformed ones must not throw out of a handler. */

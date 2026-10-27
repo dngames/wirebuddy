@@ -20,7 +20,7 @@ const USAGE = `Usage: wirebuddy [options] [capture-file]
   --capture-dir <d>   where live captures are written (default ~/.local/share/wirebuddy/captures)
   --profile <name>    Wireshark configuration profile for dissection (also used by Open in Wireshark)
   --tls-keylog <file> decrypt TLS with this key log file (SSLKEYLOGFILE format)
-  --watch <file>      wait for the next problem in the viewer that wrote this instance file, print it, exit
+  --watch <file>      wait for the next problem or question in the viewer that wrote this instance file, print it, exit
   --version           print the version
   -h, --help          show this help
 

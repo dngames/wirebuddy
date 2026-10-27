@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { closeSync, createReadStream, openSync, readSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -10,11 +10,13 @@ import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
+import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
 import { Panels } from "./panels.ts";
 import { printable } from "./text.ts";
 import { launchWireshark } from "./wireshark.ts";
-import { countRanges, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
+import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
+  AskResult,
   ConvRow,
   CaptureState,
   CustomColumn,
@@ -95,6 +97,10 @@ export const CONV_TYPES = Object.keys(CONV_TAPS) as ConvType[];
 
 /** Bytes of payload data a follow result may carry before it is cut. */
 const FOLLOW_LIMIT = 4 * 1024 * 1024;
+/** Largest object Export Objects saves (sharkd sends it as base64 JSON). */
+const MAX_OBJECT_SAVE = 128 * 1024 * 1024;
+/** Bytes one save of objects may write. */
+const MAX_OBJECTS_SAVE = 1024 * 1024 * 1024;
 const LIVE_RELOAD_MS = 1000;
 const MAX_MARKS = 10000;
 /** Between two Wireshark launches. */
@@ -102,6 +108,9 @@ const WIRESHARK_GAP_MS = 2000;
 /** Row ranges a selection may consist of. */
 const MAX_ROW_RANGES = 10000;
 const MAX_NOTE = 200;
+const MAX_QUESTION = 2000;
+/** Longest frame set a question to the agent lists. */
+const MAX_QUESTION_FRAMES = 2000;
 const MAX_CUSTOM_COLUMNS = 10;
 /** Longer custom column values (e.g. whole payloads) are cut to this. */
 const MAX_COLUMN_VALUE = 500;
@@ -157,7 +166,10 @@ export class Viewer extends EventEmitter {
   private luaErrs = { file: "", frames: new Set<number>(), more: false, told: 0, example: null as LuaError | null, timer: null as NodeJS.Timeout | null, since: 0 };
   private readonly sharkdBin: string;
   /** Problems and user activity for the agent. */
-  readonly events = new EventLog((pending) => this.set({ agent: { ...this.state.agent, pending } }));
+  readonly events = new EventLog(
+    (pending) => this.set({ agent: { ...this.state.agent, pending } }),
+    (watching) => this.set({ agent: { ...this.state.agent, watching } }),
+  );
   private active = 0;
   /** Frame numbers matching the filter; null means all frames 1..totalFrames. */
   private displayed: Int32Array | null = null;
@@ -261,7 +273,7 @@ export class Viewer extends EventEmitter {
       marks: [],
       capture: this.capture.state,
       agentNotice: null,
-      agent: { attached: false, pending: 0, name: "Agent" },
+      agent: { attached: false, pending: 0, name: "Agent", watching: false },
       wiresharkAvailable: !!this.wiresharkBin,
       customColumns: [],
       tlsKeylog: null,
@@ -804,7 +816,11 @@ export class Viewer extends EventEmitter {
 
   /** Frame ranges of the user's selected rows. */
   selectedFrames(): Ranges {
-    const rows = clipRanges(this.state.selectedRows, this.state.displayedFrames);
+    return this.framesOfRows(clipRanges(this.state.selectedRows, this.state.displayedFrames));
+  }
+
+  /** Frame ranges of displayed rows. */
+  private framesOfRows(rows: Ranges): Ranges {
     const displayed = this.displayed;
     if (!displayed) return rows.map(([a, b]) => [a + 1, b + 1]);
     const out: Ranges = [];
@@ -829,7 +845,8 @@ export class Viewer extends EventEmitter {
   /** Marks frames and returns the frame numbers that exist. */
   mark(frames: number[], note: string, by: "user" | "agent"): number[] {
     this.requireFile();
-    note = note.slice(0, MAX_NOTE);
+    // Notes become packet comments on export, where editcap takes no control characters
+    note = printable(note).slice(0, MAX_NOTE);
     const valid = [...new Set(frames)].filter((f) => Number.isInteger(f) && f >= 1 && f <= this.state.totalFrames);
     const marked = new Set(valid);
     const keep = this.state.marks.filter((m) => !marked.has(m.frame));
@@ -883,6 +900,36 @@ export class Viewer extends EventEmitter {
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
   attachAgent(name = this.state.agent.name): void {
     this.set({ agent: { ...this.state.agent, attached: true, name } });
+  }
+
+  /**
+   * The user's question about packets: those `about` names (the selection its
+   * dialog showed, refused once that view is gone), else the selected ones.
+   * It wakes the agent's `--watch`, else comes with its next tool result.
+   */
+  askAgent(question: string, about?: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): AskResult {
+    if (!this.state.agent.attached) throw new Error("no agent is attached");
+    const text = printable(question.replace(/\s+/g, " ").trim()).slice(0, MAX_QUESTION);
+    if (!text) throw new Error("the question is empty");
+    let frames: Ranges = [];
+    if (about) {
+      const { view, frame, rows } = about;
+      // Also when the capture was closed meanwhile: the question was about packets of it
+      if (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince) {
+        throw new StaleGenerationError("the packet list changed since you chose the packets; select them again");
+      }
+      if (rows?.length) frames = this.framesOfRows(this.checkRows(rows));
+      else if (frame !== null) {
+        if (!Number.isInteger(frame) || frame < 1 || frame > this.state.totalFrames) throw new Error(`no frame ${frame}`);
+        frames = [[frame, frame]];
+      }
+    } else if (this.state.file) frames = this.selectedOrCurrent();
+    const count = countRanges(frames);
+    const subject = count === 0 ? "" : count === 1 ? ` about frame ${frames[0][0]}` : ` about ${count} packets`;
+    const listed = framesFilter(frames, MAX_QUESTION_FRAMES) ?? `frames ${frames[0][0]} to ${frames[frames.length - 1][1]} (too many ranges to list)`;
+    const woken = this.events.watched();
+    this.events.add("QUESTION", `The user asks you${subject}: ${text}`, count > 1 ? { frames: listed } : undefined);
+    return { woken };
   }
 
   /** A problem nobody asked for (live view): the agent gets it, the page shows it only without one. */
@@ -1091,12 +1138,19 @@ export class Viewer extends EventEmitter {
     else throw new Error(`unknown selection "${req.which}"`);
     if (!ranges.length) throw new Error("no packets to export");
     const frames = countRanges(ranges);
-    const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges });
+    // Wireshark shows them as packet comments
+    const comments = new Map<number, string>();
+    if (req.markComments && format === "pcapng") {
+      for (const m of this.state.marks) {
+        if (inRanges(ranges, m.frame)) comments.set(m.frame, `WireBuddy mark (${m.by === "agent" ? this.state.agent.name : "user"})${m.note ? `: ${m.note}` : ""}`);
+      }
+    }
+    const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges, comments });
     if (by === "agent") {
       this.agentExports.add(resolve(req.path));
       this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
     }
-    return { path: req.path, frames, size };
+    return { path: req.path, frames, size, comments: comments.size };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
@@ -1137,6 +1191,71 @@ export class Viewer extends EventEmitter {
       truncated: omittedBytes > 0,
       omittedBytes,
     };
+  }
+
+  /** Files carried in the traffic (Wireshark's Export Objects) of `kind`. */
+  async capturedObjects(kind: ObjectKind, engine = this.engine): Promise<CapturedObject[]> {
+    this.requireFile();
+    type Eo = { pkt: number; hostname?: string; type?: string; filename?: string; _download: string; len: number; sha1?: string };
+    const r = await engine.call<{ taps?: { objects?: Eo[] }[] }>("tap", { tap0: `eo:${kind}` });
+    return (r.taps?.[0]?.objects ?? []).map((o) => ({
+      frame: o.pkt,
+      host: o.hostname ?? "",
+      type: o.type ?? "",
+      filename: o.filename ?? "",
+      size: o.len,
+      sha1: o.sha1 ?? "",
+      token: o._download,
+    }));
+  }
+
+  /** Saves the objects of `kind` (those in `frames`, else all) into a new folder in `dir`, made once there is one to save. */
+  async saveObjects(
+    kind: ObjectKind,
+    frames: number[] | undefined,
+    dir: string,
+  ): Promise<{ folder: string | null; saved: (CapturedObject & { name: string })[]; skipped: { object: CapturedObject; reason: string }[] }> {
+    const codeFolders = this.extensions.codeFolders();
+    const real = objectDir(dir, codeFolders);
+    // Download tokens belong to the sharkd that listed the objects
+    const engine = this.engine;
+    const all = await this.capturedObjects(kind, engine);
+    const want = frames && new Set(frames);
+    const chosen = want ? all.filter((o) => want.has(o.frame)) : all;
+    if (!all.length) throw new Error(`the capture has no ${kind} objects`);
+    if (!chosen.length) throw new Error(`none of the ${kind} objects is in the given frames`);
+    let folder: string | null = null;
+    const saved: (CapturedObject & { name: string })[] = [];
+    const skipped: { object: CapturedObject; reason: string }[] = [];
+    let total = 0;
+    try {
+      for (const o of chosen) {
+        if (o.size > MAX_OBJECT_SAVE) {
+          skipped.push({ object: o, reason: `larger than ${MAX_OBJECT_SAVE / 2 ** 20} MiB` });
+          continue;
+        }
+        if (total + o.size > MAX_OBJECTS_SAVE) {
+          skipped.push({ object: o, reason: `over the ${MAX_OBJECTS_SAVE / 2 ** 30} GiB one save may write` });
+          continue;
+        }
+        const r = await engine.call<{ data?: string }>("download", { token: o.token });
+        const data = Buffer.from(r.data ?? "", "base64");
+        // Tokens are positions in sharkd's list: a reload may have moved them
+        if (r.data === undefined || (o.sha1 && createHash("sha1").update(data).digest("hex") !== o.sha1)) {
+          throw new Error("the capture changed while saving; list the objects again");
+        }
+        total += data.length;
+        folder ??= newObjectFolder(real, kind, codeFolders);
+        saved.push({ ...o, name: writeObject(folder, objectFileName(o.frame, o.filename), data) });
+      }
+    } catch (err) {
+      // What is already there stays: say where
+      const names = saved.slice(0, 20).map((o) => o.name).join(", ") + (saved.length > 20 ? ", …" : "");
+      const done = saved.length ? ` (${saved.length} saved to ${folder}: ${names})` : "";
+      throw new Error(`${(err as Error).message}${done}`);
+    }
+    if (saved.length) this.notice(`Saved ${saved.length} ${kind.toUpperCase()} object${saved.length === 1 ? "" : "s"} to ${folder}`);
+    return { folder, saved, skipped };
   }
 
   async openInWireshark(frame?: number | null): Promise<void> {

@@ -1,6 +1,7 @@
 // A panel in headless Chrome: wb.select is refused without a click in the panel and works after
 // one, wb.setFilter needs "control", wb.storage round-trips, panel action "snapshot" returns the
-// panel's canvas, and offers show as status-bar chips.
+// panel's canvas, and offers show as status-bar chips. Then the packet menu: asking the agent about
+// a packet, and the export dialog writing marks as packet comments.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -185,6 +186,87 @@ try {
     await call("panel", { action: "reload", name: "clicker", wait_ms: 10_000 });
     const kept = JSON.parse(readFileSync(join(home, ".local/share/wirebuddy/panel-storage/clicker.json"), "utf8"));
     assert.deepEqual(kept, { runs: 2 });
+  });
+
+  const box = async (js) => evaluate(`(() => { const e = ${js}; return e ? JSON.stringify(e.getBoundingClientRect()) : null; })()`).then((j) => j && JSON.parse(j));
+  const center = (r) => [r.x + r.width / 2, r.y + r.height / 2];
+  const rightClick = async ([x, y]) => {
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "right", clickCount: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "right", clickCount: 1 });
+  };
+  const row = (frame) => `[...document.querySelectorAll('.pl-row')].find((r) => !r.hidden && r.querySelector('.pl-cell')?.textContent === '${frame}')`;
+  const menuItem = (label) => `[...document.querySelectorAll('.menu-item')].find((m) => m.textContent.includes(${JSON.stringify(label)}))`;
+  const toasts = () => evaluate("[...document.querySelectorAll('.toast-text')].map((t) => t.textContent).join('\\n')");
+  const fromMenu = async (frame, label) => {
+    await until(`frame ${frame}'s row`, async () => !!(await box(row(frame))));
+    await rightClick(center(await box(row(frame))));
+    await until(`"${label}"`, async () => !!(await box(menuItem(label)))).catch(async (err) => {
+      throw new Error(`${err.message}; the menu: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ')")}`);
+    });
+    await click(...center(await box(menuItem(label))));
+  };
+  // A failed check must not leave its dialog over the next one
+  const closeDialog = async () => {
+    if (await evaluate("!!document.querySelector('.dlg-ask, .dlg-export')")) await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  };
+  await call("panel", { action: "close", name: "clicker" });
+  await until("the panel to close", () => evaluate("!document.querySelector('.panel-frame')"));
+  await call("get_view_state");
+
+  await check("browser: Ask Agent in a packet's menu sends the question to the agent", async () => {
+    await fromMenu(4, "Ask Agent about This Packet");
+    await until("the question box", () => evaluate("document.activeElement?.classList.contains('ask-in') === true"));
+    assert.match(await evaluate("document.querySelector('.dlg-ask').textContent"), /About packet 4.*Agent isn't watching the viewer right now/);
+    await cdp("Input.insertText", { text: "What is this?" });
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await until("the toast", async () => /Sent\. Agent gets it with its next step/.test(await toasts()));
+    assert.equal(await evaluate("!!document.querySelector('.dlg-ask')"), false);
+    assert.match((await call("get_view_state")).text, /QUESTION The user asks you about frame 4: What is this\?/);
+  }).finally(closeDialog);
+
+  await check("browser: with the agent's watch running, the dialog says so and the question wakes it", async () => {
+    const command = /`"([^"]+)" "([^"]+)" --watch "([^"]+)"`/.exec(client.getInstructions() ?? "");
+    assert.ok(command, "the instructions name the watch command");
+    const watcher = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "ignore"] });
+    let heard = "";
+    watcher.stdout.on("data", (d) => (heard += d));
+    const exited = new Promise((resolve) => watcher.on("exit", resolve));
+    try {
+      await until("the watch", async () => (await state()).agent.watching);
+      // The page gets state at most every 100 ms
+      await sleep(400);
+      await fromMenu(4, "Ask Agent about This Packet");
+      await until("the question box", () => evaluate("document.activeElement?.classList.contains('ask-in') === true"));
+      assert.match(await evaluate("document.querySelector('.dlg-ask').textContent"), /Agent is watching the viewer: the question wakes it/);
+      await cdp("Input.insertText", { text: "Wake up?" });
+      await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+      await until("the toast", async () => /Sent to Agent/.test(await toasts()));
+      assert.equal(await Promise.race([exited, sleep(10_000).then(() => "timeout")]), 0);
+      assert.match(heard, /QUESTION The user asks you about frame 4: Wake up\?/);
+    } finally {
+      watcher.kill();
+      await closeDialog();
+    }
+  });
+
+  await check("browser: the export dialog writes marks as packet comments, not into pcap", async () => {
+    await call("mark_frames", { frames: [4], note: "look here" });
+    await until("the mark", () => evaluate(`${row(4)}?.classList.contains('mark-agent') === true`));
+    await fromMenu(4, "Export Selected Packet");
+    const comments = "document.querySelector('.dlg-export input[type=checkbox]')";
+    await until("the export dialog", () => evaluate(`!!${comments}`));
+    assert.equal(await evaluate(`${comments}.checked && !${comments}.disabled && !${comments}.closest('label').hidden`), true);
+    const setPath = (p) => evaluate(`(() => { const i = document.querySelector('.ex-path'); i.value = ${JSON.stringify(p)}; i.dispatchEvent(new Event('input')); })()`);
+    await setPath(join(home, "selected.pcap"));
+    assert.equal(await evaluate(`${comments}.disabled`), true);
+    await setPath(join(home, "selected.pcapng"));
+    assert.equal(await evaluate(`${comments}.disabled`), false);
+    await click(...center(await box("document.querySelector('.dlg-export button.primary')")));
+    await until("the export toast", async () => /Exported 1 packet \([^)]*, 1 mark as comments\)/.test(await toasts())).catch(async (err) => {
+      throw new Error(`${err.message}; toasts: ${await toasts()}; dialog: ${await evaluate("document.querySelector('.dlg-export')?.textContent")}`);
+    });
+    assert.ok(existsSync(join(home, "selected.pcapng")));
   });
 } finally {
   ws?.close();
