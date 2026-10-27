@@ -6,7 +6,7 @@
 import type { CaptureInterface, CaptureRequest, FilterCheck, ViewState } from "../shared/api.ts";
 import { errorText, get } from "./api.ts";
 import * as act from "./actions.ts";
-import { app, bus, captureActive, hooks } from "./app.ts";
+import { agentName, app, bus, captureActive, hooks } from "./app.ts";
 import { toast, toastError } from "./toast.ts";
 import { debounce, Emitter, fmtElapsed, fmtInt, load, posInt, save } from "./util.ts";
 
@@ -273,12 +273,13 @@ export async function restartCaptureClicked(): Promise<void> {
 
 export function captureStatusText(s: ViewState): { text: string; cls: string } {
   const c = s.capture;
+  const by = c.startedBy === "agent" ? ` · started by ${agentName()}` : "";
   switch (c.status) {
     case "starting":
-      return { text: `Starting capture on ${c.iface ?? "?"}…`, cls: "starting" };
+      return { text: `Starting capture on ${c.iface ?? "?"}…${by}`, cls: "starting" };
     case "running": {
       const el = c.startedAt ? ` · ${fmtElapsed((Date.now() - c.startedAt) / 1000)}` : "";
-      return { text: `Capturing on ${c.iface ?? "?"} · ${fmtInt(c.packets)} packets${el}`, cls: "running" };
+      return { text: `Capturing on ${c.iface ?? "?"} · ${fmtInt(c.packets)} packets${el}${by}`, cls: "running" };
     }
     case "stopping":
       return { text: "Stopping capture…", cls: "stopping" };

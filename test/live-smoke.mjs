@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const token = "live-smoke-test-token";
@@ -242,6 +244,45 @@ try {
     assert.equal(s.capture.status, "idle");
     assert.equal(s.capture.error, null);
     assert.ok(s.totalFrames > 0);
+  });
+
+  await check("the agent starts a capture over MCP", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-live-mcp-"));
+    const client = new Client({ name: "live-smoke", version: "0" });
+    await client.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0", "--capture-dir", dir],
+        env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
+        stderr: "ignore",
+      }),
+    );
+    const tool = async (name, args) => {
+      const r = await client.callTool({ name, arguments: args });
+      const text = r.content.map((c) => c.text).join("\n");
+      if (r.isError) throw new Error(`${name}: ${text}`);
+      return text;
+    };
+    const pinger = ping(4);
+    try {
+      const started = await tool("start_capture", { interface: "lo", filter: ECHO, stop_after_seconds: 3 });
+      assert.match(started, /^Capturing on lo with the capture filter .* into .*\.pcapng\. The view follows it live/);
+      assert.match(await tool("get_view_state", {}), /Capture \(started by agent\): running/);
+      await assert.rejects(tool("start_capture", { interface: "lo" }), /already running/);
+      let view = "";
+      for (let i = 0; i < 40 && !/Capture \(started by agent\): idle/.test(view); i++) {
+        await sleep(250);
+        view = await tool("get_view_state", {});
+      }
+      assert.match(view, /Capture \(started by agent\): idle/);
+      const frames = Number(/Frames: (\d+)/.exec(view)?.[1]);
+      assert.ok(frames > 0, view);
+      assert.ok(readdirSync(dir).some((f) => f.endsWith(".pcapng")), "written into the capture folder");
+    } finally {
+      pinger.kill();
+      await client.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 } finally {
   server.kill();

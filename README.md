@@ -30,8 +30,8 @@ same capture, filter, selected packet and marks.
   type, new files automatically, a ring buffer and stop conditions. The view updates about once a
   second.
 - **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
-- **MCP server** so an agent can read the capture, apply filters, select and mark packets, and
-  follow streams. The MCP tools have no way to start a capture; that stays your click in the UI.
+- **MCP server** so an agent can start and stop captures, read the capture, apply filters,
+  select and mark packets, and follow streams.
 - **Extensions:** when traffic shows up as undecoded "Data", the agent can write a Lua dissector
   for it, test it on the open capture and reload the view, which then decodes the new protocol
   with fields you can filter on.
@@ -189,7 +189,7 @@ Example prompts:
 - "Open ~/captures/slow-login.pcapng and tell me why the login is slow."
 - "Explain the packet I have selected."
 - "Mark all DNS failures and filter to them."
-- (after you start a live capture) "Watch the capture and tell me when you see TCP retransmissions."
+- "Capture on eth0 for a minute and tell me when you see TCP retransmissions."
 
 ### MCP tools
 
@@ -211,6 +211,7 @@ Example prompts:
 | `mark_frames` / `clear_marks` | Highlight frames with a note (listed under Go → Marked Packets) |
 | `set_columns` | Show fields as extra columns in the user's packet list |
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
+| `start_capture` | Start a live capture with the Capture Options settings; the view follows it |
 | `stop_capture` | Stop the running capture |
 | `open_in_wireshark` | Open the capture in the real Wireshark at the selected frame |
 | `extensions` | Lua dissector extensions and panels: a guide with templates, list, test one on the open capture, reload, enable, disable |
@@ -244,10 +245,11 @@ carries what happened in the viewer since the agent's last call: problems and wh
   `X-WireBuddy-Token` header (the WebSocket takes it in its URL); it is compared in constant time.
 - Requests with a foreign `Host` (DNS rebinding), any `Origin` but the server's own (`null`
   included) or a body that isn't JSON are refused. The page has a Content Security Policy.
-- The MCP tools have no way to start a capture. They can open any capture file you can read, read
-  packets, change the filter, marks, selection and columns, stop a capture, open Wireshark, and
-  write new `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced
-  unless the agent exported it itself in the same session.
+- The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
+  into WireBuddy's capture folder. They can open any capture file you can read, read packets,
+  change the filter, marks, selection and columns, open Wireshark, and write new
+  `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced unless the
+  agent exported it itself in the same session.
 - Open only accepts files whose content is a capture (pcap, pcapng, snoop, Network Monitor; also
   gzip- or zstd-compressed), whatever their name, so it can't be used to read other files.
 - Live captures and exports are readable only by you (files `0600`, capture folder `0700`).

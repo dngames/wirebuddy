@@ -381,6 +381,8 @@ export interface CaptureState {
   /** Packets captured so far, as reported by dumpcap. */
   packets: number;
   error: string | null;
+  /** Who started the current or last capture. */
+  startedBy: "user" | "agent" | null;
 }
 
 /** A packet list column showing a field, like Wireshark's "Apply as Column". */

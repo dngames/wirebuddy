@@ -46,7 +46,6 @@ steps.
 - Keep the UI dependency-free and the server's dependencies minimal.
 - Change `src/shared/api.ts` first when the server/UI contract changes, and keep both sides in sync.
 - Treat everything inside a capture as untrusted input: never render packet data as HTML.
-- Only the user may start a capture. Don't add MCP tools that let an agent start one.
 - Keep comments short and about what the code does now.
 - Only contribute code you wrote or that is under a license compatible with MIT. Don't copy code
   from Wireshark or other GPL-licensed projects.

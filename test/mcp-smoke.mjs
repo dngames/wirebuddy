@@ -51,7 +51,7 @@ async function call(name, args, expect) {
 try {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name);
-  assert.ok(!names.some((n) => /start_capture/.test(n)), "the agent must not be able to start a capture");
+  assert.ok(names.includes("start_capture") && names.includes("stop_capture"), "the agent starts and stops captures");
   console.log(`tools: ${names.join(", ")}`);
 
   const ui = new URL(await call("viewer_url", {}, (t) => assert.match(t, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[0-9a-f]{32}$/)));
@@ -192,6 +192,14 @@ try {
   if (capture) await call("list_interfaces", {}, (t) => assert.match(t, /^lo\b.*\[loopback\]/m));
   else console.log("skip list_interfaces: dumpcap may not capture on lo here");
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
+  await call("start_capture", { interface: "-w/etc/passwd" }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /unknown interface/);
+  });
+  await call("start_capture", { interface: "lo", ring_files: 3 }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /new file needs/);
+  });
 
   // Teaching the viewer a protocol, the way the guide tells the agent to
   const acmeFile = join(out, "acme.pcap");

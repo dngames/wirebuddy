@@ -136,7 +136,7 @@ export const commands = {
   firstPacket: { label: "First Packet", tip: "Go to first packet", shortcut: "Ctrl+Home", enabled: hasRows, run: () => selectEdge(-1) },
   lastPacket: { label: "Last Packet", tip: "Go to last packet", shortcut: "Ctrl+End", enabled: hasRows, run: () => selectEdge(1) },
 
-  // Capture: starting needs the user's click or key press here, never the agent
+  // Capture
   captureOptions: { label: "Options…", tip: "Show the capture options", shortcut: "Ctrl+K", anywhere: true, run: () => openCaptureOptions() },
   startCapture: { label: "Start", tip: "Start capturing packets", shortcut: "Ctrl+E", anywhere: true, enabled: () => !captureActive(), run: () => hooks.startCapture() },
   stopCapture: { label: "Stop", tip: "Stop capturing packets", shortcut: "Ctrl+E", anywhere: true, enabled: capturing, run: () => void act.stopCapture() },

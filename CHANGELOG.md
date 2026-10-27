@@ -20,10 +20,10 @@ First version.
 - Export Specified Packets to pcapng or pcap
 - Live capture with `dumpcap` and Wireshark's Capture Options dialog: interfaces with traffic,
   promiscuous mode, capture-filter check, new files automatically, ring buffer, stop conditions
-- Traffic sparklines for capture interfaces on the start page and in the capture bar
+- Traffic sparklines for capture interfaces on the start page and in the Capture Options dialog
 - "Open in Wireshark" at the same file, filter and packet
-- MCP server with tools to read, filter, select and mark packets and follow streams; it reminds
-  the agent to open the viewer in the browser pane
+- MCP server with tools to start and stop captures, read, filter, select and mark packets and
+  follow streams; it reminds the agent to open the viewer in the browser pane
 - Problems in the viewer go to the agent instead of the screen; `--watch` wakes it when one happens
 - Wireshark dissector plugins, preferences and `--profile` support
 - Extensions: the agent teaches the viewer protocols Wireshark doesn't decode with Lua

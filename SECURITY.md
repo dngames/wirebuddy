@@ -25,9 +25,10 @@ Supported versions: the latest `main` and the latest release.
 - Requests with a foreign `Host` header (DNS rebinding), any `Origin` but the server's own
   (`null` included) or a non-JSON body are rejected. The UI is served with a Content Security
   Policy, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
-- The MCP tools cannot start a capture. They can open any capture file the user can read, read
-  packets, change the filter, selection, marks and columns, stop a capture, open Wireshark, and
-  write new `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
+- The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
+  into WireBuddy's capture folder. They can open any capture file the user can read, read
+  packets, change the filter, selection, marks and columns, open Wireshark, and write new
+  `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
   file, except one the agent exported itself in the same session and WireBuddy's own record of
   switched-off extensions.
 - Open accepts only files whose content is a capture (pcap, pcapng, snoop, Network Monitor;
@@ -63,9 +64,9 @@ Supported versions: the latest `main` and the latest release.
   (`--watch` reads them through an instance file only the user can read).
 
 In scope: anything that lets a web page, another local user, a crafted capture file, or an MCP
-client limited to WireBuddy's tools break these rules (for example start a capture, read
-arbitrary files, replace the user's files, run script in the UI, or get Lua loaded that the user
-didn't put in an extension folder).
+client limited to WireBuddy's tools break these rules (for example capture outside WireBuddy's
+capture folder, read arbitrary files, replace the user's files, run script in the UI, or get Lua
+loaded that the user didn't put in an extension folder).
 
 Out of scope: anyone who already has the session URL with its token, including an agent given
 a shell or the browser pane — treat the token like a password.

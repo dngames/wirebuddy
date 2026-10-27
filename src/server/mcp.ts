@@ -7,7 +7,7 @@ import type { HttpServer } from "./http.ts";
 import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
-import type { ExtensionInfo, PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
+import type { CaptureState, ExtensionInfo, PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
 import { inRanges, type Ranges } from "../shared/ranges.ts";
 import { VERSION } from "../shared/version.ts";
 import { printable as oneLine } from "./text.ts";
@@ -26,7 +26,7 @@ You and the user look at the same view: the open capture, display filter, select
 - TLS payloads are only readable when the user has set a key log file in the UI; get_view_state tells you whether it is set.
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
-- You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.
+- start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
 - When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
 - To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
 }
@@ -92,6 +92,24 @@ function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: num
 }
 
 /** The user's selected frames as a display filter, unless that gets too long. */
+/** The capture once dumpcap writes its file, fails or ends, or after `ms`. */
+function captureSettled(viewer: Viewer, ms: number): Promise<CaptureState> {
+  return new Promise((done) => {
+    const check = (c: CaptureState): void => {
+      if (c.status === "starting") return;
+      finish();
+    };
+    const finish = (): void => {
+      clearTimeout(timer);
+      viewer.capture.off("change", check);
+      done(viewer.capture.state);
+    };
+    const timer = setTimeout(finish, ms);
+    viewer.capture.on("change", check);
+    check(viewer.capture.state);
+  });
+}
+
 function selectionLine(frames: Ranges, count: number): string {
   let set = "";
   for (const [a, b] of frames) {
@@ -274,7 +292,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
       if (c.status !== "idle" || c.files.length) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
-        lines.push(`Capture: ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
+        lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
         const active = c.status === "starting" || c.status === "running" || c.status === "stopping";
         const ring = c.ring ? ` (${c.ring.files ? `ring buffer of ${c.ring.files} files` : "new files automatically"}, ${c.files.length} written)` : "";
         if (c.currentFile) lines.push(`  ${active ? "writing" : "last file:"} ${c.currentFile}${ring}`);
@@ -640,7 +658,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "list_interfaces",
     {
-      description: "Capture interfaces available to dumpcap with their current traffic (packets/s), to advise the user which one to capture on. Only the user can start a capture, in the UI.",
+      description: "Capture interfaces available to dumpcap with their current traffic (packets/s), to choose one for start_capture.",
       annotations: { readOnlyHint: true },
     },
     tool(async () => {
@@ -699,6 +717,41 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
           viewer.notice(`Closed the panel "${name}"`);
           return `Closed the panel "${name}".`;
       }
+    }),
+  );
+
+  server.registerTool(
+    "start_capture",
+    {
+      description:
+        "Start a live capture with dumpcap, like Wireshark's Capture Options, when the user asks for one. The view opens the new file and follows it live. Without a stop condition it runs until stop_capture or the user stops it.",
+      inputSchema: {
+        interface: z.string().describe("Interface name from list_interfaces, e.g. \"lo\" or \"eth0\""),
+        filter: z.string().default("").describe("Capture filter in BPF syntax (tcp port 80), not display-filter syntax"),
+        promiscuous: z.boolean().default(true).describe("false: only traffic to and from this host"),
+        stop_after_seconds: z.number().int().min(1).optional(),
+        stop_after_packets: z.number().int().min(1).optional(),
+        stop_after_kb: z.number().int().min(1).optional().describe("Not together with new files"),
+        stop_after_files: z.number().int().min(1).optional().describe("Needs new files"),
+        new_file_after_seconds: z.number().int().min(1).optional(),
+        new_file_after_packets: z.number().int().min(1).optional(),
+        new_file_after_kb: z.number().int().min(1).optional(),
+        new_file_every_seconds: z.number().int().min(1).optional().describe("A new file whenever the clock reaches a multiple of this interval"),
+        ring_files: z.number().int().min(2).optional().describe("Keep only this many newest files (ring buffer); needs new files"),
+      },
+    },
+    tool(async (a) => {
+      const newFile = { durationSec: a.new_file_after_seconds, packets: a.new_file_after_packets, filesizeKB: a.new_file_after_kb, intervalSec: a.new_file_every_seconds };
+      const ring = Object.values(newFile).some((v) => v !== undefined) || a.ring_files !== undefined ? { ...newFile, files: a.ring_files } : null;
+      const autostop = { durationSec: a.stop_after_seconds, packets: a.stop_after_packets, filesizeKB: a.stop_after_kb, files: a.stop_after_files };
+      await viewer.capture.start({ iface: a.interface, filter: a.filter, promiscuous: a.promiscuous, autostop, ring }, "agent");
+      viewer.notice(`Started a capture on ${a.interface}`);
+      const c = await captureSettled(viewer, 3000);
+      if (c.status === "error") throw new Error(`the capture failed: ${c.error ?? "unknown error"}`);
+      const how = `${a.interface}${c.filter ? ` with the capture filter "${c.filter}"` : ""}${c.promiscuous ? "" : ", not promiscuous"}`;
+      if (c.status === "starting") return `The capture on ${how} is starting; get_view_state shows when it runs.`;
+      if (c.status === "idle") return `The capture on ${how} already ended: ${c.packets} packets in ${c.currentFile ?? "no file"}.`;
+      return `Capturing on ${how} into ${c.currentFile}. The view follows it live; stop_capture ends it.`;
     }),
   );
 

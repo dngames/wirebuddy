@@ -79,6 +79,7 @@ export class Capture extends EventEmitter {
       startedAt: null,
       packets: 0,
       error: null,
+      startedBy: null,
     };
   }
 
@@ -134,7 +135,7 @@ export class Capture extends EventEmitter {
     return { ok: false, error: message || "invalid capture filter" };
   }
 
-  async start(req: CaptureRequest): Promise<void> {
+  async start(req: CaptureRequest, by: "user" | "agent" = "user"): Promise<void> {
     // Claimed before the first await so a double click cannot start two dumpcaps
     if (this.starting || this.proc) throw new Error("a capture is already running");
     this.starting = true;
@@ -159,6 +160,7 @@ export class Capture extends EventEmitter {
       startedAt: Date.now(),
       packets: 0,
       error: null,
+      startedBy: by,
     });
 
     const proc = spawn(this.bin, args, { stdio: ["ignore", "ignore", "pipe"] });
