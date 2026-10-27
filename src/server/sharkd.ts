@@ -7,6 +7,8 @@ const MAX_REQUEST_BYTES = 8190;
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Of a stderr line without an end (a plugin writing on and on), only this much is kept. */
 const MAX_PARTIAL_LINE = 64 * 1024;
+/** Longest answer read, in characters: a longer one (a huge stream followed) is refused, below V8's string limit. */
+const MAX_ANSWER = 256 * 1024 * 1024;
 /** What sharkd writes to stderr in normal operation. */
 const ROUTINE = /^(load: filename=|sharkd_session_|Hello in child\.)/;
 
@@ -21,6 +23,9 @@ export class SharkdError extends Error {
 
 /** sharkd died (crashed, or a plugin ended it), or hung and was killed. */
 export class SharkdExit extends Error {}
+
+/** sharkd's answer was too long to read; sharkd was restarted. */
+export class SharkdTooLarge extends Error {}
 
 /** What sharkd's Lua loading said while it started. */
 export interface LuaReport {
@@ -75,6 +80,8 @@ export class Sharkd {
   onLua: (report: LuaReport) => void = () => {};
   /** Called for each packet an extension failed on while the file was read. */
   onLuaError: (error: LuaError) => void = () => {};
+  /** Longest answer read, in characters. */
+  maxAnswer = MAX_ANSWER;
 
   /** `generation` changes whenever `env` would give a different environment. */
   constructor(
@@ -104,7 +111,13 @@ export class Sharkd {
     let out = "";
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk: string) => {
-      if (this.proc === proc) out = this.onData(out, chunk);
+      if (this.proc !== proc) return;
+      out = this.onData(out, chunk);
+      if (out.length <= this.maxAnswer) return;
+      // Answers come in order: the oldest request in flight asked for it; the rest are lost with the restart
+      out = "";
+      const mb = Math.round(this.maxAnswer / 1024 / 1024);
+      this.stop(proc, new SharkdTooLarge(`sharkd's answer is longer than ${mb} MB (a whole stream or a huge reassembled packet?) and was refused`));
     });
     let err = "";
     // What sharkd said last, for the message when it dies: not WireBuddy's markers, nor sharkd's routine lines
@@ -288,9 +301,9 @@ export class Sharkd {
     return this.luaReady;
   }
 
-  private stop(proc: ChildProcessWithoutNullStreams, why: string): void {
+  private stop(proc: ChildProcessWithoutNullStreams, why: string | Error): void {
     this.stopped.add(proc);
-    this.fail(proc, new Error(why));
+    this.fail(proc, typeof why === "string" ? new Error(why) : why);
   }
 
   close(): void {

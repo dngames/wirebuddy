@@ -33,7 +33,7 @@ There is no watch mode yet: rerun `npm run build` and restart the server after a
 ```bash
 npm run typecheck
 npm run build
-npm test             # HTTP API and MCP tools against test/fixtures/http.pcapng
+npm test             # unit checks, then the HTTP API, MCP tools and panels against test/fixtures/http.pcapng
 npm run test:live    # live capture on the loopback interface (needs dumpcap permission)
 ```
 

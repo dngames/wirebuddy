@@ -9,6 +9,7 @@ import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
+import { FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import { Panels } from "./panels.ts";
 import { printable } from "./text.ts";
 import { launchWireshark } from "./wireshark.ts";
@@ -31,6 +32,7 @@ import type {
   IoGraphSpec,
   Mark,
   PacketRow,
+  PanelView,
   PhsNode,
   RowsResponse,
   TreeNode,
@@ -130,6 +132,13 @@ export class Viewer extends EventEmitter {
   readonly extensions: Extensions;
   /** Extensions' panels open in the UI. */
   readonly panels: Panels;
+  /** The sharkd panels read the capture with. */
+  private readonly panelData: PanelData;
+  /** Why the epoch changed last, for the panels' reset. */
+  private epochWhy = "file";
+  /** Inode and first bytes of the file read last: another file at the same path, or other first bytes, is a rewritten capture. */
+  private loadedIno = 0;
+  private loadedHead: Buffer = Buffer.alloc(0);
   /** sharkd starts an extension crashed; a load is retried after each. */
   private extensionCrashes = 0;
   /** Lua errors the extensions reported for the open file, told to the agent in batches. */
@@ -185,6 +194,29 @@ export class Viewer extends EventEmitter {
       e.onLua = (report) => this.luaReport(report);
       e.onLuaError = (error) => this.luaError(error);
     }
+    const source: PanelSource = {
+      view: () => this.panelView(),
+      epoch: () => this.state.epoch,
+      resetWhy: () => this.epochWhy,
+      file: () => this.state.file,
+      live: () => this.followingCapture() && this.capture.running,
+      totalFrames: () => this.state.totalFrames,
+      displayed: () => ({
+        set: this.panelSet("displayed", [this.displayed, this.state.totalFrames], () => (this.displayed ? FrameSet.fromSorted(this.displayed) : FrameSet.all(this.state.totalFrames))),
+        filter: this.state.filter,
+      }),
+      selected: () => {
+        const s = this.state;
+        return this.panelSet("selected", [s.selectedRows, s.selected, this.displayed, s.displayedFrames], () =>
+          s.selectedCount ? FrameSet.fromRows(clipRanges(s.selectedRows, s.displayedFrames), this.displayed) : FrameSet.fromSorted(s.selected === null ? [] : [s.selected]),
+        );
+      },
+      marked: () => this.panelSet("marked", [this.state.marks], () => FrameSet.fromSorted(this.state.marks.map((m) => m.frame).sort((a, b) => a - b))),
+      tlsKeylog: () => this.state.tlsKeylog,
+    };
+    this.panelData = new PanelData({ bin: this.sharkdBin, profile: opts.profile, env, generation, source, events: this.events });
+    this.panels.attach(source, this.panelData);
+    this.on("state", () => this.panels.viewChanged());
     this.profile = opts.profile;
     this.editcap = opts.editcap ?? "editcap";
     this.mergecap = opts.mergecap ?? "mergecap";
@@ -219,6 +251,7 @@ export class Viewer extends EventEmitter {
       tlsKeylog: null,
       extensions: { active: 0, failing: 0, revision: 0 },
       panels: [],
+      epoch: 1,
     };
     this.capture.on("change", (capture: CaptureState) => {
       if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
@@ -250,6 +283,41 @@ export class Viewer extends EventEmitter {
   private set(patch: Partial<ViewState>): void {
     this.state = { ...this.state, ...patch };
     this.emit("state", this.state);
+  }
+
+  /** Packets read before may read differently now: panels start over. */
+  private newEpoch(why: string): number {
+    this.epochWhy = why;
+    return this.state.epoch + 1;
+  }
+
+  /** Frame lists for panels, made again only when what they are of changed. */
+  private readonly panelSets = new Map<string, { key: unknown[]; set: FrameSet }>();
+  private panelSet(name: string, key: unknown[], make: () => FrameSet): FrameSet {
+    const hit = this.panelSets.get(name);
+    if (hit && hit.key.every((k, i) => k === key[i])) return hit.set;
+    const set = make();
+    this.panelSets.set(name, { key, set });
+    return set;
+  }
+
+  /** What panels see of the view. */
+  private panelView(): PanelView {
+    const s = this.state;
+    // Selections of many rows are left out rather than walked on every change
+    const ranges = s.selectedCount > 100_000 ? null : this.selectedOrCurrent();
+    return {
+      file: s.file ? basename(s.file) : null,
+      epoch: s.epoch,
+      frames: s.totalFrames,
+      displayed: s.displayedFrames,
+      filter: s.filter,
+      selected: s.selected,
+      selection: ranges && ranges.length <= 1000 ? ranges : null,
+      marked: s.marks.length,
+      live: this.followingCapture() && this.capture.running,
+      capture: s.capture.status,
+    };
   }
 
   /** Runs state-changing work one at a time. */
@@ -355,7 +423,11 @@ export class Viewer extends EventEmitter {
     filter: string,
     { status, displayed }: { status: SharkdStatus; displayed: Int32Array | null },
     keepSelection: boolean,
+    changed: string | null = null,
   ): void {
+    // Opened, or not just grown: what panels read is outdated
+    const why = !keepSelection ? "file" : (changed ?? (status.frames < this.state.totalFrames ? "rewritten" : null));
+    const epoch = why ? this.newEpoch(why) : this.state.epoch;
     // A shorter file is a rewritten one, filtered or not
     const keepRows = keepSelection && status.frames >= this.state.totalFrames && appendedOnly(this.displayed, displayed);
     this.displayed = displayed;
@@ -377,6 +449,7 @@ export class Viewer extends EventEmitter {
       selected,
       selectedBy: selected === null ? null : this.state.selectedBy,
       generation: this.state.generation + 1,
+      epoch,
     };
     const selectedIndex = this.indexOf(selected);
     const rows = keepRows ? clipRanges(this.state.selectedRows, this.state.displayedFrames) : rowOf(selectedIndex);
@@ -403,6 +476,8 @@ export class Viewer extends EventEmitter {
         filter = result.filter;
         this.active = standby;
         this.loadedSize = st.size;
+        this.loadedIno = st.ino;
+        this.loadedHead = fileHead(file);
         this.state = { ...this.state, marks: [], selected: null, selectedBy: null };
         this.applyLoad(file, filter, result, false);
         this.remember(file);
@@ -431,9 +506,20 @@ export class Viewer extends EventEmitter {
     const result = await this.loadInto(this.engines[standby], file, this.state.filter, fallback);
     if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
     const dropped = result.filter !== this.state.filter;
+    const ino = statSync(file, { throwIfNoEntry: false })?.ino ?? 0;
+    const head = fileHead(file);
+    const n = Math.min(head.length, this.loadedHead.length);
+    const rewritten = ino !== this.loadedIno || !head.subarray(0, n).equals(this.loadedHead.subarray(0, n));
     this.active = standby;
     this.loadedSize = size;
-    this.applyLoad(file, result.filter, result, true);
+    // Read without some extensions now: packets dissect differently
+    this.applyLoad(file, result.filter, result, true, result.rolledBack ? "extensions" : rewritten ? "rewritten" : null);
+    this.loadedIno = ino;
+    this.loadedHead = head;
+    if (result.rolledBack) {
+      this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
+      this.refreshExtensions();
+    }
     return { dropped, rolledBack: result.rolledBack };
   }
 
@@ -479,6 +565,7 @@ export class Viewer extends EventEmitter {
         marks: [],
         generation: this.state.generation + 1,
         rowsSince: this.state.generation + 1,
+        epoch: this.newEpoch("closed"),
       });
     });
   }
@@ -954,8 +1041,13 @@ export class Viewer extends EventEmitter {
     // With the reloads: a sharkd restarting meanwhile would miss the key
     await this.exclusive(async () => {
       await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
+      this.panelData.setTlsKeylog(path);
       this.set({ tlsKeylog: path });
-      await this.reloadNow(true);
+      try {
+        await this.reloadNow(true);
+      } finally {
+        this.set({ epoch: this.newEpoch("tls") });
+      }
     });
   }
 
@@ -1110,7 +1202,7 @@ export class Viewer extends EventEmitter {
           this.active = 1 - this.active;
         }
       } finally {
-        this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
+        this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
         this.refreshExtensions();
       }
       if (rolledBack) {
@@ -1239,6 +1331,7 @@ export class Viewer extends EventEmitter {
     this.capture.stop();
     this.capture.stopActivity();
     for (const e of this.engines) e.close();
+    this.panelData.close();
     this.extensions.close();
   }
 }
@@ -1355,6 +1448,20 @@ function firstBytes(file: string, n: number, transform?: Transform): Promise<Buf
     out.on("error", finish);
     src.on("error", finish);
   });
+}
+
+/** The first bytes of a file: a capture that only grows keeps them. */
+function fileHead(file: string): Buffer {
+  let fd = -1;
+  try {
+    fd = openSync(file, "r");
+    const buf = Buffer.alloc(4096);
+    return buf.subarray(0, readSync(fd, buf, 0, buf.length, 0));
+  } catch {
+    return Buffer.alloc(0);
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
 }
 
 function safeSize(file: string): number {

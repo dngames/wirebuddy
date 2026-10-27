@@ -14,6 +14,7 @@ import { join } from "node:path";
 import type { PanelState } from "../shared/api.ts";
 import type { Extensions, PanelFiles } from "./extensions.ts";
 import type { EventLog } from "./events.ts";
+import { ApiError, type PanelData, type PanelSource } from "./paneldata.ts";
 import { printable } from "./text.ts";
 
 /** Host of a panel: "p" and 26 base32 characters (130 bits), then the server's port. */
@@ -24,6 +25,16 @@ const MAX_ERRORS = 50;
 const MAX_LOGS = 200;
 /** Events one panel may send the agent per minute. */
 const MAX_EVENTS_PER_MINUTE = 20;
+const MAX_REQUEST = 64 * 1024;
+/** Data requests of one panel at a time, and what it may get per minute. */
+const MAX_IN_FLIGHT = 4;
+const MAX_BYTES_PER_MINUTE = 512 * 1024 * 1024;
+/** Panel answers being sent at once, over all panels. */
+const MAX_SENDING = 128 * 1024 * 1024;
+const MAX_FRAMES_PER_SECOND = 20;
+/** View events at most this often; a comment keeps idle event streams open. */
+const VIEW_EVERY_MS = 250;
+const HEARTBEAT_MS = 15_000;
 
 type Health = "not-responding" | "responding" | "stopped" | "navigated" | "isolated" | "not-isolated" | "flooding";
 
@@ -50,6 +61,13 @@ interface Instance {
   digest: string;
   events: number[];
   waiters: (() => void)[];
+  /** Event streams of its page, and what they were sent last. */
+  streams: Set<ServerResponse>;
+  sent: { view: string; epoch: number; frames: number };
+  inFlight: number;
+  /** Bytes sent per answer, for the per-minute quota. */
+  transfers: { at: number; bytes: number }[];
+  frameCalls: number[];
 }
 
 export interface PanelReport {
@@ -70,6 +88,12 @@ export class Panels extends EventEmitter {
   /** The server's port, set once it listens. */
   port = 0;
   private readonly runtime: Map<string, Buffer>;
+  private source: PanelSource | null = null;
+  private data: PanelData | null = null;
+  private viewTimer: NodeJS.Timeout | null = null;
+  private heartbeat: NodeJS.Timeout | null = null;
+  /** Bytes of panel answers being sent now. */
+  private sending = 0;
 
   constructor(
     private readonly extensions: Extensions,
@@ -81,6 +105,12 @@ export class Panels extends EventEmitter {
     this.runtime = new Map(
       ["bridge.js", "base.css"].filter((f) => existsSync(join(runtimeDir, f))).map((f) => [f, readFileSync(join(runtimeDir, f))] as [string, Buffer]),
     );
+  }
+
+  /** Where panels get the view and the capture's data from. */
+  attach(source: PanelSource, data: PanelData): void {
+    this.source = source;
+    this.data = data;
   }
 
   list(): PanelState[] {
@@ -106,7 +136,7 @@ export class Panels extends EventEmitter {
   openPanel(name: string, by: "user" | "agent"): void {
     if (!this.open.has(name) && this.open.size >= MAX_PANELS) throw new Error(`at most ${MAX_PANELS} panels can be open`);
     const files = this.extensions.panelFiles(name);
-    this.drop(name);
+    this.drop(name, "reload");
     const inst: Instance = {
       name,
       label: base32(randomBytes(17)).slice(0, 26),
@@ -127,9 +157,15 @@ export class Panels extends EventEmitter {
       digest: "",
       events: [],
       waiters: [],
+      streams: new Set(),
+      sent: { view: "", epoch: 0, frames: 0 },
+      inFlight: 0,
+      transfers: [],
+      frameCalls: [],
     };
     this.open.set(name, inst);
     this.byLabel.set(inst.label, inst);
+    this.data?.opened(inst.label);
     this.emit("change");
   }
 
@@ -144,13 +180,52 @@ export class Panels extends EventEmitter {
     this.emit("change");
   }
 
-  private drop(name: string): boolean {
+  private drop(name: string, why = "closed"): boolean {
     const inst = this.open.get(name);
     if (!inst) return false;
     this.open.delete(name);
     this.byLabel.delete(inst.label);
     for (const wake of inst.waiters.splice(0)) wake();
+    this.endStreams(inst, why);
+    this.data?.closed(inst.label);
     return true;
+  }
+
+  /** Tells a panel's event streams why they end, and ends them. */
+  private endStreams(inst: Instance, why: string): void {
+    for (const res of inst.streams) {
+      sse(res, "bye", { why });
+      res.end();
+    }
+    inst.streams.clear();
+  }
+
+  /** The view changed: panels hear about it, at most every VIEW_EVERY_MS. */
+  viewChanged(): void {
+    if (this.viewTimer || ![...this.open.values()].some((i) => i.streams.size)) return;
+    this.viewTimer = setTimeout(() => {
+      this.viewTimer = null;
+      this.pushView();
+    }, VIEW_EVERY_MS);
+  }
+
+  private pushView(): void {
+    if (!this.source) return;
+    const view = this.source.view();
+    const json = JSON.stringify(view);
+    for (const inst of this.open.values()) {
+      if (!inst.streams.size) continue;
+      const sent = inst.sent;
+      for (const res of inst.streams) {
+        // A reset carries the new view: the page starts over from it
+        if (view.epoch !== sent.epoch) sse(res, "reset", { epoch: view.epoch, why: this.source.resetWhy(), view });
+        else {
+          if (view.frames > sent.frames) sse(res, "packets", { frames: view.frames, live: view.live });
+          if (json !== sent.view) res.write(`event: view\ndata: ${json}\n\n`);
+        }
+      }
+      inst.sent = { view: json, epoch: view.epoch, frames: view.frames };
+    }
   }
 
   /** Waits until the panel is ready, failed, or `ms` passed; then what it reported. */
@@ -257,7 +332,20 @@ export class Panels extends EventEmitter {
     if (req.method === "GET" && path === "/") {
       if (dest !== "iframe") return send(403, "only as a frame of WireBuddy");
       inst.docNonce = base32(randomBytes(15));
+      // Only the newest page of a panel hears from WireBuddy
+      this.endStreams(inst, "replaced");
       return send(200, this.page(inst), "text/html; charset=utf-8");
+    }
+    if (path.startsWith("/_wb/api/")) {
+      if (req.method !== "POST" || req.headers.origin !== origin || fetchSite !== "same-origin") return send(403, "forbidden");
+      if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) return send(415, "JSON only");
+      if (req.headers["x-wb-doc"] !== inst.docNonce) return this.apiError(res, inst, new ApiError(409, "replaced", "a newer page of this panel is open"));
+      return this.api(req, res, inst, path.slice("/_wb/api/".length));
+    }
+    if (req.method === "GET" && path === "/_wb/events") {
+      if (fetchSite !== "same-origin" || dest === "document" || dest === "iframe") return send(403, "forbidden");
+      if (url.searchParams.get("doc") !== inst.docNonce) return send(409, "replaced");
+      return this.eventStream(res, inst);
     }
     if (req.method === "POST" && path === "/_wb/report") {
       if (req.headers.origin !== origin || fetchSite !== "same-origin") return send(403, "forbidden");
@@ -277,6 +365,112 @@ export class Panels extends EventEmitter {
     if (runtime) return send(200, runtime, path.endsWith(".css") ? "text/css" : "text/javascript");
     const file = inst.files.files.get(path.slice(1));
     return file ? send(200, file.bytes, file.type) : send(404, "not found");
+  }
+
+  /** A data request of a panel's page, within its quotas. */
+  private async api(req: IncomingMessage, res: ServerResponse, inst: Instance, method: string): Promise<true> {
+    inst.inFlight++;
+    try {
+      return await this.apiQuota(req, res, inst, method);
+    } finally {
+      inst.inFlight--;
+    }
+  }
+
+  private async apiQuota(req: IncomingMessage, res: ServerResponse, inst: Instance, method: string): Promise<true> {
+    const now = Date.now();
+    inst.transfers = inst.transfers.filter((t) => now - t.at < 60_000);
+    const used = inst.transfers.reduce((a, t) => a + t.bytes, 0);
+    if (inst.inFlight > MAX_IN_FLIGHT) return this.apiError(res, inst, new ApiError(429, "busy", `at most ${MAX_IN_FLIGHT} requests at a time`, { retryMs: 200 }));
+    if (used >= MAX_BYTES_PER_MINUTE) return this.apiError(res, inst, new ApiError(429, "busy", "512 MiB a minute at most", { retryMs: 60_000 - (now - inst.transfers[0].at) }));
+    if (this.sending >= MAX_SENDING) return this.apiError(res, inst, new ApiError(429, "busy", "WireBuddy is sending a lot already", { retryMs: 500 }));
+    if (method === "frame") {
+      inst.frameCalls = inst.frameCalls.filter((t) => now - t < 1000);
+      if (inst.frameCalls.length >= MAX_FRAMES_PER_SECOND) return this.apiError(res, inst, new ApiError(429, "busy", `wb.frame at most ${MAX_FRAMES_PER_SECOND} times a second: wb.packets reads many`, { retryMs: 1000 - (now - inst.frameCalls[0]) }));
+      inst.frameCalls.push(now);
+    }
+    const raw = await readBody(req, MAX_REQUEST);
+    if (raw === null) return this.apiError(res, inst, new ApiError(413, "too-large", "the request is too large"));
+    let body: unknown;
+    try {
+      body = JSON.parse(raw.toString("utf8") || "{}");
+    } catch {
+      return this.apiError(res, inst, new ApiError(400, "bad-args", "the body is not JSON"));
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) return this.apiError(res, inst, new ApiError(400, "bad-args", "the body is not a JSON object"));
+    if (!this.data) return this.apiError(res, inst, new ApiError(500, "internal", "no capture data here"));
+    let answer;
+    try {
+      answer = await this.data.handle(inst.label, method, body as Record<string, unknown>);
+    } catch (err) {
+      return this.apiError(res, inst, err instanceof ApiError ? err : new ApiError(500, "internal", printable((err as Error).message)));
+    }
+    // Closed or reopened meanwhile: nothing for an old page
+    if (this.byLabel.get(inst.label) !== inst) return this.apiError(res, inst, new ApiError(404, "gone", "the panel was closed"));
+    const out = answer.kind === "json" ? Buffer.from(JSON.stringify(answer.body)) : answer.body;
+    if (this.sending && this.sending + out.length > MAX_SENDING) return this.apiError(res, inst, new ApiError(429, "busy", "WireBuddy is sending a lot already", { retryMs: 500 }));
+    const headers: Record<string, string> = { ...this.headers(inst), "content-length": String(out.length) };
+    if (answer.kind === "json") headers["content-type"] = "application/json";
+    else if (answer.kind === "page") headers["content-type"] = "application/vnd.wirebuddy.page";
+    else {
+      headers["content-type"] = "application/octet-stream";
+      headers["x-wb-type"] = encodeURIComponent(cut(answer.type, 200));
+      headers["x-wb-filename"] = encodeURIComponent(cut(answer.filename, 500));
+      headers["content-disposition"] = "attachment";
+      headers["content-security-policy"] = "sandbox; default-src 'none'";
+    }
+    inst.transfers.push({ at: Date.now(), bytes: out.length });
+    this.sending += out.length;
+    let counted = true;
+    const done = (): void => {
+      if (counted) this.sending -= out.length;
+      counted = false;
+    };
+    res.once("finish", done);
+    res.once("close", done);
+    res.writeHead(200, headers);
+    res.end(out);
+    return true;
+  }
+
+  private apiError(res: ServerResponse, inst: Instance, err: ApiError): true {
+    const body = JSON.stringify({ error: err.message, code: err.code, ...err.extra });
+    res.writeHead(err.status, { ...this.headers(inst), "content-type": "application/json" });
+    res.end(body);
+    return true;
+  }
+
+  /** The page's event stream: the view on connect and when it changes, packets, resets, and the end. */
+  private eventStream(res: ServerResponse, inst: Instance): true {
+    res.writeHead(200, { ...this.headers(inst), "content-type": "text/event-stream" });
+    res.write("retry: 2000\n\n");
+    const view = this.source?.view();
+    if (view) {
+      const json = JSON.stringify(view);
+      res.write(`event: view\ndata: ${json}\n\n`);
+      if (!inst.streams.size) inst.sent = { view: json, epoch: view.epoch, frames: view.frames };
+    }
+    inst.streams.add(res);
+    res.on("close", () => {
+      inst.streams.delete(res);
+      this.beat();
+    });
+    this.beat();
+    return true;
+  }
+
+  /** Keeps event streams open while there are any. */
+  private beat(): void {
+    const any = [...this.open.values()].some((i) => i.streams.size);
+    if (any && !this.heartbeat) {
+      this.heartbeat = setInterval(() => {
+        for (const inst of this.open.values()) for (const res of inst.streams) res.write(": hb\n\n");
+      }, HEARTBEAT_MS);
+      this.heartbeat.unref();
+    } else if (!any && this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
   }
 
   /** Every panel response: the panel may load only its own files and talk only to its own origin. */
@@ -319,6 +513,7 @@ export class Panels extends EventEmitter {
       meta("wb-doc", inst.docNonce ?? ""),
       meta("wb-params", JSON.stringify(manifest.params)),
       meta("wb-name", inst.name),
+      meta("wb-view", JSON.stringify(this.source?.view() ?? null)),
       `<title>${escapeHtml(manifest.title)}</title>`,
       '<link rel="stylesheet" href="/_wb/base.css">',
       files.has("style.css") ? '<link rel="stylesheet" href="/style.css">' : "",
@@ -376,6 +571,16 @@ export class Panels extends EventEmitter {
     }
     this.emit("change");
   }
+}
+
+/** At most `max` characters, none of them half a surrogate pair (encodeURIComponent refuses those). */
+function cut(s: string, max: number): string {
+  const whole = s.slice(0, max * 2).replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
+  return Array.from(whole).slice(0, max).join("");
+}
+
+function sse(res: ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 function push(ring: string[], line: string, max: number): void {

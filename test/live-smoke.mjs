@@ -1,7 +1,8 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
 // Generates its own ICMP traffic with ping. Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -16,6 +17,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A home of its own: the tester's Wireshark preferences, profiles and plugins don't apply
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
+// A panel, to read the live capture as panels do
+const panelDir = join(home, ".local/share/wirebuddy/extensions/live/panel");
+mkdirSync(panelDir, { recursive: true, mode: 0o700 });
+writeFileSync(join(panelDir, "main.js"), "wb.ready();\n");
+writeFileSync(join(panelDir, "../extension.json"), JSON.stringify({ label: "live", version: "1", panel: true }));
 const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token, "--capture-dir", captureDir], {
   stdio: ["ignore", "pipe", "inherit"],
   env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
@@ -244,6 +250,55 @@ try {
     assert.equal(s.capture.status, "idle");
     assert.equal(s.capture.error, null);
     assert.ok(s.totalFrames > 0);
+  });
+
+  await check("a panel reads the live capture as it grows", async () => {
+    await api("/api/panels/open", { name: "live" });
+    const host = new URL((await state()).panels[0].src).host;
+    const port = Number(new URL(base).port);
+    const panelReq = (path, { method = "GET", headers = {}, body } = {}, onData) =>
+      new Promise((resolve, reject) => {
+        const req = request({ host: "127.0.0.1", port, path, method, headers: { host, "sec-fetch-site": "same-origin", ...headers } }, (res) => {
+          const chunks = [];
+          res.on("data", (c) => (chunks.push(c), onData?.(Buffer.concat(chunks).toString("utf8"), req)));
+          res.on("end", () => resolve({ status: res.statusCode, raw: Buffer.concat(chunks) }));
+          res.on("close", () => resolve({ status: res.statusCode, raw: Buffer.concat(chunks) }));
+        });
+        req.on("error", (e) => (e.code === "ECONNRESET" ? resolve({}) : reject(e)));
+        req.end(body);
+      });
+    const doc = /<meta name="wb-doc" content="([a-z2-7]+)">/.exec((await panelReq("/", { headers: { "sec-fetch-site": "cross-site", "sec-fetch-dest": "iframe" } })).raw.toString())[1];
+    const packets = async (q) => {
+      const r = await panelReq("/_wb/api/packets", { method: "POST", body: JSON.stringify(q), headers: { origin: `http://${host}`, "content-type": "application/json", "x-wb-doc": doc } });
+      assert.equal(r.status, 200, r.raw.toString());
+      const h = r.raw.readUInt32LE(4);
+      return JSON.parse(r.raw.subarray(8, 8 + h).toString());
+    };
+    const pinger = ping(5);
+    try {
+      await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 5 }, ring: null });
+      // The event stream tells the panel when packets come
+      let seen = "";
+      await panelReq(`/_wb/events?doc=${doc}`, { headers: { "sec-fetch-dest": "empty" } }, (text, req) => {
+        seen = text;
+        if ((text.match(/event: packets\ndata: \{"frames":\d+,"live":true\}/g) ?? []).length >= 2) req.destroy();
+      });
+      assert.match(seen, /event: packets/);
+      // A capture that grows is the same capture: no reset once it is open
+      assert.doesNotMatch(seen.slice(seen.indexOf("event: packets")), /event: reset/);
+      const early = await packets({ filter: "icmp" });
+      assert.ok(early.n > 0 && early.live, JSON.stringify(early));
+      await sleep(2000);
+      const later = await packets({ filter: "icmp" });
+      assert.ok(later.n > early.n, `${early.n} then ${later.n}`);
+      const s = await waitIdle(10000);
+      const end = await packets({});
+      assert.equal(end.live, false);
+      assert.equal(end.total, s.totalFrames);
+    } finally {
+      pinger.kill();
+      await api("/api/panels/close", { name: "live" });
+    }
   });
 
   await check("the agent starts a capture over MCP", async () => {

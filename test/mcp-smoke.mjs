@@ -269,7 +269,7 @@ try {
   await call("extensions", { action: "list" }, (t) => assert.match(t, /^acme \[loaded\] \[lua\]/m));
 
   // Panels: written by the agent, checked before they run
-  await call("extensions", { action: "guide", topic: "panel" }, (t) => assert.match(t, /wb\.ready\(\)/));
+  await call("extensions", { action: "guide", topic: "panel" }, (t) => assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/));
   mkdirSync(join(extDir, "viewpanel", "panel"), { recursive: true });
   writeFileSync(join(extDir, "viewpanel", "extension.json"), JSON.stringify({ label: "View", version: "1", panel: true }));
   writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "const x = 1;\nconst y = ;\n");

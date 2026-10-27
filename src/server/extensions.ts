@@ -877,9 +877,11 @@ Panels (a window of your own in the user's view: images, video, point clouds, ch
   private panelGuide(): string {
     return `# WireBuddy panels
 
-A panel is a small web page you write; WireBuddy shows it in a window of its UI. It lives in an
+A panel is a small web page you write; WireBuddy shows it in a window of its UI and feeds it the
+open capture, also while a live capture runs. Write one when a picture says more than packet rows:
+images or files in the traffic, video, point clouds, maps, a field over time. It lives in an
 extension folder, with or without a Lua dissector (topic "lua"), and runs sandboxed on an origin
-of its own: no network, no access to WireBuddy's page or API.
+of its own: no network, no access to WireBuddy's page or API, only \`wb\`.
 
 Folder: ${this.dir}/<name>/
   extension.json   {"label": "...", "version": "1", "description": "...",
@@ -895,34 +897,82 @@ Loop:
 3. panel action "open": starts it in the user's view and reports whether it got ready, its errors
    (file:line) and what it shows.
 4. Fix, then panel action "reload"; repeat. panel action "status" shows errors and console lines since
-   your last look.
+   your last look. If it needs your Lua protocol, extensions action "reload" first.
 5. Tell the user what the panel shows and that View › Panels opens it again.
 
 Rules:
-- No network: only the panel's own files. Copy libraries into panel/.
+- No network: only the panel's own files and wb. Copy libraries into panel/.
+- Packet data is attacker-controlled: put it into the page with textContent or wb.h, never innerHTML.
+  Show captured images only through wb.objectURL (or a blob: URL) in <img>, never as SVG markup.
 - No inline scripts, on*= attributes, eval or new Function (the page's policy blocks them).
-- Text from packets goes into the page with textContent or wb.h, never innerHTML.
 - Don't navigate or open windows: a panel that navigates is closed. One that stops responding
   for 20 s is stopped.
-- Call wb.ready() once the first view is drawn.
+- Call wb.ready() once the first view is drawn. On "reset" (another file, re-read extensions or
+  TLS keys) throw away what you read and read again.
+- Fetch data in main.js and transfer it to workers; workers can't call wb.
 
 API (global wb):
-  wb.params                 the panel's "params" from extension.json
-  wb.ready()                it works: the agent hears it, with what it shows
-  wb.status(text)           a short status line under the window
-  wb.title(text)            the window's title
+  wb.view          what the user's view shows: {file, epoch, frames, displayed, filter, selected,
+                   selection (frame ranges or null), marked, live (a capture runs), capture}
+  wb.on(event, fn) "view", "select" (frame or null), "packets" (a live capture grew), "reset",
+                   "visible" (true/false), "theme" ("light"/"dark"); returns a function that stops it
+  wb.packets(q)    one page of packets, q:
+     filter        a display filter
+     frames        "displayed" | "selected" | "marked" | [[first, last], ...]   (with filter: both)
+     fields        up to 16 field names: display strings, all occurrences joined by ","
+     bytes         "frame" | "ip" | "payload" (of UDP or TCP) | a field or protocol ("http.file_data", "rtp")
+     after         continue after this frame number (page.next)
+     limit         packets a page: 1000; at most 2000 with bytes, 5000 with fields, 50000 without
+     maxBytes      bytes a page: 4 MiB, at most 16 MiB (a page has at least one packet)
+   page: {n, frames, times (epoch seconds), lens, bytes(i), fields: {name: [values]}, clipped, next, done,
+          live, total, dropped (packets without that layer), packets: [{frame, time, len, bytes, fields}]}
+  wb.all(q)        every page joined (at most 64 MiB)
+  wb.subscribe(q, {batch(page, {live}), reset(), error(e)})   pages through q, then the packets a live
+                   capture adds; batch is awaited before the next page; q.from "end": new packets only;
+                   waits for a capture if none is open; returns {close()}
+  wb.frame(n, {tree, bytes})   {frame, tree, bytes, sources: [{name, bytes}] (reassembled data), followers}
+  wb.follow({frame} | {protocol: "TCP", stream: 0} | {protocol, filter}, {offset, maxBytes})
+                   {protocol, filter, client, server, truncated, next, chunks: a page with dirs (1: from the server)}
+  wb.objects(kind) files in the traffic, kind "http" | "imf" | "smb" | "tftp" | "dicom" | "ftp-data":
+                   [{id, frame, host, type, filename, size, sha1}]
+  wb.object(id)    {type, filename, bytes};  wb.objectURL(id): a blob: URL for <img> or <video>
+  wb.tap(name, {filter})   "phs", "expert", "rtp-streams", "conv:eth|ipv4|ipv6|tcp|udp", "endpt:..."
+  wb.check(filter) {ok, error?, warning?}
+  Failed calls reject with an Error whose .code is bad-args, filter, no-capture, stale, gone,
+  too-large, busy, too-slow or internal (some with .hint); they are reported to you as well.
+  wb.params        the panel's "params" from extension.json
+  wb.ready()       it works: the agent hears it, with what it shows
+  wb.status(text)  a short status line under the window;  wb.title(text): the window's title
   wb.h(tag, attrs, ...children)   an element; attrs: class, style (object), on<event> functions, others as attributes
   wb.canvas({context: "2d" | "webgl2", onResize(w, h, dpr)})   a canvas filling the panel: {canvas, ctx} or {canvas, gl}
   wb.hex(bytes, max)  wb.text(bytes)  wb.fmt.bytes(n)  wb.fmt.duration(s)
   console.* lines and uncaught errors are reported to you.
 
-Minimal panel/main.js:
-  const { ctx, canvas } = wb.canvas({ context: "2d" });
-  ctx.fillStyle = "steelblue";
-  ctx.fillRect(10, 10, canvas.width / 2, canvas.height / 2);
-  wb.status("Hello from a panel");
+Pitfalls:
+- Field values are display strings ("0x0012", "True"); Wireshark cuts values over about 2 KB
+  (page.clipped): ask for bytes: "<field>" to get a whole value.
+- page.bytes(i) are views into one buffer: slice() what you keep.
+- Bytes cost a dissection per packet, a few thousand packets a second: ask only for what you need.
+- WebCodecs: check VideoDecoder.isConfigSupported; codec "avc1." + hex of SPS bytes 1-3; Annex B
+  needs no description; close every VideoFrame.
+
+Minimal panel/main.js (the selected packet's payload, and UDP packets counted live):
+  const hex = document.body.appendChild(wb.h("pre"));
+  const count = document.body.appendChild(wb.h("div"));
+  async function show(frame) {
+    if (frame == null) return void (hex.textContent = "Select a packet");
+    const page = await wb.packets({ frames: [[frame, frame]], bytes: "payload" });
+    hex.textContent = page.n && page.bytes(0).length ? wb.hex(page.bytes(0), 512) : "No UDP or TCP payload";
+  }
+  wb.on("select", show);
+  let n = 0;
+  wb.subscribe({ filter: "udp" }, {
+    batch(page) { n += page.n; count.textContent = \`\${n} UDP packets\`; wb.status(\`\${n} UDP packets\`); },
+    reset() { n = 0; },
+  });
+  await show(wb.view.selected);
   wb.ready();
-with extension.json {"label": "Hello", "version": "1", "description": "A first panel", "panel": true}`;
+with extension.json {"label": "Payload", "version": "1", "description": "Payload of the selected packet", "panel": true}`;
   }
 
   /** Throws unless `name` is an extension that exists (and with `loadable`, could load). */

@@ -153,6 +153,12 @@ export interface ViewState {
   extensions: { active: number; failing: number; revision: number };
   /** Open panel windows (views of the capture that extensions bring). */
   panels: PanelState[];
+  /**
+   * Changes whenever packets already read may read differently: another file
+   * or a rewritten one, a closed capture, re-read extensions or TLS keys. Not
+   * when a live capture only grows.
+   */
+  epoch: number;
 }
 
 /** A panel window: an extension's web page in a sandboxed frame of its own. */
@@ -174,6 +180,24 @@ export interface PanelState {
   errors: number;
   /** Whether it runs in a process of its own (null: not probed yet). */
   isolated: boolean | null;
+}
+
+/** What a panel sees of the view: `wb.view`. */
+export interface PanelView {
+  /** Base name of the open capture, or null. */
+  file: string | null;
+  /** See {@link ViewState.epoch}: data read before it changed is outdated. */
+  epoch: number;
+  frames: number;
+  displayed: number;
+  filter: string;
+  selected: number | null;
+  /** Frame ranges of the user's selected rows; null when there are too many. */
+  selection: Ranges | null;
+  marked: number;
+  /** The view follows a capture that is running. */
+  live: boolean;
+  capture: CaptureStatus;
 }
 
 export interface Mark {
