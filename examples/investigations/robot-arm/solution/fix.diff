@@ -1,0 +1,12 @@
+--- a/examples/investigations/robot-arm/app.mjs
++++ b/examples/investigations/robot-arm/app.mjs
+@@ -55,8 +55,7 @@
+     header.writeUInt8(type, 3);
+     header.writeUInt16BE(this.seq, 4);
+     header.writeUInt16BE(payload.length, 6);
+-    this.socket.write(header);
+-    if (payload.length > 0) this.socket.write(payload);
++    this.socket.write(Buffer.concat([header, payload]));
+     return this.seq;
+   }
+ 

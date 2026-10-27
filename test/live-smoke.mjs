@@ -1,8 +1,11 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
-// Generates its own ICMP traffic with ping. Usage: node test/live-smoke.mjs   (after npm run build)
+// Generates its own ICMP traffic with ping, and TCP with the robot-arm example.
+// Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createSocket } from "node:dgram";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -298,6 +301,85 @@ try {
     } finally {
       pinger.kill();
       await api("/api/panels/close", { name: "live" });
+    }
+  });
+
+  await check("robot-arm example: a MOVE's payload waits for the ACK of its header, not after the fix", async () => {
+    const example = join(root, "examples/investigations/robot-arm");
+    const probe = createServer();
+    await new Promise((r) => probe.listen(0, "127.0.0.1", r));
+    const port = probe.address().port;
+    await new Promise((r) => probe.close(r));
+    const udp = createSocket("udp4");
+    await new Promise((r) => udp.bind(0, "127.0.0.1", r));
+    const telemetry = udp.address().port;
+    await new Promise((r) => udp.close(r));
+    const work = mkdtempSync(join(tmpdir(), "wirebuddy-arm-"));
+    let device;
+    try {
+      // The fixed app: solution/fix.diff applied to a copy, as from the repository root
+      const fixedDir = join(work, "examples/investigations/robot-arm");
+      mkdirSync(fixedDir, { recursive: true });
+      copyFileSync(join(example, "app.mjs"), join(fixedDir, "app.mjs"));
+      execFileSync("git", ["apply", join(example, "solution/fix.diff")], { cwd: work, env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(work) }, stdio: "pipe" });
+
+      device = spawn(process.execPath, [join(example, "device.mjs"), "--port", String(port), "--telemetry", String(telemetry)], { stdio: ["ignore", "pipe", "ignore"] });
+      await new Promise((resolve, reject) => {
+        device.stdout.setEncoding("utf8").on("data", (d) => /listening on/.test(d) && resolve());
+        device.on("exit", (code) => reject(new Error(`device exited with ${code}`)));
+      });
+      const runApp = (app) =>
+        new Promise((resolve, reject) => {
+          const p = spawn(process.execPath, [app, "--port", String(port), "--telemetry", String(telemetry), "--seconds", "2"], { stdio: "ignore" });
+          p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${app} exited with ${code}`))));
+        });
+      /** Segments with data toward the controller while `app` runs, in capture order. */
+      const toDevice = async (app) => {
+        await api("/api/capture/start", { iface: "lo", filter: `tcp port ${port}`, autostop: { durationSec: 20 }, ring: null });
+        await sleep(800);
+        await runApp(app);
+        await sleep(300);
+        await api("/api/capture/stop", {});
+        const s = await waitIdle(6000);
+        assert.equal(s.capture.error, null);
+        await sleep(1200); // final reload after stop
+        const cols = await api("/api/columns", { columns: ["tcp.stream", "tcp.len", "frame.time_relative"].map((field) => ({ field, title: "" })) });
+        assert.equal(cols.ok, true, JSON.stringify(cols));
+        assert.equal((await api("/api/filter", { filter: `tcp.dstport == ${port} && tcp.len > 0` })).ok, true);
+        const { generation, displayedFrames } = await state();
+        const segments = [];
+        for (let start = 0; start < displayedFrames; start += 500) {
+          for (const row of (await api(`/api/rows?gen=${generation}&start=${start}&count=500`)).rows) {
+            const [stream, len, t] = row.c.slice(-3);
+            segments.push({ stream, len: Number(len), t: Number(t) });
+          }
+        }
+        return segments;
+      };
+
+      // Header alone (8 bytes), then the MOVE payload (14 bytes) of the same connection
+      const buggy = await toDevice(join(example, "app.mjs"));
+      const gaps = [];
+      buggy.forEach((seg, i) => {
+        if (seg.len !== 8) return;
+        const next = buggy.slice(i + 1).find((n) => n.stream === seg.stream);
+        if (next?.len === 14) gaps.push(next.t - seg.t);
+      });
+      assert.ok(gaps.length >= 20, `MOVE headers sent on their own: ${gaps.length} in ${buggy.length} segments`);
+      const late = gaps.filter((g) => g >= 0.03).length;
+      assert.ok(late >= 0.8 * gaps.length, `payload 30 ms or more after its header in only ${late} of ${gaps.length}`);
+
+      const fixed = await toDevice(join(fixedDir, "app.mjs"));
+      assert.equal(fixed.filter((seg) => seg.len === 14).length, 0, "no MOVE payload in a segment of its own");
+      const whole = fixed.filter((seg) => seg.len === 22).length;
+      assert.ok(whole >= 60, `MOVEs with header and payload in one segment: ${whole}`);
+    } finally {
+      device?.kill();
+      await api("/api/capture/stop", {}).catch(() => {});
+      await waitIdle(6000).catch(() => {});
+      await api("/api/filter", { filter: "" }).catch(() => {});
+      await api("/api/columns", { columns: [] }).catch(() => {});
+      rmSync(work, { recursive: true, force: true });
     }
   });
 
