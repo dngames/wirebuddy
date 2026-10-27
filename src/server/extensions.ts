@@ -457,7 +457,8 @@ export class Extensions {
   /** Why extensions can't load, or null when they can. */
   unavailable: string | null = "not set up yet";
 
-  constructor() {
+  /** `examples`: the folder of the example extensions that ship with WireBuddy, for the panel guide. */
+  constructor(private readonly examples = "") {
     const data = process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
     this.dir = join(data, "wirebuddy/extensions");
     this.stateFile = join(data, "wirebuddy/extensions-state.json");
@@ -931,7 +932,7 @@ Folder: ${this.dir}/<name>/
   panel/body.html  optional HTML put into <body> (no scripts, no on*= attributes)
   panel/style.css  optional; panel/... more modules (import "./x.js"), workers, images, fonts, data
   At most 4 folders deep, 200 files, 8 MiB a file, 16 MiB in all.
-
+${this.examples && existsSync(this.examples) ? `Examples to copy with your file tools: ${this.examples}/{http-gallery,rtp-video,lidar-wbpc}\n  (pictures from HTTP; H.264 over RTP with WebCodecs; a point cloud from a Lua dissector in WebGL2)\n` : ""}
 Loop:
 1. Write the files with your file tools.
 2. extensions action "test": manifest, file trust, JavaScript syntax (file:line) and lints.

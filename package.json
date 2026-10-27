@@ -31,6 +31,7 @@
   },
   "files": [
     "dist",
+    "examples",
     "LICENSE",
     "README.md"
   ],
@@ -44,9 +45,11 @@
     "mcp": "node dist/server/main.js --mcp",
     "test": "node test/units.mjs && node test/framestore.mjs && node test/api-smoke.mjs && node test/mcp-smoke.mjs && node test/panels-smoke.mjs",
     "test:live": "node test/live-smoke.mjs",
+    "test:browser": "node test/browser.mjs",
     "demo": "node test/agent-demo.mjs",
     "prepare": "npm run build",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "pretest:browser": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

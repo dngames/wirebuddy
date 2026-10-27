@@ -1,0 +1,10 @@
+{
+  "label": "RTP video",
+  "version": "1",
+  "description": "Plays H.264 video sent over RTP (RFC 6184); decodes UDP port 5004 as RTP and its payload type 96 as H.264",
+  "panel": {
+    "title": "RTP video",
+    "size": [720, 540],
+    "offer": { "filter": "h264", "text": "Play the video" }
+  }
+}

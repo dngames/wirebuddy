@@ -1,0 +1,52 @@
+body {
+  overflow: hidden;
+  background: #121419;
+  color: #dfe1e5;
+}
+
+.view {
+  position: absolute;
+  inset: 0;
+}
+
+.view canvas {
+  touch-action: none;
+  cursor: grab;
+}
+
+.view canvas:active {
+  cursor: grabbing;
+}
+
+.hud {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+  font-size: 12px;
+  text-shadow: 0 1px 2px #000;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.scrub {
+  flex: 1;
+  min-width: 60px;
+}
+
+.scan {
+  font-variant-numeric: tabular-nums;
+}
+
+.hint {
+  color: #9aa0a6;
+}

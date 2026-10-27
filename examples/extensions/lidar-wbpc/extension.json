@@ -1,0 +1,11 @@
+{
+  "label": "WBPC point cloud",
+  "version": "1",
+  "description": "Decodes wbpc, a made-up lidar protocol on UDP port 7502, and shows its scans as a 3D point cloud",
+  "panel": {
+    "title": "Point cloud",
+    "size": [800, 600],
+    "params": { "port": 7502 },
+    "offer": { "filter": "wbpc", "text": "Show the point cloud" }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "label": "HTTP gallery",
+  "version": "1",
+  "description": "Shows the images, and lists the other files, transferred over HTTP",
+  "panel": {
+    "title": "HTTP gallery",
+    "size": [760, 560],
+    "offer": { "filter": "http.content_type contains \"image/\"", "text": "Show images" }
+  }
+}

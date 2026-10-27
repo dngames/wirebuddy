@@ -79,7 +79,7 @@ if (!sharkd) {
 const dumpcap = which("dumpcap");
 if (!dumpcap) log("dumpcap not found on PATH; live capture is unavailable");
 
-const extensions = new Extensions();
+const extensions = new Extensions(join(dirname(fileURLToPath(import.meta.url)), "../../examples/extensions"));
 await extensions.init(sharkd);
 if (extensions.unavailable) log(`extensions are unavailable: ${extensions.unavailable}`);
 
