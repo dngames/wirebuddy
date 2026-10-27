@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 <p align="center">
-  <a href="docs/demo.mp4"><img src="docs/demo.gif" alt="WireBuddy demo: an AI agent opens a capture, filters and marks packets, then a live capture is analysed together" width="900"></a>
+  <a href="docs/demo.mp4"><img src="docs/demo.gif" alt="WireBuddy demo: an AI agent investigates a stuttering robot arm. It captures the traffic, writes a dissector for the arm's protocol, finds where each command loses 40 ms, plots the arm's moves in a panel and confirms the fix with a second capture" width="900"></a>
   <br><sub>50-second demo · <a href="docs/demo.mp4">MP4 version</a></sub>
 </p>
 
@@ -201,6 +201,31 @@ Example prompts:
 - "Mark all DNS failures and filter to them."
 - "Capture on eth0 for a minute and tell me when you see TCP retransmissions."
 
+### Example: a robot arm that stutters
+
+[`examples/investigations/robot-arm`](examples/investigations/robot-arm) is an investigation to
+try, all on your machine over loopback: an emulated arm controller and the control app that drives
+it. The app should send the controller 50 commands a second but gets about 22 through, and the
+arm moves in jerks, while the controller's vendor says it answers in under a millisecond.
+
+> The robot arm stutters. Our control app, examples/investigations/robot-arm/app.mjs, should send
+> the arm controller 50 MOVE commands a second, but gets about 22 through and the arm moves in
+> jerks. The vendor says the controller answers every command in under a millisecond; their
+> protocol document is examples/investigations/robot-arm/PROTOCOL.md. The controller is running
+> on port 7700. Capture the traffic while the app runs and find out why.
+
+As in the demo above, the agent:
+
+1. starts a capture on `lo` with `start_capture`, runs the app and stops the capture;
+2. finds the controller's protocol undecoded, writes a Lua dissector from the vendor's document,
+   tests it on the capture and reloads the view;
+3. adds a time-delta column, finds where every command loses its time and marks an example;
+4. writes a panel that plots the arm's joints and each command's latency;
+5. names the cause, fixes the app and captures again to show the fix.
+
+The example's [README](examples/investigations/robot-arm/README.md) has the setup and, at its
+end, the solution; `solution/armc` is a dissector and a panel as the agent might write them.
+
 ### Example: which site did I just visit?
 
 > Capture my traffic while I open a website, then tell me which site it was.
@@ -304,9 +329,10 @@ carries what happened in the viewer since the agent's last call: problems and wh
 
 ```bash
 npm run build
-npm test             # HTTP API and MCP tools against test/fixtures/http.pcapng
-node test/browser-control.mjs   # panels in headless Chrome: click gate, snapshot, offers (skipped without Chrome)
-npm run test:live    # live capture on loopback: pings 127.0.0.1, runs a local HTTPS server
+npm test               # unit checks, the capture file reader, the HTTP API, MCP tools and panels
+npm run test:browser   # panels and the examples in headless Chrome (skipped without Chrome)
+npm run test:examples  # the robot-arm investigation's bug and its fix, over loopback without a capture
+npm run test:live      # live captures on loopback: pings 127.0.0.1, a local HTTPS server, the robot arm
 ```
 
 The tests run their servers with an empty home folder, so your own Wireshark preferences and

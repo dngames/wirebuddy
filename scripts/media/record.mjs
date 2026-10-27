@@ -1,8 +1,12 @@
-// Records the WireBuddy promo video: scripted chat + real MCP calls + real UI, captured with Chrome's screencast.
+// Records the WireBuddy demo video: an agent investigates the stuttering robot arm of
+// examples/investigations/robot-arm with real MCP calls, real loopback captures and the real UI,
+// captured with Chrome's screencast. The chat is scripted; every tool call and result is real.
 // Usage: CDP_PORT=<port of a running headless chrome> node record.mjs <wirebuddy-root> <outdir>
-import { spawn } from "node:child_process";
+//        WATCH=1 node record.mjs <wirebuddy-root> <outdir>   (no recording: prints the viewer's URL
+//        and waits for SIGUSR1 before each step, to follow the story in a browser)
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +14,8 @@ import { createRequire } from "node:module";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const [root, outdir] = process.argv.slice(2);
-if (!process.env.CDP_PORT || !root || !outdir) {
+const WATCH = !!process.env.WATCH;
+if ((!process.env.CDP_PORT && !WATCH) || !root || !outdir) {
   console.error("Usage: CDP_PORT=<port of a running headless chrome> node record.mjs <wirebuddy-root> <outdir>");
   process.exit(2);
 }
@@ -21,56 +26,112 @@ const { StdioClientTransport } = await import(require.resolve("@modelcontextprot
 const WebSocket = require("ws");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PORT = 8780;
+const ARM = 7700;
+const TELEMETRY = 7701;
+const example = join(root, "examples/investigations/robot-arm");
 
-// The stage must share the UI's origin to reach into its iframe
-copyFileSync(join(here, "stage.html"), join(root, "dist/web/stage.html"));
-const framesDir = join(outdir, "frames");
-rmSync(framesDir, { recursive: true, force: true });
-mkdirSync(framesDir, { recursive: true });
-mkdirSync(join(outdir, "home"), { recursive: true });
+// The app runs from a copy, so the fix never touches the repository
+mkdirSync(outdir, { recursive: true });
+const work = mkdtempSync(join(tmpdir(), "wb-arm-"));
+for (const f of ["device.mjs", "app.mjs", "PROTOCOL.md"]) copyFileSync(join(example, f), join(work, f));
+const home = join(outdir, "home");
+rmSync(home, { recursive: true, force: true });
+const extensions = join(home, ".local/share/wirebuddy/extensions");
+mkdirSync(extensions, { recursive: true, mode: 0o700 });
+const device = spawn(process.execPath, [join(work, "device.mjs"), "--port", String(ARM), "--telemetry", String(TELEMETRY)], { stdio: "ignore" });
+process.on("exit", () => device.kill());
 
-const mcp = new Client({ name: "promo", version: "0" });
+const mcp = new Client({ name: "demo", version: "0" });
 await mcp.connect(new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "dist/server/main.js"), "--mcp", "--port", String(PORT), "--capture-dir", mkdtempSync(join(tmpdir(), "wb-video-"))],
   // Empty home: no recent-file history from the real Wireshark config can appear on screen
-  env: { ...process.env, HOME: join(outdir, "home"), XDG_CONFIG_HOME: join(outdir, "home/.config"), XDG_DATA_HOME: join(outdir, "home/.local/share"), WIREBUDDY_EXTENSIONS: "", WIREBUDDY_TOKEN: TOKEN },
+  env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "", WIREBUDDY_TOKEN: TOKEN },
   stderr: "ignore",
 }));
 const tool = async (name, args = {}) => {
   const r = await mcp.callTool({ name, arguments: args });
-  const text = r.content.map((c) => c.text).join("\n");
+  const text = r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  if (WATCH) console.log(`\n> ${name} ${JSON.stringify(args)}\n${text.split("\nWireBuddy events")[0].slice(0, 1500)}`);
   if (r.isError) throw new Error(`${name}: ${text}`);
   return text;
 };
 
-// --- CDP plumbing
-const targets = await fetch(`http://127.0.0.1:${process.env.CDP_PORT}/json/list`).then((r) => r.json());
-const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
-await new Promise((r) => ws.once("open", r));
-let nextId = 0;
-const pending = new Map();
+/** The control app, run as the agent would run it: its report. Not blocking, so the recording goes on meanwhile. */
+async function runApp(seconds) {
+  const app = spawn(process.execPath, [join(work, "app.mjs"), "--port", String(ARM), "--telemetry", String(TELEMETRY), "--seconds", String(seconds)], { stdio: ["ignore", "pipe", "inherit"] });
+  let out = "";
+  app.stdout.setEncoding("utf8");
+  app.stdout.on("data", (d) => (out += d));
+  const code = await new Promise((done) => app.on("close", done));
+  if (code !== 0) throw new Error(`app.mjs exited with ${code}`);
+  if (WATCH) console.log(out);
+  const rate = /([\d.]+)\/s achieved/.exec(out)?.[1];
+  const p50 = /ACK latency\s+p50 ([\d.]+) ms/.exec(out)?.[1];
+  const missed = /deadlines missed\s+(\d+)/.exec(out)?.[1];
+  const err = /tracking error\s+max ([\d.]+)°/.exec(out)?.[1];
+  return { rate, p50, missed, err };
+}
+
+/** The agent writes its dissector and panel: here, the example's solution. */
+function writeExtension() {
+  const to = join(extensions, "armc");
+  cpSync(join(example, "solution/armc"), to, { recursive: true });
+  const modes = (p) => {
+    for (const e of readdirSync(p)) {
+      const f = join(p, e);
+      if (statSync(f).isDirectory()) {
+        chmodSync(f, 0o700);
+        modes(f);
+      } else chmodSync(f, 0o600);
+    }
+  };
+  chmodSync(to, 0o700);
+  modes(to);
+}
+
+/** Frame numbers from query_packets with fields: the first value of each row. */
+const framesOf = (text) => [...text.matchAll(/^\s*(\d+)\s*\|\s*(\d+)/gm)].map((m) => Number(m[2]));
+
+// --- the browser: Chrome over CDP, or nothing in WATCH mode
+let send = async () => ({});
+let js = async () => null;
 const frames = [];
-ws.on("message", (raw) => {
-  const m = JSON.parse(raw);
-  if (m.id) {
-    pending.get(m.id)?.(m.result ?? m.error);
-    pending.delete(m.id);
-  } else if (m.method === "Page.screencastFrame") {
-    const { data, metadata, sessionId } = m.params;
-    const file = join(framesDir, `f${String(frames.length).padStart(5, "0")}.jpg`);
-    writeFileSync(file, Buffer.from(data, "base64"));
-    frames.push({ file, t: metadata.timestamp });
-    send("Page.screencastFrameAck", { sessionId });
-  }
-});
-const send = (method, params = {}) => new Promise((r) => { pending.set(++nextId, r); ws.send(JSON.stringify({ id: nextId, method, params })); });
-const js = async (expression) => {
-  const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-  if (r?.exceptionDetails) throw new Error(`${expression.slice(0, 80)}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
-  return r?.result?.value;
-};
-const stage = (call) => js(`window.stage.${call}`);
+let ws = null;
+if (!WATCH) {
+  // The stage must share the UI's origin to reach into its iframe
+  copyFileSync(join(here, "stage.html"), join(root, "dist/web/stage.html"));
+  const framesDir = join(outdir, "frames");
+  rmSync(framesDir, { recursive: true, force: true });
+  mkdirSync(framesDir, { recursive: true });
+  const targets = await fetch(`http://127.0.0.1:${process.env.CDP_PORT}/json/list`).then((r) => r.json());
+  ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
+  await new Promise((r) => ws.once("open", r));
+  let nextId = 0;
+  const pending = new Map();
+  ws.on("message", (raw) => {
+    const m = JSON.parse(raw);
+    if (m.id) {
+      pending.get(m.id)?.(m.result ?? m.error);
+      pending.delete(m.id);
+    } else if (m.method === "Page.screencastFrame") {
+      const { data, metadata, sessionId } = m.params;
+      const file = join(framesDir, `f${String(frames.length).padStart(5, "0")}.jpg`);
+      writeFileSync(file, Buffer.from(data, "base64"));
+      frames.push({ file, t: metadata.timestamp });
+      send("Page.screencastFrameAck", { sessionId });
+    }
+  });
+  send = (method, params = {}) => new Promise((r) => { pending.set(++nextId, r); ws.send(JSON.stringify({ id: nextId, method, params })); });
+  js = async (expression) => {
+    const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+    if (r?.exceptionDetails) throw new Error(`${expression.slice(0, 80)}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+    return r?.result?.value;
+  };
+}
+const stage = async (call) => (WATCH ? console.log(`[stage] ${call}`) : js(`window.stage.${call}`));
+/** A beat for the viewer; in WATCH mode, the next step waits for SIGUSR1. */
+const beat = (ms) => (WATCH ? new Promise((r) => process.once("SIGUSR1", r)) : sleep(ms));
 
 // Element helpers inside the WireBuddy iframe; coordinates are page coordinates
 const APP = `document.getElementById("app")`;
@@ -83,178 +144,154 @@ const locate = (finder) => js(`(() => {
   return { x: off.left + r.left + Math.min(r.width / 2, 60), y: off.top + r.top + r.height / 2 };
 })()`);
 const byText = (selector, text) => `(doc) => [...doc.querySelectorAll(${JSON.stringify(selector)})].find((e) => e.textContent.trim().startsWith(${JSON.stringify(text)}))`;
-const byLabel = (label) => `(doc) => doc.querySelector('[aria-label=${JSON.stringify(label)}], [title=${JSON.stringify(label)}]')`;
 async function click(finder, count = 1) {
+  if (WATCH) return;
   const p = await locate(finder);
-  if (!p) throw new Error(`not found: ${finder}`);
+  if (!p) return;
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y });
   for (let i = 1; i <= count; i++) {
     await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button: "left", clickCount: i });
     await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button: "left", clickCount: i });
   }
 }
-async function type(text, delay = 70) {
-  for (const ch of text) {
-    await send("Input.insertText", { text: ch });
-    await sleep(delay);
-  }
-}
-const key = async (k, code, vk, extra = {}) => {
-  await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: vk, ...extra });
-  await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: vk });
-};
-const enter = () => key("Enter", "Enter", 13, { text: "\r" });
-const escape = () => key("Escape", "Escape", 27);
-const selectAll = () => key("a", "KeyA", 65, { modifiers: 2 });
 
-// --- recording
-await send("Page.enable");
-await send("Runtime.enable");
-await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false });
-await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
-await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/stage.html` });
-await sleep(1200);
-await stage(`card("title", true)`);
-await stage(`load("/?token=${TOKEN}")`);
-await sleep(1500);
-await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
+/**
+ * Reveals the UI once it shows a capture: WireBuddy's start page lists the
+ * machine's interfaces with their addresses, which must never be in the video.
+ */
+async function revealCapture() {
+  if (WATCH) return;
+  for (let i = 0; i < 150; i++) {
+    const ready = await js(`(() => {
+      const doc = ${APP}.contentDocument;
+      const list = doc?.querySelector(".wl-ifaces");
+      return !!doc && (!list || list.offsetParent === null) && !!doc.querySelector(".pl-row");
+    })()`);
+    if (ready) return stage("reveal()");
+    await sleep(100);
+  }
+  throw new Error("the viewer never showed the capture");
+}
+
+// --- the story
+if (WATCH) console.log(`viewer: http://127.0.0.1:${PORT}/?token=${TOKEN}\nwaiting for SIGUSR1 (kill -USR1 ${process.pid}) before each step`);
+else {
+  await send("Page.enable");
+  await send("Runtime.enable");
+  await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false });
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/stage.html` });
+  await sleep(1200);
+  await stage(`card("title", true)`);
+  await stage(`load("/?token=${TOKEN}")`);
+  await sleep(1500);
+  // Notes if the start page with the interface list is ever on screen while the UI is revealed
+  await js(`setInterval(() => {
+    const frame = ${APP};
+    const list = frame.contentDocument?.querySelector(".wl-ifaces");
+    if (frame.classList.contains("on") && list && list.offsetParent !== null) window.__startPageShown = true;
+  }, 20) && true`);
+  await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
+}
 
 // 1. Title
-await sleep(3500);
+await beat(3500);
 await stage(`card("title", false)`);
 await sleep(900);
 
-// 2. The agent opens the capture and explains what it found
-await stage(`user("Open test/fixtures/http.pcapng — why did the second download fail?")`);
-await tool("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
-await sleep(400);
-await stage(`reveal()`);
-await stage(`tool("open_capture http.pcapng", "29 frames")`);
-await stage(`caption("Your agent opens captures in the viewer you're looking at")`);
-await sleep(1300);
+// 2. The problem, and a capture the agent starts itself
+await stage(`user("Our robot arm stutters. The control app should send 50 MOVE commands a second but gets about 22 through, yet the vendor says the controller answers in under a millisecond. Capture the traffic while the app runs and find out why.")`);
+await beat(500);
+const filter = `tcp port ${ARM} or udp port ${TELEMETRY}`;
+await tool("start_capture", { interface: "lo", filter });
+await stage(`tool("start_capture lo · ${filter}", "capturing")`);
+const running = runApp(4);
+await revealCapture();
+await stage(`caption("Your agent starts the capture and runs the app")`);
+const before = await running;
+await stage(`tool("node app.mjs", ${JSON.stringify(`${before.rate} commands/s · ACK p50 ${before.p50} ms`)})`);
+await tool("stop_capture", {});
+await stage(`tool("stop_capture", "done")`);
+await beat(1800);
+
+// 3. A vendor protocol Wireshark doesn't know: the agent teaches it
 await tool("capture_summary", {});
-await stage(`tool("capture_summary", "TCP 29 · HTTP 4")`);
-await sleep(700);
-await tool("set_display_filter", { filter: "http" });
-await stage(`tool("set_display_filter http", "4 of 29 shown")`);
-await sleep(1300);
-await tool("mark_frames", { frames: [21, 25], note: "request for a missing file and its 404" });
-await stage(`tool("mark_frames 21, 25", "marked")`);
-await sleep(800);
-await tool("goto_frame", { frame: 25 });
-const detail = await tool("inspect_frame", { frame: 25, protocols: ["http"] });
-await stage(`tool("inspect_frame 25", ${JSON.stringify(/404 File not found/.test(detail) ? "HTTP 404" : "done")})`);
-await stage(`caption("…filters, marks and selects packets so you see what it sees")`);
-await stage(`agent("Frame 21 asks the server for /nothere, and frame 25 answers 404 File not found. I filtered to HTTP and marked both for you.")`);
-await sleep(2600);
+await stage(`tool("capture_summary", "TCP ${ARM} and UDP ${TELEMETRY}: undecoded data")`);
+await stage(`caption("Unknown protocol? The agent writes a dissector from the vendor's spec")`);
+await beat(1500);
+writeExtension();
+await stage(`tool("write armc.lua from PROTOCOL.md", "MOVE, ACK, telemetry")`);
+const tested = await tool("extensions", { action: "test", name: "armc" });
+await stage(`tool("extensions test armc", ${JSON.stringify(/armc: (\d+) packets/.exec(tested)?.[0] ?? "decodes")})`);
+await tool("extensions", { action: "reload" });
+await stage(`tool("extensions reload", "the view decodes ARMC")`);
+await beat(2200);
 
-// 3. The user digs in, Wireshark-style
-await stage(`caption("Dig in like in Wireshark: protocol tree, bytes, reassembly")`);
-await click(byText("[role=tree] *", "Hypertext Transfer Protocol"), 2);
-await sleep(900);
-await click(byText("[role=tree] *", "HTTP/1.0 404"), 2);
-await sleep(800);
-await click(byText("[role=tree] *", "Status Code: 404"));
-await sleep(2200);
-await stage(`caption("Follow streams like in Wireshark: the list shows just that conversation")`);
-await key("T", "KeyT", 84, { modifiers: 1 | 2 | 8 });
-await sleep(3200);
-await click(byText("button", "Back"));
-await sleep(900);
-await stage(`caption("Capture-filter syntax by mistake? It suggests the display filter")`);
-await click(byLabel("Display filter"));
-await selectAll();
-await type("tcp port 18080");
-await sleep(1600);
-await click(`(doc) => doc.querySelector(".fb-suggest")`);
-await sleep(700);
-await enter();
-await sleep(400);
-await escape();
-await sleep(2000);
+// 4. Where the time goes: a time-delta column on the controller's connection
+await tool("set_display_filter", { filter: `tcp.port == ${ARM}` });
+await tool("set_columns", { columns: [{ field: "frame.time_delta_displayed", title: "Δt" }, { field: "tcp.len", title: "TCP len" }] });
+await stage(`tool("set_columns Δt, TCP len · tcp.port == ${ARM}", "shown")`);
+// A MOVE's header alone: 8 bytes that aren't a whole ARMC message yet
+const headers = framesOf(await tool("query_packets", { filter: `tcp.dstport == ${ARM} && tcp.len == 8 && !armc`, fields: ["frame.number"], limit: 40 }));
+const h = headers[Math.min(20, headers.length - 1)] ?? headers[0];
+const [ack] = framesOf(await tool("query_packets", { filter: `tcp.srcport == ${ARM} && tcp.len == 0 && frame.number > ${h}`, fields: ["frame.number"], limit: 1 }));
+const [payload] = framesOf(await tool("query_packets", { filter: `tcp.dstport == ${ARM} && tcp.len > 8 && frame.number > ${h}`, fields: ["frame.number"], limit: 1 }));
+// The header first, so the list shows it with the ACK and the payload below; then the payload's details
+await tool("goto_frame", { frame: h });
+await tool("goto_frame", { frame: payload });
+await tool("mark_frames", { frames: [h, ack, payload], note: "MOVE header, the controller's ACK 40 ms later, then the payload" });
+await stage(`tool("mark_frames ${h}, ${ack}, ${payload}", "header · ACK · payload")`);
+await stage(`caption("Δt shows it: every command's payload waits 40 ms for the ACK of its header")`);
+await click(byText("[role=tree] *", "ARMC"), 2);
+await beat(2600);
+const expert = await tool("expert_info", {});
+const split = /Message split over frames[^\n]*: (\d+)\s+\[/.exec(expert)?.[1];
+await stage(`tool("expert_info", ${JSON.stringify(split ? `${split}× message split over frames` : "split messages")})`);
+await stage(`agent("The controller answers in microseconds; the 40 ms come before it. app.mjs writes each MOVE's header and payload separately. With Nagle on, the payload waits for the ACK of the header, and the controller's TCP holds that ACK back 40 ms. One write per message fixes it.")`);
+await beat(3200);
 
-// 4. Live capture: started by the user, analysed together
-await stage(`caption("Live capture: you press Start, then analyse it with your agent")`);
-await click(byLabel("Clear display filter"));
-await sleep(600);
-// The options dialog lists every interface with its addresses: set them with the recording paused
-await send("Page.stopScreencast");
-if (frames.length) frames[frames.length - 1].pausedAfter = true;
-await click(byLabel("Options…"));
-await sleep(800);
-await click(`(doc) => doc.querySelector('.dlg-capopts tr[data-iface="lo"]')`);
-await click(`(doc) => doc.querySelector(".dlg-capopts .co-filter")`);
-// Options persist in the browser profile: replace what an earlier run left
-await selectAll();
-// Pings only: other loopback ICMP (resolver port-unreachables) has no place in the video
-await type("icmp and icmp[0] != 3", 0);
-// The capture filter is checked as it is typed: wait for the verdict
-const ready = await js(`new Promise((done) => {
-  const t0 = Date.now();
-  const tick = () => {
-    const doc = ${APP}.contentDocument;
-    const b = [...doc.querySelectorAll(".dlg-capopts .dlg-footer button")].find((e) => e.textContent === "Start");
-    if (b && !b.disabled && doc.querySelector('.dlg-capopts tr.sel[data-iface="lo"]')) return done("ready");
-    if (Date.now() - t0 > 6000) return done(b ? b.title : "missing");
-    setTimeout(tick, 100);
-  };
-  tick();
-})`);
-if (ready !== "ready") throw new Error(`capture can't start: ${ready}`);
-await click(`(doc) => [...doc.querySelectorAll(".dlg-capopts .dlg-footer button")].find((e) => e.textContent === "Close")`);
-await sleep(400);
-await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
-await sleep(600);
-const ping = spawn("ping", ["-i", "0.1", "-c", "140", "127.0.0.1"], { stdio: "ignore" });
-await click(byLabel("Start"));
-await sleep(3500);
-await stage(`user("Anything unusual in the live traffic?")`);
-await tool("get_view_state", {});
-const requests = await tool("query_packets", { filter: "icmp.type == 8", limit: 1 });
-const replies = await tool("query_packets", { filter: "icmp.type == 0", limit: 1 });
-const nReq = Number(/^(\d+) frames match/.exec(requests)?.[1] ?? 0);
-const nRep = Number(/^(\d+) frames match/.exec(replies)?.[1] ?? 0);
-await stage(`tool("get_view_state", "capturing on lo")`);
-await stage(`tool("query_packets icmp.type == 8 / == 0", "${nReq} / ${nRep}")`);
-await stage(`agent(${JSON.stringify(`Just pings on loopback so far: ${nReq} echo requests and ${nRep} replies, ${Math.abs(nReq - nRep) <= 1 ? "every request answered" : `${Math.abs(nReq - nRep)} unanswered`}. Nothing unusual.`)})`);
-await sleep(2500);
-await click(byLabel("Stop"));
-ping.kill();
-await sleep(1500);
+// 5. What it means for the arm
+await tool("panel", { action: "open", name: "armc", wait_ms: 10_000 });
+await stage(`tool("panel open armc", "trajectory plot")`);
+await stage(`caption("…and a panel it wrote shows what that does to the arm")`);
+await beat(4200);
 
-// 5. Hand-off to the real Wireshark (highlighted, not launched)
-await js(`(() => {
-  const doc = ${APP}.contentDocument;
-  const b = [...doc.querySelectorAll("button")].find((e) => /Open in Wireshark/.test(e.textContent));
-  const st = doc.createElement("style");
-  st.textContent = "@keyframes wbpulse{0%,100%{box-shadow:0 0 0 0 rgba(139,92,246,.9)}50%{box-shadow:0 0 0 10px rgba(139,92,246,0)}}";
-  doc.head.append(st);
-  b.style.animation = "wbpulse 1s ease-in-out 4";
-  b.style.outline = "4px solid #8b5cf6"; b.style.outlineOffset = "2px";
-})()`);
-await stage(`caption("One click to the real Wireshark: same file, filter and packet")`);
-await sleep(3200);
+// 6. The fix, checked with a second capture
+execFileSync("git", ["apply", "-p4", join(example, "solution/fix.diff")], { cwd: work });
+await stage(`tool("edit app.mjs: one write per message", "1 line")`);
+await tool("start_capture", { interface: "lo", filter });
+await stage(`tool("start_capture", "capturing")`);
+const after = await runApp(4);
+await stage(`tool("node app.mjs", ${JSON.stringify(`${after.rate} commands/s · ACK p50 ${after.p50} ms`)})`);
+await tool("stop_capture", {});
+await stage(`caption("Fixed: a command every 20 ms, and the arm moves smoothly")`);
+await beat(2500);
+await stage(`agent(${JSON.stringify(`Fixed: ${after.rate} commands/s, each acknowledged in ${after.p50} ms, no deadline missed. The new capture has one segment per command, and the arm follows its path smoothly.`)})`);
+await beat(4000);
 await stage(`caption("")`);
 
-// 6. End card
+// 7. End card
 await stage(`card("end", true)`);
-await sleep(4200);
-await send("Page.stopScreencast");
-await sleep(300);
+await beat(4200);
 
-// Frame list with real timings for ffmpeg's concat demuxer
-const lines = [];
-for (let i = 0; i < frames.length; i++) {
-  const gap = i + 1 < frames.length ? frames[i + 1].t - frames[i].t : 0.5;
-  // Cut the recording pause down to a short beat
-  const dur = gap > 0.8 && frames[i].pausedAfter ? 0.3 : gap;
-  lines.push(`file '${frames[i].file}'`, `duration ${Math.max(dur, 0.001).toFixed(4)}`);
+if (!WATCH) {
+  await send("Page.stopScreencast");
+  await sleep(300);
+  if (await js("window.__startPageShown === true")) throw new Error("the start page with the machine's interfaces was on screen: the frames must not be used");
+  // Frame list with real timings for ffmpeg's concat demuxer
+  const lines = [];
+  for (let i = 0; i < frames.length; i++) {
+    const gap = i + 1 < frames.length ? frames[i + 1].t - frames[i].t : 0.5;
+    lines.push(`file '${frames[i].file}'`, `duration ${Math.max(gap, 0.001).toFixed(4)}`);
+  }
+  lines.push(`file '${frames[frames.length - 1].file}'`);
+  writeFileSync(join(outdir, "frames.txt"), lines.join("\n") + "\n");
+  console.log(`${frames.length} frames, ${(frames[frames.length - 1].t - frames[0].t).toFixed(1)} s`);
+  ws.close();
+  rmSync(join(root, "dist/web/stage.html"), { force: true });
 }
-lines.push(`file '${frames[frames.length - 1].file}'`);
-writeFileSync(join(outdir, "frames.txt"), lines.join("\n") + "\n");
-console.log(`${frames.length} frames, ${(frames[frames.length - 1].t - frames[0].t).toFixed(1)} s`);
-
-ws.close();
+console.log(`before: ${JSON.stringify(before)}\nafter:  ${JSON.stringify(after)}`);
 await mcp.close();
-rmSync(join(root, "dist/web/stage.html"), { force: true });
+device.kill();
+rmSync(work, { recursive: true, force: true });
 process.exit(0);

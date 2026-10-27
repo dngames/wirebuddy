@@ -11,13 +11,13 @@
   * { box-sizing: border-box; margin: 0; }
   html, body { width: 1600px; height: 900px; overflow: hidden; background: var(--bg); color: var(--ink);
     font: 18px/1.45 "Inter", "Segoe UI", system-ui, sans-serif; }
-  #wrap { display: grid; grid-template-columns: 470px 1fr; height: 900px; }
-  #chat { background: var(--panel); border-right: 1px solid #263048; display: flex; flex-direction: column; }
+  #wrap { display: grid; grid-template-columns: 470px 1fr; grid-template-rows: minmax(0, 1fr); height: 900px; }
+  #chat { min-height: 0; background: var(--panel); border-right: 1px solid #263048; display: flex; flex-direction: column; }
   #chat header { padding: 18px 20px 14px; border-bottom: 1px solid #263048; display: flex; align-items: center; gap: 10px; }
   #chat header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--agent); box-shadow: 0 0 12px var(--agent); }
   #chat header b { font-size: 18px; }
   #chat header span { color: var(--muted); font-size: 14px; margin-left: auto; }
-  #log { flex: 1; padding: 18px 18px 8px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; justify-content: flex-end; }
+  #log { flex: 1; min-height: 0; padding: 18px 18px 8px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; justify-content: flex-end; }
   .msg { max-width: 92%; padding: 10px 13px; border-radius: 12px; animation: pop .25s ease-out; white-space: pre-wrap; }
   .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 4px; }
   .msg.agent { align-self: flex-start; background: #221d3a; border: 1px solid #3b2f6b; border-bottom-left-radius: 4px; }
@@ -71,7 +71,7 @@
   <svg class="logo" viewBox="0 0 64 64"><path d="M14 6h36a10 10 0 0 1 10 10v22a10 10 0 0 1-10 10H30L16 59V48h-2A10 10 0 0 1 4 38V16A10 10 0 0 1 14 6z" fill="#0f9d8f"/><path d="M12 28h7l4.5-10 6.5 20 6.5-20 4.5 10H52" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   <h1>Wire<em>Buddy</em></h1>
   <p>A Wireshark-style packet viewer your AI agent can see and drive</p>
-  <div class="chips"><span>sharkd decoding</span><span>live capture</span><span>MCP tools</span><span>Open in Wireshark</span></div>
+  <div class="chips"><span>Wireshark's dissection</span><span>live capture</span><span>Lua dissectors</span><span>panels</span><span>MCP tools</span></div>
 </section>
 
 <section class="card" id="end">
@@ -104,18 +104,25 @@
       const el = this.add("tool", "");
       el.append(name);
       if (result) { const ok = document.createElement("span"); ok.className = "ok"; ok.textContent = "  ✓ " + result; el.append(ok); }
+      this.fit();
     },
     async agent(text) {
       const el = this.add("agent", "");
-      for (const word of text.split(/(\s+)/)) { el.textContent += word; await sleep(18); }
+      for (const word of text.split(/(\s+)/)) { el.textContent += word; this.fit(); await sleep(18); }
     },
     add(kind, text) {
       const el = document.createElement("div");
       el.className = "msg " + kind;
       el.textContent = text;
       log.append(el);
-      while (log.scrollHeight > log.clientHeight && log.children.length > 1) log.firstElementChild.remove();
+      this.fit();
       return el;
+    },
+    // The oldest messages make room, also while the newest one is still being typed
+    fit() {
+      // Messages sit at the bottom: an overflowing log pushes the oldest above its top
+      const top = log.getBoundingClientRect().top;
+      while (log.children.length > 1 && log.firstElementChild.getBoundingClientRect().top < top) log.firstElementChild.remove();
     },
     caption(text) {
       const c = $("caption");

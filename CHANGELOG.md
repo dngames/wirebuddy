@@ -31,3 +31,5 @@ First version.
   Reload Lua Plugins
 - Panels: agent-written views of the capture in a sandboxed window (View › Panels), offered in the
   status bar when a capture fits
+- An example investigation to try with the agent: a robot arm that stutters
+  (`examples/investigations/robot-arm`), also the demo video's story
