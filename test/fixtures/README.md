@@ -15,4 +15,7 @@ sleep 1; curl -s http://127.0.0.1:18080/big.txt >/dev/null; curl -s http://127.0
 wait $capture; kill $server
 ```
 
+dumpcap records the capturing machine's hardware and OS in the file's section and interface
+headers; this fixture carries neither.
+
 The tests assert exact frame numbers, so update them if you replace the fixture.
