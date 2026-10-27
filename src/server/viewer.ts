@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Transform } from "node:stream";
+import { createGunzip, createZstdDecompress } from "node:zlib";
 import { Sharkd, SharkdError } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
@@ -64,6 +66,8 @@ export const CONV_TYPES = Object.keys(CONV_TAPS) as ConvType[];
 const FOLLOW_LIMIT = 4 * 1024 * 1024;
 const LIVE_RELOAD_MS = 1000;
 const MAX_MARKS = 10000;
+/** Between two Wireshark launches. */
+const WIRESHARK_GAP_MS = 2000;
 /** Row ranges a selection may consist of. */
 const MAX_ROW_RANGES = 10000;
 const MAX_NOTE = 200;
@@ -86,6 +90,9 @@ const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
  */
 export class Viewer extends EventEmitter {
   private engines: [Sharkd, Sharkd];
+  /** Files the agent exported in this session: the only ones it may overwrite. */
+  private readonly agentExports = new Set<string>();
+  private wiresharkAt = 0;
   /** Problems and user activity for the agent. */
   readonly events = new EventLog((pending) => this.set({ agent: { ...this.state.agent, pending } }));
   private active = 0;
@@ -146,7 +153,7 @@ export class Viewer extends EventEmitter {
       marks: [],
       capture: this.capture.state,
       agentNotice: null,
-      agent: { attached: false, pending: 0 },
+      agent: { attached: false, pending: 0, name: "Agent" },
       wiresharkAvailable: !!this.wiresharkBin,
       customColumns: [],
       tlsKeylog: null,
@@ -266,7 +273,8 @@ export class Viewer extends EventEmitter {
       try {
         const st = statSync(file, { throwIfNoEntry: false });
         if (!st || !st.isFile()) throw new Error(`no such file: ${file}`);
-        if (!looksLikeCapture(file)) throw new Error(`not a capture file: ${file}`);
+        // A live capture's file may not have its header yet
+        if (!this.capture.state.files.includes(file) && !(await looksLikeCapture(file))) throw new Error(`not a capture file: ${file}`);
         let result;
         try {
           result = await this.loadInto(this.engines[standby], file, filter);
@@ -638,8 +646,8 @@ export class Viewer extends EventEmitter {
   }
 
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
-  attachAgent(): void {
-    this.set({ agent: { ...this.state.agent, attached: true } });
+  attachAgent(name = this.state.agent.name): void {
+    this.set({ agent: { ...this.state.agent, attached: true, name } });
   }
 
   /** A problem nobody asked for (live view): the agent gets it, the page shows it only without one. */
@@ -816,6 +824,10 @@ export class Viewer extends EventEmitter {
   /** Writes a subset of the open capture to a new file, like Wireshark's Export Specified Packets. */
   async exportPackets(req: ExportRequest & { filter?: string }, by: "user" | "agent"): Promise<ExportResult> {
     this.requireFile();
+    // The agent must not destroy the user's captures: it may only replace its own exports
+    if (by === "agent" && req.overwrite && !this.agentExports.has(resolve(String(req.path ?? "")))) {
+      throw new Error("the agent can only replace files it exported itself in this session; choose a new file name");
+    }
     const input = this.state.file!;
     const format = checkTarget(String(req.path ?? ""), [input, ...this.capture.state.files], !!req.overwrite);
     // Always explicit frames: a live capture may have written more than the view knows
@@ -834,7 +846,10 @@ export class Viewer extends EventEmitter {
     if (!ranges.length) throw new Error("no packets to export");
     const frames = countRanges(ranges);
     const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges });
-    if (by === "agent") this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
+    if (by === "agent") {
+      this.agentExports.add(resolve(req.path));
+      this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
+    }
     return { path: req.path, frames, size };
   }
 
@@ -881,6 +896,9 @@ export class Viewer extends EventEmitter {
   async openInWireshark(frame?: number | null): Promise<void> {
     this.requireFile();
     if (!this.wiresharkBin) throw new Error("wireshark was not found on PATH");
+    // One window per click, not one per repeated request
+    if (Date.now() - this.wiresharkAt < WIRESHARK_GAP_MS) throw new Error("Wireshark is already starting");
+    this.wiresharkAt = Date.now();
     const args = ["-r", this.state.file!];
     if (this.profile) args.push("-C", this.profile);
     if (this.state.tlsKeylog) args.push("-o", `tls.keylog_file:${this.state.tlsKeylog}`);
@@ -969,24 +987,44 @@ function appendedOnly(before: Int32Array | null, after: Int32Array | null): bool
 
 export const CAPTURE_FILE = /\.(pcapng|pcap|cap|ntar|erf|snoop|trc|dmp)(\.(gz|zst|lz4))?$/i;
 
-/** pcap, pcapng, and gzip/zstd/lz4-compressed files, by magic number */
-const CAPTURE_MAGIC = ["a1b2c3d4", "d4c3b2a1", "a1b23c4d", "4d3cb2a1", "0a0d0d0a", "1f8b", "28b52ffd", "04224d18"];
+/** pcap (both byte orders, µs and ns), pcapng, snoop and Network Monitor 2 files start with these. */
+const CAPTURE_MAGIC = ["a1b2c3d4", "d4c3b2a1", "a1b23c4d", "4d3cb2a1", "0a0d0d0a", "736e6f6f70000000", "474d4255"];
 
-/** Keeps open() to capture files, so it can't be used to read arbitrary files. */
-function looksLikeCapture(file: string): boolean {
-  if (CAPTURE_FILE.test(file)) return true;
-  const head = Buffer.alloc(4);
-  let fd: number | undefined;
-  try {
-    fd = openSync(file, "r");
-    readSync(fd, head, 0, 4, 0);
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-  const hex = head.toString("hex");
+/**
+ * Keeps open() to capture files, by content (also inside gzip and zstd), so it
+ * can't be used to read arbitrary files: names prove nothing.
+ */
+async function looksLikeCapture(file: string): Promise<boolean> {
+  const head = (await firstBytes(file, 8)).toString("hex");
+  const inner = head.startsWith("1f8b") ? createGunzip() : head.startsWith("28b52ffd") && typeof createZstdDecompress === "function" ? createZstdDecompress() : null;
+  const hex = inner ? (await firstBytes(file, 8, inner)).toString("hex") : head;
   return CAPTURE_MAGIC.some((m) => hex.startsWith(m));
+}
+
+/** The first `n` bytes of `file`, through `transform` if given; fewer when it is shorter or broken. */
+function firstBytes(file: string, n: number, transform?: Transform): Promise<Buffer> {
+  return new Promise((done) => {
+    const src = createReadStream(file, transform ? {} : { start: 0, end: n - 1 });
+    const out = transform ? src.pipe(transform) : src;
+    const chunks: Buffer[] = [];
+    let len = 0;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      src.destroy();
+      transform?.destroy();
+      done(Buffer.concat(chunks).subarray(0, n));
+    };
+    out.on("data", (c: Buffer) => {
+      chunks.push(c);
+      len += c.length;
+      if (len >= n) finish();
+    });
+    out.on("end", finish);
+    out.on("error", finish);
+    src.on("error", finish);
+  });
 }
 
 function safeSize(file: string): number {

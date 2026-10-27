@@ -1,6 +1,7 @@
 // Renders docs/screenshot.png: agent opens the fixture, marks and selects frames; headless Chrome captures the UI.
 // Usage: node screenshot.mjs <wirebuddy-root> <out.png>
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -13,16 +14,20 @@ const { StdioClientTransport } = await import(require.resolve("@modelcontextprot
 const WebSocket = require("ws");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const TOKEN = randomBytes(16).toString("hex");
+// Empty home: no recent files or settings of the recording machine
+const home = mkdtempSync(join(tmpdir(), "wb-shot-home-"));
 const client = new Client({ name: "shot", version: "0" });
 await client.connect(new StdioClientTransport({
   command: process.execPath,
-  args: [join(root, "dist/server/main.js"), "--mcp", "--port", "8771", "--token", "shot"],
+  args: [join(root, "dist/server/main.js"), "--mcp", "--port", "8771", "--capture-dir", mkdtempSync(join(tmpdir(), "wb-shot-"))],
+  env: { ...process.env, HOME: home, WIREBUDDY_TOKEN: TOKEN },
   stderr: "ignore",
 }));
 const call = (name, args = {}) => client.callTool({ name, arguments: args });
 
 const profile = mkdtempSync(join(tmpdir(), "wb-chrome-"));
-const chrome = process.env.CDP_PORT ? { kill() {} } : spawn("google-chrome", ["--headless=new", "--remote-debugging-port=9339", `--user-data-dir=${profile}`,
+const chrome = process.env.CDP_PORT ? { kill() {} } : spawn(process.env.CHROME ?? "google-chrome", ["--headless=new", "--remote-debugging-port=9339", `--user-data-dir=${profile}`,
   "--window-size=1280,820", "--hide-scrollbars", "--force-device-scale-factor=1", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"], { stdio: "ignore" });
 let targets;
 for (let i = 0; i < 100 && !targets; i++) {
@@ -41,7 +46,7 @@ const evaluate = (expression) => cdp("Runtime.evaluate", { expression, awaitProm
 await cdp("Emulation.setDeviceMetricsOverride", { width: 1280, height: 820, deviceScaleFactor: 1, mobile: false });
 await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
 await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
-await cdp("Page.navigate", { url: "http://127.0.0.1:8771/?token=shot" });
+await cdp("Page.navigate", { url: `http://127.0.0.1:8771/?token=${TOKEN}` });
 await sleep(2500);
 await call("mark_frames", { frames: [21, 25], note: "request for a missing file and its 404" });
 await call("goto_frame", { frame: 25 });
@@ -51,7 +56,7 @@ console.log(await evaluate(`(() => {
   const label = [...document.querySelectorAll('[role=tree] *')].find((e) => e.childElementCount === 0 && e.textContent.trim() === 'Hypertext Transfer Protocol');
   if (!label) return 'http node not found';
   const row = label.closest('[role=treeitem]') ?? label.parentElement;
-  row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
   row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   return 'expanded';
 })()`));
@@ -59,7 +64,7 @@ await sleep(800);
 console.log(await evaluate(`(() => {
   const label = [...document.querySelectorAll('[role=tree] *')].find((e) => e.childElementCount === 0 && e.textContent.trim().startsWith('HTTP/1.0 404'));
   if (!label) return 'status line not found';
-  (label.closest('[role=treeitem]') ?? label.parentElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  (label.closest('[role=treeitem]') ?? label.parentElement).dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
   return 'selected';
 })()`));
 await sleep(800);
@@ -72,4 +77,5 @@ chrome.kill();
 await client.close();
 await sleep(300);
 rmSync(profile, { recursive: true, force: true });
+rmSync(home, { recursive: true, force: true });
 process.exit(0);

@@ -61,6 +61,11 @@ export const hooks = {
   focusMain: (): void => {},
 };
 
+/** "Claude" or "Agent", after the MCP client driving the viewer. */
+export function agentName(): string {
+  return app.state?.agent.name ?? "Agent";
+}
+
 export function captureActive(s: ViewState | null = app.state): boolean {
   const st = s?.capture.status;
   return st === "starting" || st === "running" || st === "stopping";

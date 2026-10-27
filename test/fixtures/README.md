@@ -1,8 +1,9 @@
 # Test fixtures
 
-`http.pcapng` — 29 frames of loopback traffic: two HTTP/1.0 requests to a local
-`python3 -m http.server`, one for an ~80 KB text file (reassembled over several TCP segments)
-and one for a missing file (404). The response body is random base64 text.
+`http.pcapng` — 29 frames of loopback traffic: two HTTP/1.1 requests from `curl` to a local
+`python3 -m http.server` (which answers in HTTP/1.0), one for an ~80 KB text file (reassembled
+over several TCP segments) and one for a missing file (404). The response body is random base64
+text.
 
 To regenerate a similar capture:
 

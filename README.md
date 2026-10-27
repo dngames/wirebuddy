@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="docs/demo.mp4"><img src="docs/demo.gif" alt="WireBuddy demo: an AI agent opens a capture, filters and marks packets, then a live capture is analysed together" width="900"></a>
-  <br><sub>45-second demo · <a href="docs/demo.mp4">MP4 version</a></sub>
+  <br><sub>50-second demo · <a href="docs/demo.mp4">MP4 version</a></sub>
 </p>
 
 A lightweight, Wireshark-style packet viewer that runs in a browser tab — built to sit next to
@@ -28,10 +28,9 @@ same capture, filter, selected packet and marks.
 - **Live capture** with `dumpcap`: interface picker with live traffic sparklines (like
   Wireshark's start page), capture-filter check, auto-stop (duration / size / packets), ring
   buffer. The view updates about once a second.
-- **Open in Wireshark** jumps to the real GUI with the same file, filter and packet. Wireshark
-  skips its interface scan when it opens a file; Capture → Refresh Interfaces (F5) lists them.
+- **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
 - **MCP server** so an agent can read the capture, apply filters, select and mark packets, and
-  follow streams. The agent **cannot start a capture** — only you can, with a click in the UI.
+  follow streams. The MCP tools have no way to start a capture; that stays your click in the UI.
 
 All protocol decoding is done by Wireshark's own engine (`sharkd`), so dissection is identical
 to Wireshark.
@@ -40,12 +39,26 @@ to Wireshark.
 
 ## Requirements
 
-- Wireshark 4.x with `sharkd` (Debian/Ubuntu: `wireshark-common`) — tested with 4.6.6
-- `dumpcap` with capture permission for your user (member of the `wireshark` group) for live capture
-- Node.js ≥ 20
+- **Wireshark 4.6** with `sharkd`, `editcap` and `mergecap` (Debian/Ubuntu package
+  `wireshark-common`); the `wireshark` package too for "Open in Wireshark". Older versions are
+  untested, and Ubuntu 22.04 and 24.04 ship 3.6 and 4.2, so take the Wireshark PPA there:
+
+  ```bash
+  sudo add-apt-repository ppa:wireshark-dev/stable
+  sudo apt install wireshark-common wireshark
+  ```
+
+- **For live capture**, `dumpcap` must be allowed to capture as your user:
+
+  ```bash
+  sudo dpkg-reconfigure wireshark-common   # answer "Yes"
+  sudo usermod -aG wireshark $USER         # then log out and in again
+  ```
+
+- **Node.js ≥ 22**
 
 Developed on Ubuntu 22.04 with Wireshark 4.6.6; CI runs on Ubuntu 24.04 with the current stable
-Wireshark. Other Linux distributions should work; macOS and Windows are untested.
+Wireshark from the PPA. Other Linux distributions should work; macOS and Windows are untested.
 
 ## Build and run
 
@@ -56,9 +69,18 @@ npm start                      # prints the UI URL, e.g. http://127.0.0.1:8765/?
 node dist/server/main.js path/to/capture.pcapng   # open a file right away
 ```
 
-Options: `--port <n>` (default 8765, falls back to a free port), `--token <t>`,
-`--capture-dir <dir>` (default `~/.local/share/wirebuddy/captures`), `--profile <name>`, `--mcp`,
-`--tls-keylog <file>`, `--watch <instance-file>` (see below); `--help` lists them all.
+Options (`--help` shows the same):
+
+| Option | Environment | |
+|---|---|---|
+| `--port <n>` | `WIREBUDDY_PORT` | HTTP port on 127.0.0.1; default 8765, falls back to a free one |
+| `--token <t>` | `WIREBUDDY_TOKEN` | session token, at least 16 characters; default random. Prefer the variable: other local users can see command lines in `ps` |
+| `--capture-dir <dir>` | `WIREBUDDY_CAPTURE_DIR` | where live captures go; default `~/.local/share/wirebuddy/captures` |
+| `--profile <name>` | `WIREBUDDY_PROFILE` | Wireshark configuration profile for dissection and Open in Wireshark |
+| `--tls-keylog <file>` | | decrypt TLS with this key log file |
+| `--mcp` | | also serve MCP over stdio; logs go to stderr |
+| `--watch <file>` | | wait for the next problem in a running viewer, print it, exit (see below) |
+| `--version` | | print the version |
 
 ## TLS decryption
 
@@ -68,7 +90,7 @@ Start the program whose traffic you want to read with `SSLKEYLOGFILE` set, e.g.
 SSLKEYLOGFILE=~/tls-keys.log firefox
 ```
 
-then choose that file under **TLS Keys…** in WireBuddy (or start WireBuddy with
+then choose that file under **Tools → TLS Keys…** in WireBuddy (or start WireBuddy with
 `--tls-keylog ~/tls-keys.log`). The capture is re-dissected, HTTP/2, HTTP and other protocols
 inside TLS become visible, and "Open in Wireshark" passes the key log on. A key log file set in
 Wireshark's own preferences is picked up automatically. The agent can see whether decryption is
@@ -94,10 +116,11 @@ adding or changing a plugin.
 Register the MCP server (it also starts the web UI):
 
 ```bash
-claude mcp add wirebuddy -- node /path/to/wirebuddy/dist/server/main.js --mcp
+claude mcp add wirebuddy -- "$(command -v node)" /path/to/wirebuddy/dist/server/main.js --mcp
 ```
 
-(If `node` is not on your `PATH`, give its full path, e.g. `~/.local/opt/node-v24.22.1-linux-x64/bin/node`.)
+(`$(command -v node)` stores the full path of your `node`, so it is found even when Claude Code
+starts the server with a different `PATH`.)
 
 To see what the agent side looks like without Claude, `node test/agent-demo.mjs` plays a short
 scripted session (filter, mark, select) against the fixture; open the URL it prints.
@@ -135,13 +158,14 @@ Example prompts:
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
-| `mark_frames` / `clear_marks` | Highlight frames with a note |
+| `mark_frames` / `clear_marks` | Highlight frames with a note (listed under Go → Marked Packets) |
 | `set_columns` | Show fields as extra columns in the user's packet list |
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `stop_capture` | Stop the running capture |
 | `open_in_wireshark` | Open the capture in the real Wireshark at the selected frame |
 
-Every agent action that changes the view shows a notice in the UI.
+Every agent action that changes the view shows a notice in the UI. Every tool result also
+carries what happened in the viewer since the agent's last call: problems and what you did.
 
 ## How it works
 
@@ -160,30 +184,43 @@ Every agent action that changes the view shows a notice in the UI.
 
 ## Security
 
-- Binds to `127.0.0.1` only; every API/WebSocket call needs the per-session token from the URL.
-- Requests with a foreign `Host` (DNS rebinding) or a cross-site `Origin` are rejected.
-- Capture starts only through the UI's Start button; there is no MCP tool for it. The traffic
-  sparklines and `list_interfaces` only read per-interface packet counters (`dumpcap -S`), never
-  packet contents; that sampler runs only while something shows it and stops 10 s later.
-- `open_capture` / Open only accept capture files (by extension or pcap/pcapng/compressed magic
-  bytes), so they can't be used to read arbitrary files.
-- Anyone who has the URL with its token can read captures and start captures as you — don't
-  share it.
+- **The session token is the only boundary.** Anyone or anything holding the viewer URL with its
+  token can do everything you can in the UI, starting a capture included. That covers an AI agent
+  that also has a shell or controls the browser pane: give WireBuddy only to agents you trust,
+  and don't share the URL.
+- The server listens on `127.0.0.1` only. API calls need the random per-session token in an
+  `X-WireBuddy-Token` header (the WebSocket takes it in its URL); it is compared in constant time.
+- Requests with a foreign `Host` (DNS rebinding), any `Origin` but the server's own (`null`
+  included) or a body that isn't JSON are refused. The page has a Content Security Policy.
+- The MCP tools have no way to start a capture. They can open any capture file you can read, read
+  packets, change the filter, marks, selection and columns, stop a capture, open Wireshark, and
+  write new `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced
+  unless the agent exported it itself in the same session.
+- Open only accepts files whose content is a capture (pcap, pcapng, snoop, Network Monitor; also
+  gzip- or zstd-compressed), whatever their name, so it can't be used to read other files.
+- Live captures and exports are readable only by you (files `0600`, capture folder `0700`).
+- The traffic sparklines and `list_interfaces` only read per-interface packet counters
+  (`dumpcap -S`), never packet contents; that sampler runs only while something shows it.
 
 ## Tests
 
 ```bash
 npm run build
-node test/api-smoke.mjs     # HTTP API against test/fixtures/http.pcapng
-node test/mcp-smoke.mjs     # MCP tools over stdio
-node test/live-smoke.mjs    # live capture on loopback (needs dumpcap permissions; pings 127.0.0.1)
+npm test             # HTTP API and MCP tools against test/fixtures/http.pcapng
+npm run test:live    # live capture on loopback: pings 127.0.0.1, runs a local HTTPS server
 ```
+
+The tests run their servers with an empty home folder, so your own Wireshark preferences and
+plugins don't change the results. The capture checks in `npm test` need `dumpcap` permissions
+(see Requirements) and are skipped without them; `npm run test:live` needs them.
 
 ## Limitations
 
 - A live capture re-reads the whole current file on every update, so very long or busy captures
   get slower to refresh; use a ring buffer or a capture filter for those.
 - No packet comments or time references yet.
+- In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
+  Capture → Refresh Interfaces (F5): Wireshark skips the scan when it starts with a file.
 
 ## Contributing
 
@@ -194,5 +231,5 @@ security problems privately as described in [SECURITY.md](SECURITY.md).
 
 [MIT](LICENSE) © 2026 Michael Haar
 
-Wireshark is a registered trademark of the Wireshark Foundation. WireBuddy is an independent
-project and is not affiliated with or endorsed by the Wireshark Foundation.
+Wireshark and the "fin" logo are registered trademarks of the Wireshark Foundation. WireBuddy is
+an independent project and is not affiliated with or endorsed by the Wireshark Foundation.

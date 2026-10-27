@@ -1,7 +1,9 @@
 // End-to-end check of the HTTP API against test/fixtures/http.pcapng.
 // Usage: node test/api-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
+import { WebSocket } from "ws";
 import { tmpdir } from "node:os";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -12,9 +14,24 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
 const token = "smoke-test-token";
 
+// A home of its own: the tester's Wireshark preferences, profiles and plugins don't apply
+const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
+const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") };
 const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token], {
   stdio: ["ignore", "pipe", "inherit"],
+  env,
 });
+
+/** Live capture needs dumpcap rights (wireshark group); without them those checks are skipped. */
+function canCapture() {
+  try {
+    execFileSync("dumpcap", ["-L", "-i", "lo"], { stdio: "ignore", timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const capture = canCapture();
 const base = await new Promise((resolve, reject) => {
   server.stdout.setEncoding("utf8");
   server.stdout.on("data", (d) => {
@@ -35,6 +52,11 @@ async function api(path, body) {
 }
 
 let failures = 0;
+async function checkCapture(name, fn) {
+  if (capture) await check(name, fn);
+  else console.log(`skip ${name}: dumpcap may not capture on lo here`);
+}
+
 async function check(name, fn) {
   try {
     await fn();
@@ -166,7 +188,7 @@ try {
     assert.match(missing.json.error, /no TCP stream matches tcp\.stream eq 7/);
   });
 
-  await check("capture interfaces and filter check", async () => {
+  await checkCapture("capture interfaces and filter check", async () => {
     const ifs = (await api("/api/capture/interfaces")).json;
     assert.ok(ifs.some((i) => i.name === "lo" && i.loopback));
     assert.equal((await api("/api/capture/check?iface=lo&filter=" + encodeURIComponent("tcp port 80"))).json.ok, true);
@@ -591,7 +613,7 @@ try {
     }
   });
 
-  await check("interface activity from dumpcap -S", async () => {
+  await checkCapture("interface activity from dumpcap -S", async () => {
     const first = (await api("/api/capture/activity")).json;
     assert.equal(first.interval, 1);
     await new Promise((r) => setTimeout(r, 2600));
@@ -601,6 +623,79 @@ try {
     assert.ok(later.ifaces.lo.every((n) => Number.isInteger(n) && n >= 0));
   });
 
+  await check("security: origin null, token in the URL, non-JSON posts, big bodies, bad WebSocket frames", async () => {
+    const raw = (path, headers, body, method = "POST") =>
+      new Promise((resolve, reject) => {
+        const req = request(base + path, { method, headers }, (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        });
+        req.on("error", reject);
+        if (body) req.write(body);
+        req.end();
+      });
+    assert.equal(await raw("/api/state", { "X-WireBuddy-Token": token, origin: "null" }, null, "GET"), 403);
+    assert.equal((await fetch(`${base}/api/state?token=${token}`)).status, 401);
+    assert.equal(await raw("/api/close", { "X-WireBuddy-Token": token, "content-type": "text/plain" }, "{}"), 415);
+    assert.equal(await raw("/api/filter", { "X-WireBuddy-Token": token, "content-type": "application/json" }, "x".repeat(1_100_000)), 413);
+    const page = await fetch(base + "/");
+    assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+    assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+    // A frame with a reserved opcode: that client is dropped, the server keeps running
+    const ws = new WebSocket(`${base.replace("http", "ws")}/ws?token=${token}`);
+    await new Promise((resolve, reject) => {
+      ws.once("open", resolve);
+      ws.once("error", reject);
+    });
+    const closed = new Promise((resolve) => ws.once("close", resolve));
+    ws._socket.write(Buffer.from([0x8f, 0x80, 1, 2, 3, 4]));
+    await closed;
+    assert.equal((await api("/api/state")).status, 200);
+  });
+  await check("open checks the content: renamed or compressed non-captures are refused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-gate-"));
+    try {
+      writeFileSync(join(dir, "fake.pcapng"), '{"secret": "not a capture"}');
+      writeFileSync(join(dir, "key.pcap.gz"), gzipSync(Buffer.from("-----BEGIN PRIVATE KEY-----\n")));
+      writeFileSync(join(dir, "zipped.pcapng.gz"), gzipSync(readFileSync(fixture)));
+      for (const name of ["fake.pcapng", "key.pcap.gz"]) {
+        const r = await api("/api/open", { path: join(dir, name) });
+        assert.equal(r.status, 400, name);
+        assert.match(r.json.error, /not a capture file/);
+      }
+      assert.equal((await api("/api/open", { path: join(dir, "zipped.pcapng.gz") })).status, 200);
+      assert.equal((await state()).totalFrames, 29);
+    } finally {
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  await check("a short token is refused, an empty one replaced by a random one", async () => {
+    // Async: blocking this process would let the server drop our idle keep-alive connections
+    const run = (t) =>
+      new Promise((resolve) => {
+        const p = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", t], { env: { ...env, WIREBUDDY_TOKEN: "" } });
+        let text = "";
+        const done = (code) => {
+          clearTimeout(timer);
+          p.kill();
+          resolve({ code, text });
+        };
+        const timer = setTimeout(() => done("running"), 10000);
+        p.stdout.on("data", (d) => {
+          text += d;
+          if (/UI at/.test(text)) done("running");
+        });
+        p.stderr.on("data", (d) => (text += d));
+        p.on("exit", (code) => done(code));
+      });
+    const short = await run("short");
+    assert.equal(short.code, 1, short.text);
+    assert.match(short.text, /at least 16 characters/);
+    const empty = await run("");
+    assert.equal(empty.code, "running", empty.text);
+    assert.match(empty.text, /token=[0-9a-f]{32}\b/);
+  });
   await check("files and recent", async () => {
     const dir = (await api("/api/files?dir=" + encodeURIComponent(dirname(fixture)))).json;
     assert.ok(dir.entries.some((e) => e.name === "http.pcapng"));
@@ -609,6 +704,7 @@ try {
   });
 } finally {
   server.kill();
+  rmSync(home, { recursive: true, force: true });
 }
 console.log(failures ? `${failures} check(s) failed` : "all checks passed");
 process.exit(failures ? 1 : 0);

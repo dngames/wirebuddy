@@ -15,7 +15,7 @@ const client = new Client({ name: "agent-demo", version: "0" });
 await client.connect(
   new StdioClientTransport({
     command: process.execPath,
-    args: [join(root, "dist/server/main.js"), "--mcp", "--port", values.port, "--token", "demo-token"],
+    args: [join(root, "dist/server/main.js"), "--mcp", "--port", values.port],
     stderr: "ignore",
   }),
 );

@@ -236,7 +236,8 @@ export class Capture extends EventEmitter {
       if (autostop.filesizeKB) throw new Error("auto-stop by file size cannot be combined with a ring buffer");
     }
 
-    mkdirSync(this.state.dir, { recursive: true });
+    // Captures can hold passwords and private traffic: only the user may read them
+    mkdirSync(this.state.dir, { recursive: true, mode: 0o700 });
     const stamp = new Date().toISOString().replace(/[-:.Z]/g, "").replace("T", "_");
     const safeIface = req.iface.replace(/[^A-Za-z0-9_.-]/g, "_");
     let base = `wirebuddy_${safeIface}_${stamp}`;

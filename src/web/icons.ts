@@ -25,6 +25,10 @@ const ICONS = {
   goto: `<path d="M1.5 8h9M7.5 4.5 11 8l-3.5 3.5" ${S}/><path d="M14 2.5v11" ${S}/>`,
   marks: `<path d="M4 1.5h8v13l-4-3.2-4 3.2z" ${S}/>`,
   autoscroll: `<path d="M8 1.8v9M4.5 7.5 8 11l3.5-3.5" ${S}/><path d="M2.5 14h11" ${S}/>`,
+  // WireBuddy's own mark; "wireshark" below is only for Open in Wireshark
+  logo:
+    '<path d="M3.5 1.5h9a2.5 2.5 0 0 1 2.5 2.5v5.5a2.5 2.5 0 0 1-2.5 2.5H7.5L4 14.8V12h-.5A2.5 2.5 0 0 1 1 9.5V4a2.5 2.5 0 0 1 2.5-2.5z" fill="#0f9d8f"/>' +
+    '<path d="M3 7h1.8l1.1-2.6 1.6 5.2 1.6-5.2 1.1 2.6H13" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
   wireshark:
     '<rect x="1" y="1" width="14" height="14" rx="3" fill="#1679c2"/>' +
     '<path d="M3.2 12.3c2.8-1 4.8-3.6 5.4-8.4 1.5 2.6 2.8 5.5 3.3 8.4z" fill="#fff"/>',

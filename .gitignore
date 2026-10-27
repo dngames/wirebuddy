@@ -1,4 +1,12 @@
 node_modules/
 dist/
-.claude/launch.json
+.claude/
 *.log
+# Real captures and TLS key logs stay out of the repository
+*.pcap
+*.pcapng
+*.pcap.gz
+*.pcapng.gz
+*.cap
+!test/fixtures/*.pcapng
+*keylog*

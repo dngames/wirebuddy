@@ -7,18 +7,24 @@ import { parseArgs } from "node:util";
 import { Viewer } from "./viewer.ts";
 import { startHttp } from "./http.ts";
 import { startMcp } from "./mcp.ts";
+import { VERSION } from "../shared/version.ts";
 import { instanceFile, removeInstance, watch, writeInstance } from "./watch.ts";
 
 const USAGE = `Usage: wirebuddy [options] [capture-file]
 
   --mcp               also serve MCP over stdio (for Claude Code); logs go to stderr
   --port <n>          HTTP port on 127.0.0.1 (default 8765, falls back to a free one)
-  --token <t>         session token for the UI/API (default: random; env WIREBUDDY_TOKEN)
+  --token <t>         session token for the UI/API, at least 16 characters (default: random;
+                      env WIREBUDDY_TOKEN, which unlike --token other local users can't see in ps)
   --capture-dir <d>   where live captures are written (default ~/.local/share/wirebuddy/captures)
   --profile <name>    Wireshark configuration profile for dissection (also used by Open in Wireshark)
   --tls-keylog <file> decrypt TLS with this key log file (SSLKEYLOGFILE format)
   --watch <file>      wait for the next problem in the viewer that wrote this instance file, print it, exit
-  -h, --help          show this help`;
+  --version           print the version
+  -h, --help          show this help
+
+Environment: WIREBUDDY_PORT, WIREBUDDY_TOKEN, WIREBUDDY_CAPTURE_DIR, WIREBUDDY_PROFILE
+set the defaults of the options of the same name.`;
 
 function which(name: string): string | null {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
@@ -45,11 +51,16 @@ const { values, positionals } = parseArgs({
     "tls-keylog": { type: "string" },
     watch: { type: "string" },
     help: { type: "boolean", short: "h", default: false },
+    version: { type: "boolean", default: false },
   },
 });
 
 if (values.help) {
   console.log(USAGE);
+  process.exit(0);
+}
+if (values.version) {
+  console.log(`wirebuddy ${VERSION}`);
   process.exit(0);
 }
 
@@ -79,10 +90,17 @@ const tlsKeylog = values["tls-keylog"];
 if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(`TLS key log: ${(err as Error).message}`));
 else void viewer.loadTlsPreference();
 
+// An empty token would let anyone on this machine in
+const token = values.token || randomBytes(16).toString("hex");
+if (token.length < 16) {
+  process.stderr.write("wirebuddy: the token must be at least 16 characters\n");
+  process.exit(1);
+}
+
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), "../web");
 const http = await startHttp(viewer, {
   port: Number(values.port),
-  token: values.token ?? randomBytes(16).toString("hex"),
+  token,
   webRoot,
 });
 log(`UI at ${http.url}`);

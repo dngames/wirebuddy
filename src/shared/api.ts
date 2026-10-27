@@ -122,9 +122,10 @@ export interface ViewState {
   agentNotice: AgentNotice | null;
   /**
    * An MCP agent is attached: problems go to it instead of the page, which
-   * only shows how many are waiting (`pending`).
+   * only shows how many are waiting (`pending`). `name` labels it in the UI
+   * ("Claude" for Claude clients, else "Agent").
    */
-  agent: { attached: boolean; pending: number };
+  agent: { attached: boolean; pending: number; name: string };
   /** Whether a `wireshark` executable was found for "Open in Wireshark". */
   wiresharkAvailable: boolean;
   /**

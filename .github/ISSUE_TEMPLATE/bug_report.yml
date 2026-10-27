@@ -21,6 +21,7 @@ body:
     id: wirebuddy
     attributes:
       label: WireBuddy version or commit
+      description: Output of `node dist/server/main.js --version`, or `git rev-parse --short HEAD`
     validations:
       required: true
   - type: input

@@ -1,5 +1,8 @@
 import { build } from "esbuild";
-import { cpSync, mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync } from "node:fs";
+
+const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+const define = { __VERSION__: JSON.stringify(version) };
 
 await build({
   entryPoints: ["src/server/main.ts"],
@@ -7,7 +10,8 @@ await build({
   bundle: true,
   platform: "node",
   format: "esm",
-  target: "node20",
+  target: "node22",
+  define,
   packages: "external",
   sourcemap: true,
   banner: { js: "#!/usr/bin/env node" },
@@ -21,6 +25,7 @@ await build({
   platform: "browser",
   format: "esm",
   target: "es2022",
+  define,
   sourcemap: true,
   logLevel: "info",
 });

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, isAbsolute, join } from "node:path";
 import { mergeRanges, type Ranges } from "../shared/ranges.ts";
@@ -94,6 +94,8 @@ export async function exportFrames(opts: {
         rmSync(dir, { recursive: true, force: true });
       }
     }
+    // As private as the captures it comes from
+    chmodSync(partial, 0o600);
     renameSync(partial, output);
   } catch (err) {
     rmSync(partial, { force: true });
