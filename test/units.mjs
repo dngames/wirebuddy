@@ -15,7 +15,7 @@ writeFileSync(
   ["paneldata", "layers", "wbpk", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge } = await import(join(out, "units.mjs"));
+const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -47,6 +47,14 @@ try {
     assert.deepEqual(frames(FrameSet.fromRows([[0, 1], [3, 3]], Int32Array.of(4, 5, 9, 12))), [4, 5, 12]);
     assert.deepEqual(frames(FrameSet.fromRows([[0, 2]], null)), [1, 2, 3]);
     assert.equal(FrameSet.fromRanges([[1, 2_000_000_000]]).count, 2_000_000_000);
+    // Paging asks for the same clip and intersection again and again: no copies
+    assert.equal(a.clip(10), a);
+    assert.equal(a.clip(1000), a);
+    assert.deepEqual([a.clip(8).count, frames(a.clip(8))], [4, [1, 2, 3, 7]]);
+    assert.deepEqual(frames(a.clip(0)), []);
+    const b = FrameSet.fromRanges([[2, 9]]);
+    assert.equal(a.intersect(b), a.intersect(b));
+    assert.deepEqual(frames(a.intersect(b)), [2, 3, 7, 9]);
   });
 
   // Ethernet / IPv4 / UDP 1000 -> 2000 with "hello"
@@ -156,7 +164,7 @@ try {
     const fake = join(out, "fake-sharkd");
     writeFileSync(
       fake,
-      `#!${process.execPath}\nlet buf = "";\nprocess.stdin.on("data", (d) => {\n  buf += d;\n  for (let nl; (nl = buf.indexOf("\\n")) >= 0; ) {\n    const req = JSON.parse(buf.slice(0, nl));\n    buf = buf.slice(nl + 1);\n    const result = req.method === "big" ? "x".repeat(200000) : { status: "OK" };\n    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result }) + "\\n");\n  }\n});\n`,
+      `#!${process.execPath}\nlet buf = "";\nprocess.stdin.on("data", (d) => {\n  buf += d;\n  for (let nl; (nl = buf.indexOf("\\n")) >= 0; ) {\n    const req = JSON.parse(buf.slice(0, nl));\n    buf = buf.slice(nl + 1);\n    const p = req.params ?? {};\n    const rows = (s, n) => Array.from({ length: Math.max(0, Math.min(n, 7 - s)) }, (_, i) => ({ c: [String(s + i + 1)], num: s + i + 1 }));\n    const result = req.method === "big" ? "x".repeat(200000) : req.method === "frames" ? rows(p.skip ?? 0, p.limit ?? 1e9) : { status: "OK" };\n    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result }) + "\\n");\n  }\n});\n`,
     );
     chmodSync(fake, 0o755);
     const s = new Sharkd(fake);
@@ -165,6 +173,10 @@ try {
       assert.deepEqual(await s.call("status"), { status: "OK" });
       await assert.rejects(s.call("big"), (e) => e instanceof SharkdTooLarge && /longer than/.test(e.message));
       assert.deepEqual(await s.call("status"), { status: "OK" });
+      // Frame lists come in pages, also when the last page is full
+      assert.deepEqual([...(await matchingFrames(s, "x", 3))], [1, 2, 3, 4, 5, 6, 7]);
+      assert.deepEqual([...(await matchingFrames(s, "x", 7))], [1, 2, 3, 4, 5, 6, 7]);
+      assert.deepEqual([...(await matchingFrames(s, "x"))], [1, 2, 3, 4, 5, 6, 7]);
     } finally {
       s.close();
     }

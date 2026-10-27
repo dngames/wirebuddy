@@ -4,7 +4,7 @@ import { closeSync, createReadStream, openSync, readSync, statSync } from "node:
 import { basename, resolve } from "node:path";
 import type { Transform } from "node:stream";
 import { createGunzip, createZstdDecompress } from "node:zlib";
-import { Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
+import { matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
@@ -229,6 +229,7 @@ export class Viewer extends EventEmitter {
       },
       marked: () => this.panelSet("marked", [this.state.marks], () => FrameSet.fromSorted(this.state.marks.map((m) => m.frame).sort((a, b) => a - b))),
       tlsKeylog: () => this.state.tlsKeylog,
+      fileId: () => ({ ino: this.loadedIno, head: this.loadedHead }),
     };
     this.panelData = new PanelData({ bin: this.sharkdBin, profile: opts.profile, env, generation, source, events: this.events });
     this.panels.attach(source, this.panelData);
@@ -375,7 +376,7 @@ export class Viewer extends EventEmitter {
         const status = await engine.call<SharkdStatus>("status");
         if (!filter) return { status, displayed: null, filter, rolledBack: false as RollBack };
         try {
-          return { status, displayed: await this.matchingFrames(engine, filter), filter, rolledBack: false as RollBack };
+          return { status, displayed: await matchingFrames(engine, filter), filter, rolledBack: false as RollBack };
         } catch (err) {
           if (!(err instanceof SharkdError) || !dropFilter) throw err;
           return { status, displayed: null, filter: "", rolledBack: false as RollBack };
@@ -428,11 +429,6 @@ export class Viewer extends EventEmitter {
     if (!engine.outdated()) return;
     await engine.idle(RESTART_WAIT_MS);
     engine.restart();
-  }
-
-  private async matchingFrames(engine: Sharkd, filter: string): Promise<Int32Array> {
-    const rows = await engine.call<{ num: number }[]>("frames", { filter, column0: "frame.number:0" });
-    return Int32Array.from(rows, (r) => r.num);
   }
 
   private applyLoad(
@@ -606,7 +602,7 @@ export class Viewer extends EventEmitter {
       const check = await this.checkFilter(filter);
       if (!check.ok) return check;
       if (this.state.file) {
-        const displayed = filter ? await this.matchingFrames(this.engine, filter) : null;
+        const displayed = filter ? await matchingFrames(this.engine, filter) : null;
         this.displayed = displayed;
         this.state = {
           ...this.state,
@@ -764,7 +760,7 @@ export class Viewer extends EventEmitter {
     const { generation } = this.state;
     const c = this.countCache;
     if (c && c.generation === generation && c.filter === filter) return c.total;
-    const total = (await this.matchingFrames(this.engine, filter)).length;
+    const total = (await matchingFrames(this.engine, filter)).length;
     this.countCache = { generation, filter, total };
     return total;
   }
@@ -1029,7 +1025,7 @@ export class Viewer extends EventEmitter {
         wrapped = frame !== null;
       }
     } else {
-      const frames = await this.matchingFrames(engine, match);
+      const frames = await matchingFrames(engine, match);
       const last = frames.length ? frames[frames.length - 1] : null;
       const before = from ? (frames.findLast((f) => f < from) ?? null) : last;
       frame = before ?? last;
@@ -1059,13 +1055,15 @@ export class Viewer extends EventEmitter {
     }
     // With the reloads: a sharkd restarting meanwhile would miss the key
     await this.exclusive(async () => {
-      await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
-      this.panelData.setTlsKeylog(path);
-      this.set({ tlsKeylog: path });
+      this.panelData.hold(true);
       try {
+        await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
+        this.panelData.setTlsKeylog(path);
+        this.set({ tlsKeylog: path });
         await this.reloadNow(true);
       } finally {
         this.set({ epoch: this.newEpoch("tls") });
+        this.panelData.hold(false);
       }
     });
   }
@@ -1085,7 +1083,7 @@ export class Viewer extends EventEmitter {
     if (req.filter !== undefined) {
       const check = await this.checkFilter(req.filter);
       if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-      ranges = req.filter.trim() ? toRanges(await this.matchingFrames(this.engine, req.filter.trim())) : everything;
+      ranges = req.filter.trim() ? toRanges(await matchingFrames(this.engine, req.filter.trim())) : everything;
     } else if (req.which === "all") ranges = everything;
     else if (req.which === "displayed") ranges = this.displayed ? toRanges(this.displayed) : everything;
     else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
@@ -1321,6 +1319,8 @@ export class Viewer extends EventEmitter {
       if (change) this.extensions.include(change.name, change.on);
       else this.extensions.refresh();
       this.forgetLuaErrors();
+      // Panels wait until the view reads with the new extensions, then start over
+      this.panelData.hold(true);
       const filter = this.state.filter;
       let rolledBack: RollBack = false;
       try {
@@ -1339,6 +1339,7 @@ export class Viewer extends EventEmitter {
         }
       } finally {
         this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
+        this.panelData.hold(false);
         this.refreshExtensions();
         void this.checkOffers(true);
       }
@@ -1435,7 +1436,7 @@ export class Viewer extends EventEmitter {
       if (load.status !== "OK" && load.err !== -12) throw new Error(`could not load ${file}: ${load.status}`);
       for (const proto of protocols) {
         try {
-          const frames = await this.matchingFrames(sharkd, proto);
+          const frames = await matchingFrames(sharkd, proto);
           result.protocols.push({ name: proto, frames: frames.length, first: frames.length ? frames[0] : null });
         } catch (err) {
           result.protocols.push({ name: proto, frames: 0, first: null, error: (err as Error).message });

@@ -37,6 +37,8 @@ interface Query {
   maxBytes?: number;
   /** wb.subscribe: from the first packet (default) or only new ones. */
   from?: "start" | "end";
+  /** Paging by hand: the first page's epoch, so a page of another capture rejects with "stale". */
+  epoch?: number;
 }
 
 interface Page {
@@ -86,6 +88,8 @@ interface Endpoint {
 const MAGIC = 0x4b504257;
 /** A busy WireBuddy is asked again for this long. */
 const BUSY_GIVE_UP_MS = 3 * 60_000;
+/** Requests of a panel at a time, as many as WireBuddy serves one panel; the rest wait here. */
+const MAX_REQUESTS = 4;
 /** wb.all() gives up above this. */
 const MAX_ALL = 64 * 1024 * 1024;
 /** JSON wb.storage keeps per extension. */
@@ -260,7 +264,18 @@ const ACT_WAIT_MS = 10_000;
     if (next.selected !== before.selected) emit("select", next.selected);
     emit("view", next);
   };
-  stream.addEventListener("view", (e) => setView(dataOf(e) as PanelView));
+  // After a reconnect, packets that came meanwhile were never announced
+  let connects = 0;
+  let catchUp = false;
+  stream.addEventListener("open", () => {
+    if (connects++) catchUp = true;
+  });
+  stream.addEventListener("view", (e) => {
+    const before = view;
+    setView(dataOf(e) as PanelView);
+    if (catchUp && view.epoch === before.epoch && view.frames > before.frames) emit("packets", { frames: view.frames, live: view.live });
+    catchUp = false;
+  });
   stream.addEventListener("packets", (e) => emit("packets", dataOf(e)));
   stream.addEventListener("reset", (e) => {
     const r = dataOf(e) as { why: string; view: PanelView };
@@ -294,8 +309,22 @@ const ACT_WAIT_MS = 10_000;
   }
   const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
 
+  let requests = 0;
+  const slots: (() => void)[] = [];
   /** POSTs to the panel's data API for the data of `epoch`; a busy server is asked again, as often as it says. */
   async function request(method: string, body: object, epoch = view.epoch): Promise<Response> {
+    if (requests >= MAX_REQUESTS) await new Promise<void>((go) => slots.push(go));
+    else requests++;
+    try {
+      return await requestNow(method, body, epoch);
+    } finally {
+      const next = slots.shift();
+      if (next) next();
+      else requests--;
+    }
+  }
+
+  async function requestNow(method: string, body: object, epoch: number): Promise<Response> {
     const giveUp = Date.now() + BUSY_GIVE_UP_MS;
     for (;;) {
       const r = await fetch(`/_wb/api/${method}`, {
@@ -395,10 +424,15 @@ const ACT_WAIT_MS = 10_000;
     return { page, head };
   }
 
-  async function packets(q: Query = {}, epoch = view.epoch): Promise<Page> {
-    const { from: _from, ...body } = q;
+  async function packets(q: Query = {}, epoch = q.epoch ?? view.epoch): Promise<Page> {
+    const { from: _from, epoch: _epoch, ...body } = q;
     return decode(await (await request("packets", body, epoch)).arrayBuffer()).page;
   }
+
+  /** The capture changed while an answer was on its way: what it holds is outdated. */
+  const sameEpoch = (epoch: number): void => {
+    if (view.epoch !== epoch) throw new WbError("the capture changed meanwhile", "stale");
+  };
 
   /** Pages joined into one. */
   function merge(pages: Page[]): Page {
@@ -435,11 +469,12 @@ const ACT_WAIT_MS = 10_000;
     let after = q.after ?? 0;
     let size = 0;
     // All pages of one capture: another one in between means stale
-    const epoch = view.epoch;
+    const epoch = q.epoch ?? view.epoch;
     for (;;) {
       const p = await packets({ ...q, after }, epoch);
       pages.push(p);
       size += p.data.length + p.n * 20;
+      for (const values of Object.values(p.fields)) for (const v of values) size += 2 * v.length;
       if (size > MAX_ALL) throw new WbError("over 64 MiB: use wb.subscribe, or ask for less (fewer packets, a layer instead of whole frames)", "too-large");
       if (p.done || p.next === null) return merge(pages);
       after = p.next;
@@ -492,7 +527,8 @@ const ACT_WAIT_MS = 10_000;
           restart = false;
           newest = view.frames;
           await h.reset?.();
-          after = start();
+          // A new live capture (or ring file) began after this subscription: all of it is new
+          after = q.from === "end" && view.live ? 0 : start();
           epoch = view.epoch;
         }
         let page: Page;
@@ -537,14 +573,17 @@ const ACT_WAIT_MS = 10_000;
   };
 
   async function frame(n: number, opts: { tree?: boolean; bytes?: boolean } = {}) {
-    const r = (await (await request("frame", { frame: n, ...opts })).json()) as { frame: number; tree: unknown; bytes: string; sources: { name: string; bytes: string }[]; followers: [string, string][] };
+    const epoch = view.epoch;
+    const r = (await (await request("frame", { frame: n, ...opts }, epoch)).json()) as { frame: number; tree: unknown; bytes: string; sources: { name: string; bytes: string }[]; followers: [string, string][] };
+    sameEpoch(epoch);
     return { frame: r.frame, tree: r.tree, bytes: fromBase64(r.bytes), sources: r.sources.map((s) => ({ name: s.name, bytes: fromBase64(s.bytes) })), followers: r.followers };
   }
 
-  async function follow(which: { frame?: number; protocol?: string; stream?: number; filter?: string }, opts: { offset?: number; maxBytes?: number } = {}) {
-    const { page, head } = decode(await (await request("follow", { ...which, ...opts })).arrayBuffer());
+  async function follow(which: { frame?: number; protocol?: string; stream?: number; filter?: string }, opts: { offset?: number; maxBytes?: number; epoch?: number } = {}) {
+    const { epoch = view.epoch, ...rest } = opts;
+    const { page, head } = decode(await (await request("follow", { ...which, ...rest }, epoch)).arrayBuffer());
     const f = head.follow!;
-    return { protocol: f.protocol, filter: f.filter, client: f.client, server: f.server, truncated: f.truncated, next: page.next, chunks: page };
+    return { protocol: f.protocol, filter: f.filter, client: f.client, server: f.server, truncated: f.truncated, next: page.next, epoch: page.epoch, chunks: page };
   }
 
   let warnedObjects = false;
@@ -558,8 +597,11 @@ const ACT_WAIT_MS = 10_000;
   }
 
   async function object(id: string) {
-    const r = await request("object", { id });
-    return { type: decodeURIComponent(r.headers.get("x-wb-type") ?? ""), filename: decodeURIComponent(r.headers.get("x-wb-filename") ?? ""), bytes: new Uint8Array(await r.arrayBuffer()) };
+    const epoch = view.epoch;
+    const r = await request("object", { id }, epoch);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    sameEpoch(epoch);
+    return { type: decodeURIComponent(r.headers.get("x-wb-type") ?? ""), filename: decodeURIComponent(r.headers.get("x-wb-filename") ?? ""), bytes };
   }
 
   async function objectURL(id: string): Promise<string> {

@@ -13,6 +13,7 @@
  * read fewer packets than the view or FrameStore know of.
  */
 
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
 import { basename } from "node:path";
 import type { PanelView } from "../shared/api.ts";
@@ -20,7 +21,7 @@ import type { Ranges } from "../shared/ranges.ts";
 import type { EventLog } from "./events.ts";
 import { FrameStore } from "./framestore.ts";
 import { findLayer, parse, Parsed, type Layer } from "./layers.ts";
-import { Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
+import { matchingFrames, Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
 import { printable } from "./text.ts";
 import { encodePage, type PageRow } from "./wbpk.ts";
 
@@ -55,6 +56,9 @@ const MAX_OBJECT = 64 * 1024 * 1024;
 const MAX_OBJECTS = 10_000;
 /** Packets whose bytes one turn at the engine asks for. */
 const BYTES_BATCH = 32;
+/** Characters of field values one sharkd answer may hold (about 2 KB a value at most), and the frame numbers of a filter per answer. */
+const COLUMN_CHARS = MAX_ANSWER / 2;
+const MATCH_PAGE = 500_000;
 const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 /** sharkd's mark for a value it cut (about 2 KB). */
 const CLIPPED = "[…] ";
@@ -99,6 +103,8 @@ export interface PanelSource {
   selected(): FrameSet;
   marked(): FrameSet;
   tlsKeylog(): string | null;
+  /** Inode and first bytes of the file as the view read it. */
+  fileId(): { ino: number; head: Buffer };
 }
 
 export type Answer = { kind: "json"; body: unknown } | { kind: "page"; body: Buffer } | { kind: "object"; body: Buffer; type: string; filename: string };
@@ -158,6 +164,10 @@ export class PanelData {
   private readonly matchSets = new Map<string, MatchScan>();
   /** Panels that read from FrameStore: they hear when the file grows. */
   private readonly tailers = new Set<string>();
+  /** While the view reads with other extensions or keys: requests wait. */
+  private holding = false;
+  /** Frames whose sharkd answer is too long to read, per file and epoch; then bytes are asked for one frame at a time. */
+  private oversized = { key: "", frames: new Set<number>(), single: false };
 
   constructor(
     private readonly opts: {
@@ -209,6 +219,11 @@ export class PanelData {
     if (this.open.size || (!this.engine && !this.store)) return;
     this.idleTimer = setTimeout(() => this.close(), IDLE_STOP_MS);
     this.idleTimer.unref();
+  }
+
+  /** The view is about to read with other extensions or TLS keys (true) or has (false): until then, requests wait. */
+  hold(on: boolean): void {
+    this.holding = on;
   }
 
   setTlsKeylog(path: string | null): void {
@@ -374,6 +389,7 @@ export class PanelData {
     });
     try {
       if (!this.open.has(label)) throw new ApiError(404, "gone", "the panel was closed");
+      if (this.holding) throw new ApiError(429, "busy", "WireBuddy is reading the capture with other extensions or keys", { retryMs: 500 });
       const now = Date.now();
       this.crashes = this.crashes.filter((t) => now - t < 60_000);
       if (this.crashes.length >= CRASHES_PER_MINUTE) {
@@ -424,7 +440,12 @@ export class PanelData {
         fail(new ApiError(504, "too-slow", `the panel engine needed over ${ms / 1000} s and was restarted: ask for less (a narrower filter, fewer packets)`));
       }, ms);
     });
-    return Promise.race([work.catch(engineFailure), over]).finally(() => clearTimeout(timer));
+    const failed = (err: unknown): never => {
+      // A refused answer stopped sharkd: load() reads the file again, within its own budget
+      if (err instanceof SharkdTooLarge) this.restart(engine);
+      return engineFailure(err);
+    };
+    return Promise.race([work.catch(failed), over]).finally(() => clearTimeout(timer));
   }
 
   /** The epoch a request is for: the current one; a panel that knows an older one starts over. */
@@ -447,6 +468,7 @@ export class PanelData {
         // FrameStore may know of packets the view hasn't read yet
         const known = Math.max(source.totalFrames(), source.live() ? this.storeCount() : 0);
         if (was && was.file === file && was.epoch === epoch && (known <= was.frames || Date.now() - was.at < LIVE_LOAD_MS)) return was;
+        if (!sameFile(file, source.fileId())) throw new ApiError(409, "stale", "the capture file changed on disk since WireBuddy read it: View › Reload reads it again", { epoch, retryMs: 2000 });
         const r = await engine.call<{ status: string; err?: number }>("load", { file });
         // A file still being written ends mid-packet; sharkd keeps what it read
         if (r.status !== "OK" && r.err !== -12) throw new ApiError(500, "internal", `the panel engine could not read the capture: ${printable(r.status)}`);
@@ -508,8 +530,7 @@ export class PanelData {
     return this.cached(
       filter,
       async () => {
-        const rows = await this.run(ctx.label, (e) => e.call<{ num: number }[]>("frames", { filter, column0: "frame.number:0" }), CALL_BUDGET_MS, ctx.loaded);
-        return FrameSet.fromSorted(rows.map((r) => r.num));
+        return FrameSet.fromSorted(await this.run(ctx.label, (e) => matchingFrames(e, filter, MATCH_PAGE), CALL_BUDGET_MS, ctx.loaded));
       },
       this.sets,
       MAX_CACHED_SETS,
@@ -579,7 +600,9 @@ export class PanelData {
     const { frames, more } = set.page(after, limit);
     // Third: what the layer is found by, the link type or the field's value
     const columns = raw ? fields : ["frame.time_epoch", "frame.len", ...(layer === "ip" || layer === "payload" ? ["frame.encap_type"] : fieldBytes ? [layer] : []), ...fields];
-    const values = ctx && columns.length ? await this.columns(ctx, frames, columns, byFilter, set) : null;
+    // Long field values for many packets would be too long for one sharkd answer, and may be cut by maxBytes anyway
+    const perCall = fields.length ? Math.max(32, Math.floor(COLUMN_CHARS / (fields.length * 2200 + 200))) : MAX_LIMIT.plain;
+    const step = raw ? Math.min(RAW_BATCH, perCall) : layer === "none" ? perCall : BYTES_BATCH;
     const rows: PageRow[] = [];
     const fieldValues: Record<string, string[]> = Object.fromEntries(fields.map((f) => [f, []]));
     const clipped: [number, string][] = [];
@@ -587,15 +610,17 @@ export class PanelData {
     let dropped = 0;
     let size = 0;
     let cut = false;
-    for (let i = 0; i < frames.length && !cut; i += raw ? RAW_BATCH : BYTES_BATCH) {
-      const batch = frames.slice(i, i + (raw ? RAW_BATCH : BYTES_BATCH)).filter((f) => !values || values.has(f));
+    for (let i = 0; i < frames.length && !cut; i += step) {
+      const chunk = frames.slice(i, i + step);
+      const values = ctx && columns.length ? await this.columns(ctx, chunk, columns, byFilter, set) : null;
+      const batch = values ? chunk.filter((f) => values.has(f)) : chunk;
       const got = raw ? await this.fromStore(store, batch, layer) : await this.fromEngine(ctx!, batch, layer, values!);
       for (const [k, frame] of batch.entries()) {
         const c = values?.get(frame) ?? [];
         const { time, len, data: d } = got[k] ?? { time: NaN, len: 0, data: null };
         const bytesHere = d ?? EMPTY;
         let rowSize = bytesHere.length;
-        for (let j = first; j < c.length; j++) rowSize += c[j].length;
+        for (let j = first; j < c.length; j++) rowSize += Buffer.byteLength(c[j]);
         // At least one packet, however large
         if (rows.length && size + rowSize > maxBytes) {
           cut = true;
@@ -604,7 +629,7 @@ export class PanelData {
         if (d === null && fieldBytes && c[2]) {
           throw new ApiError(400, "bad-args", `"${layer}" has a value but no bytes in the packet (a hidden or generated field): ask for a field the packet details show with bytes, e.g. ip.src instead of ip.addr`);
         }
-        if (d === null) dropped++;
+        if (d == null) dropped++;
         size += rowSize;
         for (const [j, f] of fields.entries()) {
           const v = c[first + j] ?? "";
@@ -687,20 +712,41 @@ export class PanelData {
     return out;
   }
 
-  /** The bytes of `layer` per frame; null where the frame has no such layer. */
-  private async bytesOf(ctx: Ctx, frames: number[], layer: string, values: Map<number, string[]>): Promise<(Uint8Array | null)[]> {
+  /**
+   * The bytes of `layer` per frame; null where the frame has no such layer,
+   * undefined where sharkd's answer (with all reassembled data) is too long to read.
+   */
+  private async bytesOf(ctx: Ctx, frames: number[], layer: string, values: Map<number, string[]>): Promise<(Uint8Array | null | undefined)[]> {
     const tree = layer !== "frame" && layer !== "ip" && layer !== "payload";
-    const answers = await this.run(
-      ctx.label,
-      (e) => Promise.all(frames.map((frame) => e.call<{ bytes?: string; tree?: TreeNode[]; ds?: { bytes?: string }[] }>("frame", { frame, bytes: true, ...(tree ? { proto: true, hidden: true } : {}) }))),
-      CALL_BUDGET_MS,
-      ctx.loaded,
-    );
-    return answers.map((r, i) => {
+    const key = `${ctx.loaded.file}\n${ctx.loaded.epoch}`;
+    if (this.oversized.key !== key) this.oversized = { key, frames: new Set(), single: false };
+    const big = this.oversized;
+    const ask = frames.filter((f) => !big.frames.has(f));
+    const answers = new Map<number, { bytes?: string; tree?: TreeNode[]; ds?: { bytes?: string }[] }>();
+    for (const group of big.single ? ask.map((f) => [f]) : [ask]) {
+      try {
+        const got = await this.run(
+          ctx.label,
+          (e) => Promise.all(group.map((frame) => e.call<{ bytes?: string; tree?: TreeNode[]; ds?: { bytes?: string }[] }>("frame", { frame, bytes: true, ...(tree ? { proto: true, hidden: true } : {}) }))),
+          CALL_BUDGET_MS,
+          ctx.loaded,
+        );
+        group.forEach((f, i) => answers.set(f, got[i]));
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.code !== "too-large") throw err;
+        // Which packet it was: one at a time from now on, and the one that fails alone is left out
+        if (group.length === 1) big.frames.add(group[0]);
+        else big.single = true;
+        throw new ApiError(429, "busy", "a packet's answer was too long to read; reading on without it", { retryMs: 200 });
+      }
+    }
+    return frames.map((frame) => {
+      const r = answers.get(frame);
+      if (!r) return undefined;
       if (tree) return fieldBytes(r, layer);
       const b = Buffer.from(r.bytes ?? "", "base64");
       if (layer === "frame") return b;
-      const at = findLayer(b, values.get(frames[i])?.[2] ?? "", layer as "ip" | "payload");
+      const at = findLayer(b, values.get(frame)?.[2] ?? "", layer as "ip" | "payload");
       return at ? b.subarray(at[0], at[1]) : null;
     });
   }
@@ -725,7 +771,10 @@ export class PanelData {
         }),
       CALL_BUDGET_MS,
       loaded,
-    );
+    ).catch((err) => {
+      if (err instanceof ApiError && err.code === "too-large") throw new ApiError(413, "too-large", `frame ${frame} with its reassembled data is too long to read: ask with {bytes: false}, or for a field's bytes with wb.packets`);
+      throw err;
+    });
     return {
       frame,
       tree: r.tree ?? null,
@@ -775,7 +824,12 @@ export class PanelData {
           }),
         CALL_BUDGET_MS,
         loaded,
-      );
+      ).catch((err) => {
+        if (err instanceof ApiError && err.code === "too-large") {
+          throw new ApiError(413, "too-large", `the stream is too long to follow at once: read its packets instead, wb.packets({filter: ${JSON.stringify(filter)}, bytes: "payload"})`);
+        }
+        throw err;
+      });
       if (r.shost === "NONE" && r.chost === "NONE" && !r.payloads?.length) throw new ApiError(404, "gone", `no ${protocol} stream matches ${filter}`);
       const chunks = (r.payloads ?? []).map((p) => ({ frame: p.n, dir: p.s ? 1 : 0, data: Buffer.from(p.d, "base64") }));
       const sum = (dir: number) => chunks.reduce((a, c) => a + (c.dir === dir ? c.data.length : 0), 0);
@@ -891,7 +945,8 @@ interface FollowData {
 interface RowData {
   time: number;
   len: number;
-  data: Uint8Array | null;
+  /** null: no such layer; undefined: too long to read. */
+  data: Uint8Array | null | undefined;
 }
 
 /** A raw match: its cache key and its test on a parsed frame. */
@@ -1017,6 +1072,8 @@ const EMPTY = new Uint8Array(0);
 export class FrameSet {
   /** Frames before each range, for rank(). */
   private before: Float64Array | null = null;
+  /** Intersections with other sets, as paging asks for the same one again and again. */
+  private readonly meets = new WeakMap<FrameSet, FrameSet>();
 
   private constructor(
     private readonly r: Int32Array,
@@ -1083,18 +1140,24 @@ export class FrameSet {
 
   /** Only frames up to `max`. */
   clip(max: number): FrameSet {
-    const out: number[] = [];
-    let count = 0;
-    for (let i = 0; i < this.r.length; i += 2) {
-      if (this.r[i] > max) break;
-      const b = Math.min(this.r[i + 1], max);
-      out.push(this.r[i], b);
-      count += b - this.r[i] + 1;
-    }
-    return count === this.count ? this : new FrameSet(Int32Array.from(out), count);
+    const count = this.rank(max);
+    if (count === this.count) return this;
+    const k = this.rangeAtOrBefore(max);
+    const r = this.r.slice(0, 2 * (k + 1));
+    if (k >= 0) r[2 * k + 1] = Math.min(r[2 * k + 1], max);
+    return new FrameSet(r, count);
   }
 
   intersect(o: FrameSet): FrameSet {
+    let met = this.meets.get(o);
+    if (!met) {
+      met = this.meet(o);
+      this.meets.set(o, met);
+    }
+    return met;
+  }
+
+  private meet(o: FrameSet): FrameSet {
     const out: number[] = [];
     let count = 0;
     let i = 0;
@@ -1184,8 +1247,24 @@ function eoKind(v: unknown): string {
 /** A failed sharkd call as the panel sees it; filter errors are the caller's to explain. */
 function engineFailure(err: unknown): never {
   if (err instanceof ApiError || err instanceof SharkdError) throw err;
-  if (err instanceof SharkdTooLarge) throw new ApiError(413, "too-large", `${err.message}: for a large stream read its packets with wb.packets({filter, bytes: "payload"})`);
+  if (err instanceof SharkdTooLarge) throw new ApiError(413, "too-large", `${err.message}: ask for less`);
   throw new ApiError(500, "internal", `the panel engine failed: ${printable((err as Error).message)}`, { retryMs: 1000 });
+}
+
+/** Whether `file` on disk is still the one with this inode and first bytes. */
+function sameFile(file: string, id: { ino: number; head: Buffer }): boolean {
+  let fd = -1;
+  try {
+    if (statSync(file).ino !== id.ino) return false;
+    fd = openSync(file, "r");
+    const head = Buffer.alloc(id.head.length);
+    const n = readSync(fd, head, 0, head.length, 0);
+    return head.subarray(0, n).equals(id.head.subarray(0, n));
+  } catch {
+    return false;
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
 }
 
 function stale(epoch: number): ApiError {

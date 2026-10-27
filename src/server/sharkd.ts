@@ -46,6 +46,7 @@ export interface LuaError {
 }
 
 interface Pending {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -117,7 +118,8 @@ export class Sharkd {
       // Answers come in order: the oldest request in flight asked for it; the rest are lost with the restart
       out = "";
       const mb = Math.round(this.maxAnswer / 1024 / 1024);
-      this.stop(proc, new SharkdTooLarge(`sharkd's answer is longer than ${mb} MB (a whole stream or a huge reassembled packet?) and was refused`));
+      const method = this.pending.values().next().value?.method ?? "?";
+      this.stop(proc, new SharkdTooLarge(`sharkd's answer to "${method}" is longer than ${mb} MB and was refused`));
     });
     let err = "";
     // What sharkd said last, for the message when it dies: not WireBuddy's markers, nor sharkd's routine lines
@@ -254,7 +256,7 @@ export class Sharkd {
         if (this.proc === proc) this.onFailure(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s and was restarted`);
         this.stop(proc, "sharkd restarted after a timeout");
       }, CALL_TIMEOUT_MS);
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      this.pending.set(id, { method, resolve: resolve as (v: unknown) => void, reject, timer });
       proc.stdin.write(request + "\n");
     });
     if (method !== "load") return result;
@@ -313,6 +315,24 @@ export class Sharkd {
     this.stop(proc, "sharkd closed");
     proc.stdin.end();
   }
+}
+
+/** The frames `filter` matches, read in pages: millions of them in one answer would be too long to read. */
+export async function matchingFrames(engine: Sharkd, filter: string, pageRows = 1_000_000): Promise<Int32Array> {
+  const parts: Int32Array[] = [];
+  for (let skip = 0; ; skip += pageRows) {
+    const rows = await engine.call<{ num: number }[]>("frames", { filter, ...(skip ? { skip } : {}), limit: pageRows, column0: "frame.number:0" });
+    parts.push(Int32Array.from(rows, (r) => r.num));
+    if (rows.length < pageRows) break;
+  }
+  if (parts.length === 1) return parts[0];
+  const out = new Int32Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
 }
 
 /** Reads sharkd's startup stderr: WireBuddy's loader markers and Lua load errors. */

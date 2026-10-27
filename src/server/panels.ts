@@ -537,6 +537,11 @@ export class Panels extends EventEmitter {
     if (this.byLabel.get(inst.label) !== inst) return this.apiError(res, inst, new ApiError(404, "gone", "the panel was closed"));
     const out = answer.kind === "json" ? Buffer.from(JSON.stringify(answer.body)) : answer.body;
     if (this.sending && this.sending + out.length > MAX_SENDING) return this.apiError(res, inst, new ApiError(429, "busy", "WireBuddy is sending a lot already", { retryMs: 500 }));
+    // The quota again, now that the answer's size is known
+    const since = Date.now() - 60_000;
+    inst.transfers = inst.transfers.filter((t) => t.at > since);
+    const sent = inst.transfers.reduce((a, t) => a + t.bytes, 0);
+    if (sent && sent + out.length > MAX_BYTES_PER_MINUTE) return this.apiError(res, inst, new ApiError(429, "busy", "512 MiB a minute at most", { retryMs: inst.transfers[0].at - since }));
     const headers: Record<string, string> = { ...this.headers(inst), "content-length": String(out.length) };
     if (answer.kind === "json") headers["content-type"] = "application/json";
     else if (answer.kind === "page") headers["content-type"] = "application/vnd.wirebuddy.page";

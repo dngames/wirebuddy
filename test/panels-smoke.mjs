@@ -2,7 +2,7 @@
 // Usage: node test/panels-smoke.mjs   (after npm run build)
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -559,6 +559,21 @@ try {
     assert.equal(warnings.length, 1);
     assert.match(warnings[0].text, /Panels read journal\.pcapng through sharkd only/);
     assert.equal((await pkts({ bytes: "frame" })).n, 3);
+  });
+
+  await check("panel data: a file replaced on disk is not read as the one the view shows", async () => {
+    const shown = join(home, "shown.pcap");
+    const other = join(home, "other.pcap");
+    writeAcmeCapture(shown);
+    copyFileSync(fixture, other);
+    assert.equal((await api("/api/open", { path: shown })).status, 200);
+    renameSync(other, shown);
+    const r = await ownCall("packets", { fields: ["frame.number"] });
+    assert.equal(r.status, 409, r.body);
+    assert.match(JSON.parse(r.body).error, /changed on disk/);
+    // Read again, it is the view's file
+    assert.equal((await api("/api/reload", {})).status, 200);
+    assert.equal((await pkts({ fields: ["frame.number"] })).n, 29);
   });
 
   // Control: what a panel may change in the user's view (relayed by the page after a click), what it keeps, offers
