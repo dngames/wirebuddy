@@ -129,7 +129,7 @@ Extensions are Lua code that runs as you, with access to your files. WireBuddy o
 extensions no other user could have changed (see [SECURITY.md](SECURITY.md)): a shared team
 folder that colleagues can write is ignored, and so is a folder on a network or FUSE filesystem,
 where that can't be checked. Only let an agent write extensions if you would let it run commands,
-and look at what it wrote. Extensions are not supported on Windows.
+and look at what it wrote. Extensions need Linux.
 
 ## Dissector plugins and profiles
 

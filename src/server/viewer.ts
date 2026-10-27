@@ -36,6 +36,9 @@ import type {
   ViewState,
 } from "../shared/api.ts";
 
+/** How a load got past a sharkd crash: back to the extensions before their last change, or without any. */
+type RollBack = false | "reverted" | "suspended";
+
 /** What extensions(action "test") found. */
 export interface ExtensionTest {
   name: string;
@@ -270,29 +273,48 @@ export class Viewer extends EventEmitter {
    * dropped and the result's `filter` is "".
    */
   private async loadInto(engine: Sharkd, file: string, filter: string, fallback = false) {
-    const once = () =>
+    const once = (dropFilter: boolean) =>
       this.crashRetries(async () => {
         await this.current(engine);
         const load = await engine.call<{ status: string; err?: number }>("load", { file });
         // A file still being written ends mid-packet; sharkd reports that but keeps what it read.
         if (load.status !== "OK" && load.err !== -12) throw new Error(load.status);
         const status = await engine.call<SharkdStatus>("status");
-        if (!filter) return { status, displayed: null, filter, rolledBack: false };
+        if (!filter) return { status, displayed: null, filter, rolledBack: false as RollBack };
         try {
-          return { status, displayed: await this.matchingFrames(engine, filter), filter, rolledBack: false };
+          return { status, displayed: await this.matchingFrames(engine, filter), filter, rolledBack: false as RollBack };
         } catch (err) {
-          if (!(err instanceof SharkdError) || !fallback) throw err;
-          return { status, displayed: null, filter: "", rolledBack: false };
+          if (!(err instanceof SharkdError) || !dropFilter) throw err;
+          return { status, displayed: null, filter: "", rolledBack: false as RollBack };
         }
       });
     try {
-      return await once();
+      return await once(fallback);
     } catch (err) {
-      // Died reading the packets with extensions: without the last change to them, or without any
       if (!(err instanceof SharkdExit) || !this.extensions.any()) throw err;
-      const how = this.extensions.revert() ? "the extensions it had before their last change" : "no extensions until they are reloaded";
-      this.events.add("ERROR", `sharkd crashed reading ${basename(file)} with the extensions (${printable(err.message)}); the view uses ${how}. Find the culprit with extensions(action "test")`);
-      return { ...(await once()), rolledBack: true };
+      // Without the extensions' last change, then without any; if it still dies, they weren't the cause
+      const before = this.extensions.saved();
+      const steps: [RollBack, () => boolean, string][] = [
+        ["reverted", () => this.extensions.revert(), "without the last change to the extensions"],
+        ["suspended", () => (this.extensions.suspend(), true), "without extensions until they are reloaded"],
+      ];
+      for (const [kind, step, how] of steps) {
+        if (!step()) continue;
+        try {
+          // A filter on a protocol that went with the extensions would fail every later reload
+          const result = await once(true);
+          const cleared = result.filter !== filter ? `; the display filter "${filter}" was cleared` : "";
+          this.problem(`sharkd crashed reading ${basename(file)} with the extensions (${printable(err.message)}), so it reads it ${how}${cleared}. Test the extensions to find the one at fault (extensions action "test")`);
+          return { ...result, rolledBack: kind };
+        } catch (again) {
+          if (!(again instanceof SharkdExit)) {
+            this.extensions.restore(before);
+            throw again;
+          }
+        }
+      }
+      this.extensions.restore(before);
+      throw err;
     }
   }
 
@@ -392,7 +414,7 @@ export class Viewer extends EventEmitter {
   }
 
   /** `dropped`: the display filter didn't apply any more (only with `fallback`); `rolledBack`: extensions crashed sharkd. */
-  private async reloadNow(force: boolean, fallback = false): Promise<{ dropped: boolean; rolledBack: boolean }> {
+  private async reloadNow(force: boolean, fallback = false): Promise<{ dropped: boolean; rolledBack: RollBack }> {
     const file = this.state.file;
     if (!file) return { dropped: false, rolledBack: false };
     const size = safeSize(file);
@@ -1058,7 +1080,7 @@ export class Viewer extends EventEmitter {
       else this.extensions.refresh();
       this.forgetLuaErrors();
       const filter = this.state.filter;
-      let rolledBack = false;
+      let rolledBack: RollBack = false;
       try {
         if (this.state.file) {
           const r = await this.reloadNow(true, true);
@@ -1078,10 +1100,17 @@ export class Viewer extends EventEmitter {
         this.refreshExtensions();
       }
       if (rolledBack) {
-        // The one switched on crashed it: it stays off
-        if (change?.on) this.extensions.setEnabled(change.name, false, "sharkd crashed reading the capture with it");
+        // Going back without the one switched on fixed it: it stays off
+        const culprit = change?.on && rolledBack === "reverted";
+        if (culprit) this.extensions.setEnabled(change.name, false, "sharkd crashed reading the capture with it");
         this.refreshExtensions();
-        throw new ReportedError(change?.on ? `"${change.name}" crashed sharkd reading the capture and stays off` : "sharkd crashed reading the capture with the extensions as they are now, so the view keeps the ones it had");
+        throw new ReportedError(
+          culprit
+            ? `"${change.name}" crashed sharkd reading the capture and stays off`
+            : rolledBack === "reverted"
+              ? "sharkd crashed reading the capture with the extensions as they are now, so the view keeps the ones it had"
+              : "sharkd crashed reading the capture with the extensions, so the view runs without extensions until they are reloaded",
+        );
       }
       await this.engine.luaLoaded();
       this.refreshExtensions();

@@ -7,6 +7,8 @@ const MAX_REQUEST_BYTES = 8190;
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Of a stderr line without an end (a plugin writing on and on), only this much is kept. */
 const MAX_PARTIAL_LINE = 64 * 1024;
+/** What sharkd writes to stderr in normal operation. */
+const ROUTINE = /^(load: filename=|sharkd_session_|Hello in child\.)/;
 
 export class SharkdError extends Error {
   constructor(
@@ -17,7 +19,7 @@ export class SharkdError extends Error {
   }
 }
 
-/** sharkd died (crashed, or a plugin ended it). */
+/** sharkd died (crashed, or a plugin ended it), or hung and was killed. */
 export class SharkdExit extends Error {}
 
 /** What sharkd's Lua loading said while it started. */
@@ -55,7 +57,6 @@ export class Sharkd {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
   private pending = new Map<number, Pending>();
-  private stderrTail = "";
   private lastLoad: Record<string, unknown> | undefined;
   /** The file the last load was for, also while it is still loading. */
   private loadingFile = "";
@@ -106,8 +107,11 @@ export class Sharkd {
       if (this.proc === proc) out = this.onData(out, chunk);
     });
     let err = "";
+    // What sharkd said last, for the message when it dies: not WireBuddy's markers, nor sharkd's routine lines
+    let said = "";
     const errLine = (line: string): void => {
       line = line.replace(/\r$/, "");
+      if (line.trim() && !line.includes("WIREBUDDY-") && !ROUTINE.test(line)) said = line.trim();
       const at = line.indexOf("WIREBUDDY-LUA-ERROR\t");
       if (at < 0) return lua.line(line);
       const [, frame, message = ""] = line.slice(at).split("\t");
@@ -115,7 +119,6 @@ export class Sharkd {
     };
     proc.stderr.setEncoding("utf8");
     proc.stderr.on("data", (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-2000);
       // WireBuddy's markers start on a new line: cutting a long unfinished one loses none
       let start = 0;
       for (let nl = chunk.indexOf("\n"); nl >= 0; nl = chunk.indexOf("\n", start)) {
@@ -137,7 +140,7 @@ export class Sharkd {
       let blamed: string | undefined;
       if (this.stopped.has(proc)) ready(null);
       else blamed = lua.died();
-      const detail = printable(this.stderrTail.split("\n").filter((l) => l.trim() && !l.includes("WIREBUDDY-")).pop()?.trim() ?? "");
+      const detail = printable(said.slice(0, 300));
       const message = `sharkd exited (${signal ?? code})${detail ? ": " + detail : ""}`;
       // Still current: it died by itself, not by close() or a timeout kill
       if (this.proc === proc && !blamed) this.onFailure(message);
@@ -234,7 +237,7 @@ export class Sharkd {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         this.settled();
-        reject(new Error(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s`));
+        reject(new SharkdExit(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s`));
         if (this.proc === proc) this.onFailure(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s and was restarted`);
         this.stop(proc, "sharkd restarted after a timeout");
       }, CALL_TIMEOUT_MS);

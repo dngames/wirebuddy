@@ -40,12 +40,14 @@ Supported versions: the latest `main` and the latest release.
   from `/` down belongs to root or the user and only they can write it (a group counts only when
   it is the user's own private group and no ACL lets others in; sticky folders like `/tmp` protect
   only the user's entries), or a folder of the user's on the way is closed to others and the
-  extension is on the same filesystem. Its files must be regular files, not symbolic links, and are
-  checked again as they are read. Folders on network or FUSE filesystems, whose owners and modes
-  don't say who can write, and folders that fail these checks are not looked into.
+  extension is on the same filesystem. The extension folders and files themselves must belong to
+  the user (or root), be writable only by them, and be on the same filesystem; files must be regular
+  files with a single hard link, not symbolic links, and are checked again as they are read.
+  Folders on network or FUSE filesystems, whose owners and modes don't say who can write, and
+  folders that fail these checks are not looked into.
 - On every reload WireBuddy copies the extensions into its own plugin folder, created fresh with a
   random name in a folder only the user can write; `sharkd` and Wireshark load those copies.
-- Extensions are not supported on Windows, where these checks don't apply.
+- Extensions are only supported on Linux, where these checks apply.
 - Packet contents are untrusted and are always rendered as text, never as HTML.
 - Problems in the viewer and what the user does there are reported to the attached agent
   (`--watch` reads them through an instance file only the user can read).

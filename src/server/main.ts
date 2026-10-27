@@ -93,7 +93,12 @@ const viewer = new Viewer({
   mergecap: which("mergecap") ?? "mergecap",
   extensions,
 });
-viewer.refreshExtensions();
+// The status bar's count only: never a reason not to start
+try {
+  viewer.refreshExtensions();
+} catch (err) {
+  log(`extensions: ${(err as Error).message}`);
+}
 const tlsKeylog = values["tls-keylog"];
 if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(`TLS key log: ${(err as Error).message}`));
 else void viewer.loadTlsPreference();
