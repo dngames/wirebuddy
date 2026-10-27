@@ -4,12 +4,22 @@
  * list. The panel engine starts on the first request, reads the view's file
  * again when it changes (a growing live file at most once a second), lets the
  * open panels take turns, and stops a minute after the last panel closed.
+ *
+ * Raw packets need no sharkd: when the file is uncompressed pcap or pcapng,
+ * FrameStore reads times, lengths, frame/IP/payload bytes and raw matches
+ * straight from it, also ahead of the view while the file grows. Such pages
+ * are never `pending` (each request reads the file's end); a "packets" event
+ * says when it grew. Pages that need the engine are `pending` while it has
+ * read fewer packets than the view or FrameStore know of.
  */
 
+import { isIPv4, isIPv6 } from "node:net";
+import { basename } from "node:path";
 import type { PanelView } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import type { EventLog } from "./events.ts";
-import { findLayer } from "./layers.ts";
+import { FrameStore } from "./framestore.ts";
+import { findLayer, parse, Parsed, type Layer } from "./layers.ts";
 import { Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
 import { printable } from "./text.ts";
 import { encodePage, type PageRow } from "./wbpk.ts";
@@ -30,8 +40,15 @@ const MAX_FIELDS = 16;
 const MAX_FILTER = 4096;
 const MAX_RANGES = 10_000;
 const DEFAULT_LIMIT = 1000;
-/** Packets per page: without fields or bytes, with fields, with bytes (one sharkd call per packet). */
+/** Packets per page: without fields (bytes from FrameStore), with fields, with bytes from sharkd (one call per packet). */
 const MAX_LIMIT = { plain: 50_000, fields: 5_000, bytes: 2_000 };
+/** Packets read from FrameStore at once: for a page, and while matching. */
+const RAW_BATCH = 2048;
+const SCAN_BATCH = 65_536;
+/** Values a match key may list. */
+const MAX_MATCH_VALUES = 64;
+/** IP protocols by name, for match.proto. */
+const PROTOS: Record<string, number> = { icmp: 1, igmp: 2, tcp: 6, udp: 17, dccp: 33, gre: 47, esp: 50, ah: 51, icmpv6: 58, ospf: 89, pim: 103, vrrp: 112, sctp: 132, udplite: 136 };
 const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_BYTES = 16 * 1024 * 1024;
 const MAX_OBJECT = 64 * 1024 * 1024;
@@ -135,6 +152,12 @@ export class PanelData {
   private readonly sets = new Map<string, unknown>();
   /** The last stream followed, decoded. */
   private lastFollow: { seq: number; key: string; result: FollowData } | null = null;
+  /** The view's file as FrameStore reads it; kept over epochs that leave the file as it was. */
+  private store: { store: FrameStore; epoch: number; checked: boolean } | null = null;
+  /** Frames of raw matches in the store's file, by match. */
+  private readonly matchSets = new Map<string, MatchScan>();
+  /** Panels that read from FrameStore: they hear when the file grows. */
+  private readonly tailers = new Set<string>();
 
   constructor(
     private readonly opts: {
@@ -156,16 +179,34 @@ export class PanelData {
   /** A panel closed: its waiting requests end, and the engine stops a while after the last one. */
   closed(label: string): void {
     this.open.delete(label);
+    this.tailers.delete(label);
     for (const w of this.waiting.get(label) ?? []) w.fail(new ApiError(404, "gone", "the panel was closed"));
     this.waiting.delete(label);
     this.idle();
+  }
+
+  /** Whether the panel reads from FrameStore, so a growing file is worth watching for it. */
+  tailing(label: string): boolean {
+    return this.tailers.has(label);
+  }
+
+  /** Indexes what the view's file gained: how many packets FrameStore knows now, or null without it. */
+  async tail(): Promise<number | null> {
+    const store = this.storeOf(this.opts.source.epoch(), false);
+    if (!store || store.off || store.changed) return null;
+    try {
+      await store.update();
+    } catch {
+      return null;
+    }
+    return store.off || store.changed ? null : store.count;
   }
 
   /** Stops the engine IDLE_STOP_MS after no panel is open. */
   private idle(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    if (this.open.size || !this.engine) return;
+    if (this.open.size || (!this.engine && !this.store)) return;
     this.idleTimer = setTimeout(() => this.close(), IDLE_STOP_MS);
     this.idleTimer.unref();
   }
@@ -182,6 +223,97 @@ export class PanelData {
     this.cache.clear();
     this.sets.clear();
     this.lastFollow = null;
+    this.dropStore();
+  }
+
+  private dropStore(): void {
+    this.store?.store.close();
+    this.store = null;
+    this.matchSets.clear();
+  }
+
+  /**
+   * FrameStore of the view's file for `epoch`: the one in use while the file is
+   * the same, else a new one (with `create`); null without a file.
+   */
+  private storeOf(epoch: number, create = true): FrameStore | null {
+    const file = this.opts.source.file();
+    const s = this.store;
+    if (s && (s.store.file !== file || (s.epoch !== epoch && !s.store.same()))) this.dropStore();
+    if (!file || (!this.store && !create)) return null;
+    this.store ??= { store: new FrameStore(file), epoch, checked: false };
+    this.store.epoch = epoch;
+    return this.store.store;
+  }
+
+  /** FrameStore indexed up to the file's end, or null when it can't read the file (see noStore). */
+  private async frameStore(epoch: number): Promise<FrameStore | null> {
+    const source = this.opts.source;
+    const store = this.storeOf(epoch);
+    if (!store) throw new ApiError(409, "no-capture", "no capture is open");
+    try {
+      await store.update();
+    } catch (err) {
+      throw new ApiError(500, "internal", `reading the capture failed: ${printable((err as Error).message)}`, { retryMs: 1000 });
+    }
+    if (source.epoch() !== epoch) throw stale(source.epoch());
+    if (store.changed) throw new ApiError(409, "stale", "the capture file was replaced or cut: start over once WireBuddy read it again", { epoch, retryMs: 2000 });
+    const s = this.store;
+    if (s?.store === store && !s.checked && !store.off) {
+      s.checked = true;
+      // A live file grows meanwhile; a finished one must have Wireshark's packets, numbered alike
+      if (!source.live() && store.count !== source.totalFrames()) {
+        store.off = `WireBuddy's own reading found ${store.count} packets, Wireshark ${source.totalFrames()}`;
+        this.opts.events.add("WARNING", `Panels read ${basename(store.file)} through sharkd only (slower, no match): ${store.off}`);
+      }
+    }
+    return store.off ? null : store;
+  }
+
+  /** Why a match can't be answered for the view's file. */
+  private noStore(): string {
+    const store = this.store?.store;
+    return `match reads the capture file itself, and it can't read ${basename(store?.file ?? "")}: ${store?.off ?? "no file"}. Use a display filter instead, e.g. filter: "udp.port == 7502"`;
+  }
+
+  /** The frames of `m` in the store's file, scanning what was added since last time. */
+  private async matchSet(store: FrameStore, m: Match): Promise<FrameSet> {
+    let s = this.matchSets.get(m.key);
+    if (s) this.matchSets.delete(m.key);
+    else s = { test: m.test, ranges: new Int32Array(64), used: 0, count: 0, scanned: 0, snap: null, scanning: null };
+    this.matchSets.set(m.key, s);
+    if (this.matchSets.size > MAX_CACHED_SETS) this.matchSets.delete(this.matchSets.keys().next().value!);
+    const scan = s;
+    while (scan.scanned < store.count) {
+      scan.scanning ??= this.scan(store, scan).finally(() => (scan.scanning = null));
+      await scan.scanning;
+    }
+    if (scan.snap?.count !== scan.count) scan.snap = FrameSet.ofRanges(scan.ranges.slice(0, scan.used), scan.count);
+    return scan.snap;
+  }
+
+  private async scan(store: FrameStore, s: MatchScan): Promise<void> {
+    const parsed = new Parsed();
+    const to = store.count;
+    for (let from = s.scanned + 1; from <= to; from += SCAN_BATCH) {
+      const last = Math.min(to, from + SCAN_BATCH - 1);
+      await store.readRange(from, last, (frame, _time, _len, link, data) => {
+        if (!s.test(data, parse(data, link, parsed))) return;
+        const u = s.used;
+        if (u && s.ranges[u - 1] === frame - 1) s.ranges[u - 1] = frame;
+        else {
+          if (u + 2 > s.ranges.length) {
+            const grown = new Int32Array(s.ranges.length * 2);
+            grown.set(s.ranges);
+            s.ranges = grown;
+          }
+          s.ranges[u] = s.ranges[u + 1] = frame;
+          s.used += 2;
+        }
+        s.count++;
+      });
+      s.scanned = last;
+    }
   }
 
   /** Answers a panel's data request; `label` is the panel's instance. */
@@ -312,7 +444,9 @@ export class PanelData {
         if (!file) throw new ApiError(409, "no-capture", "no capture is open");
         if (source.epoch() !== epoch) throw stale(source.epoch());
         const was = this.loaded;
-        if (was && was.file === file && was.epoch === epoch && (source.totalFrames() <= was.frames || Date.now() - was.at < LIVE_LOAD_MS)) return was;
+        // FrameStore may know of packets the view hasn't read yet
+        const known = Math.max(source.totalFrames(), source.live() ? this.storeCount() : 0);
+        if (was && was.file === file && was.epoch === epoch && (known <= was.frames || Date.now() - was.at < LIVE_LOAD_MS)) return was;
         const r = await engine.call<{ status: string; err?: number }>("load", { file });
         // A file still being written ends mid-packet; sharkd keeps what it read
         if (r.status !== "OK" && r.err !== -12) throw new ApiError(500, "internal", `the panel engine could not read the capture: ${printable(r.status)}`);
@@ -325,6 +459,12 @@ export class PanelData {
       },
       LOAD_BUDGET_MS,
     );
+  }
+
+  /** Packets FrameStore knows of in the view's file, 0 without it. */
+  private storeCount(): number {
+    const s = this.store;
+    return s && !s.store.off && !s.store.changed && s.store.file === this.opts.source.file() ? s.store.count : 0;
   }
 
   /** `make()`'s value, kept for the current load in `map` (the most recently used `max` of them). */
@@ -384,21 +524,34 @@ export class PanelData {
     const bytes = q.bytes === undefined ? "none" : str(q.bytes, "bytes", 128);
     const layer = bytes === "none" || bytes === "frame" || bytes === "ip" || bytes === "payload" ? bytes : fieldName(bytes, "bytes");
     const filter = q.filter === undefined ? "" : str(q.filter, "filter", MAX_FILTER).trim();
+    const match = q.match === undefined ? null : rawMatch(q.match);
     const after = int(q.after, "after", 0, 0);
-    const cap = layer !== "none" ? MAX_LIMIT.bytes : fields.length ? MAX_LIMIT.fields : MAX_LIMIT.plain;
-    const limit = Math.min(int(q.limit, "limit", DEFAULT_LIMIT, 1), cap);
+    const requested = int(q.limit, "limit", DEFAULT_LIMIT, 1);
     const maxBytes = int(q.maxBytes, "maxBytes", DEFAULT_MAX_BYTES, 1);
     if (maxBytes > MAX_BYTES) throw new ApiError(413, "too-large", `maxBytes is at most ${MAX_BYTES} (16 MiB)`);
     const which = frameChoice(q.frames);
-
-    const loaded = await this.load(label, epoch);
-    const ctx = { label, loaded };
-    for (const f of fields) await this.checkFilter(ctx, f, "field");
     const fieldBytes = layer !== "none" && layer !== "frame" && layer !== "ip" && layer !== "payload";
-    if (fieldBytes) await this.checkFilter(ctx, layer, "field");
+
+    // Times, lengths, frame/ip/payload bytes and matches from the file itself when FrameStore reads it;
+    // the panel engine for filters, fields, field bytes, and files FrameStore can't read
+    const source = this.opts.source;
+    const [store, early] = await Promise.all([
+      fieldBytes && !match ? null : this.frameStore(epoch),
+      fields.length || filter || fieldBytes ? this.load(label, epoch) : null,
+    ]);
+    if (match && !store) throw new ApiError(400, "bad-args", this.noStore());
+    const raw = store !== null && !fieldBytes;
+    if (raw) this.tailers.add(label);
+    const cap = fields.length ? MAX_LIMIT.fields : fieldBytes || (layer !== "none" && !raw) ? MAX_LIMIT.bytes : MAX_LIMIT.plain;
+    const limit = Math.min(requested, cap);
+    const loaded = early ?? (raw ? null : await this.load(label, epoch));
+    const ctx = loaded ? { label, loaded } : null;
+    for (const f of fields) await this.checkFilter(ctx!, f, "field");
+    if (fieldBytes) await this.checkFilter(ctx!, layer, "field");
+    // As far as every source of this page has read
+    const known = Math.min(loaded ? loaded.frames : Infinity, raw ? store.count : Infinity);
 
     // The set of frames, and the filter whose matches it is exactly (sharkd pages those by position)
-    const source = this.opts.source;
     let set: FrameSet;
     let byFilter = "";
     if (which === "displayed") {
@@ -408,20 +561,25 @@ export class PanelData {
     } else if (which === "selected") set = source.selected();
     else if (which === "marked") set = source.marked();
     else if (which) set = FrameSet.fromRanges(which);
-    else set = FrameSet.all(loaded.frames);
+    else set = FrameSet.all(known);
     // The view's lists are of the file the engine read only while the epoch is the same
-    if (source.epoch() !== loaded.epoch) throw stale(source.epoch());
-    set = set.clip(loaded.frames);
+    if (source.epoch() !== epoch) throw stale(source.epoch());
+    set = set.clip(known);
+    if (match) {
+      set = set.intersect(await this.matchSet(store!, match));
+      byFilter = "";
+      if (source.epoch() !== epoch) throw stale(source.epoch());
+    }
     if (filter) {
-      const m = await this.matching(ctx, filter);
-      set = which ? set.intersect(m) : m;
-      byFilter = which ? "" : filter;
+      const m = await this.matching(ctx!, filter);
+      set = which || match ? set.intersect(m) : m.clip(known);
+      byFilter = which || match ? "" : filter;
     }
 
     const { frames, more } = set.page(after, limit);
     // Third: what the layer is found by, the link type or the field's value
-    const columns = ["frame.time_epoch", "frame.len", ...(layer === "ip" || layer === "payload" ? ["frame.encap_type"] : fieldBytes ? [layer] : []), ...fields];
-    const values = await this.columns(ctx, frames, columns, byFilter, set);
+    const columns = raw ? fields : ["frame.time_epoch", "frame.len", ...(layer === "ip" || layer === "payload" ? ["frame.encap_type"] : fieldBytes ? [layer] : []), ...fields];
+    const values = ctx && columns.length ? await this.columns(ctx, frames, columns, byFilter, set) : null;
     const rows: PageRow[] = [];
     const fieldValues: Record<string, string[]> = Object.fromEntries(fields.map((f) => [f, []]));
     const clipped: [number, string][] = [];
@@ -429,12 +587,12 @@ export class PanelData {
     let dropped = 0;
     let size = 0;
     let cut = false;
-    for (let i = 0; i < frames.length && !cut; i += BYTES_BATCH) {
-      const batch = frames.slice(i, i + BYTES_BATCH).filter((f) => values.has(f));
-      const data = layer === "none" ? null : await this.bytesOf(ctx, batch, layer, values);
+    for (let i = 0; i < frames.length && !cut; i += raw ? RAW_BATCH : BYTES_BATCH) {
+      const batch = frames.slice(i, i + (raw ? RAW_BATCH : BYTES_BATCH)).filter((f) => !values || values.has(f));
+      const got = raw ? await this.fromStore(store, batch, layer) : await this.fromEngine(ctx!, batch, layer, values!);
       for (const [k, frame] of batch.entries()) {
-        const c = values.get(frame)!;
-        const d = data ? data[k] : EMPTY;
+        const c = values?.get(frame) ?? [];
+        const { time, len, data: d } = got[k] ?? { time: NaN, len: 0, data: null };
         const bytesHere = d ?? EMPTY;
         let rowSize = bytesHere.length;
         for (let j = first; j < c.length; j++) rowSize += c[j].length;
@@ -453,9 +611,10 @@ export class PanelData {
           if (v.startsWith(CLIPPED)) clipped.push([rows.length, f]);
           fieldValues[f].push(v);
         }
-        rows.push({ frame, time: c[0] ? Number(c[0]) : NaN, len: Number(c[1]) || 0, data: bytesHere });
+        rows.push({ frame, time, len, data: bytesHere });
       }
     }
+    if (source.epoch() !== epoch) throw stale(source.epoch());
     const last = rows.length ? rows[rows.length - 1].frame : null;
     return encodePage(
       {
@@ -468,10 +627,35 @@ export class PanelData {
         fields: fieldValues,
         clipped,
         dropped,
-        pending: loaded.frames < source.totalFrames(),
+        // FrameStore reads to the file's end on every request: only the engine can be behind
+        pending: loaded ? loaded.frames < Math.max(source.totalFrames(), this.storeCount()) : false,
       },
       rows,
     );
+  }
+
+  /** Time, length and the bytes of `layer` per frame, from the file (null: no such layer). */
+  private async fromStore(store: FrameStore, frames: number[], layer: string): Promise<RowData[]> {
+    const out: RowData[] = [];
+    const parsed = new Parsed();
+    await store.readFrames(frames, (_frame, time, len, link, data) => {
+      let d: Uint8Array | null = layer === "none" ? EMPTY : data;
+      if (layer === "ip" || layer === "payload") {
+        const at = parse(data, link, parsed).range(layer as Layer);
+        d = at ? data.subarray(at[0], at[1]) : null;
+      }
+      out.push({ time, len, data: d });
+    });
+    return out;
+  }
+
+  /** The same from the engine's columns and frames. */
+  private async fromEngine(ctx: Ctx, frames: number[], layer: string, values: Map<number, string[]>): Promise<RowData[]> {
+    const data = layer === "none" ? null : await this.bytesOf(ctx, frames, layer, values);
+    return frames.map((frame, k) => {
+      const c = values.get(frame)!;
+      return { time: c[0] ? Number(c[0]) : NaN, len: Number(c[1]) || 0, data: data ? data[k] : EMPTY };
+    });
   }
 
   /** Column values per frame: one sharkd call per page of a filter, else per stretch of nearby frames. */
@@ -527,6 +711,9 @@ export class PanelData {
     const tree = q.tree === undefined ? true : bool(q.tree, "tree");
     const bytes = q.bytes === undefined ? true : bool(q.bytes, "bytes");
     const loaded = await this.load(label, epoch);
+    if (frame > loaded.frames && this.opts.source.live() && frame <= this.storeCount()) {
+      throw new ApiError(429, "busy", `the panel engine has not read frame ${frame} of the live file yet`, { retryMs: LIVE_LOAD_MS });
+    }
     if (frame > loaded.frames) throw new ApiError(404, "gone", `no frame ${frame}: the capture has ${loaded.frames}`);
     const r = await this.run(
       label,
@@ -700,6 +887,130 @@ interface FollowData {
   server: { host: string; port: string; bytes: number };
 }
 
+/** A packet of a page: data null when it has no such layer. */
+interface RowData {
+  time: number;
+  len: number;
+  data: Uint8Array | null;
+}
+
+/** A raw match: its cache key and its test on a parsed frame. */
+interface Match {
+  key: string;
+  test: (b: Uint8Array, p: Parsed) => boolean;
+}
+
+/** The frames a match found so far, as ranges [a0, b0, a1, b1, ...] in ranges[0, used). */
+interface MatchScan {
+  test: Match["test"];
+  ranges: Int32Array;
+  used: number;
+  count: number;
+  /** Frames 1..scanned are looked at. */
+  scanned: number;
+  snap: FrameSet | null;
+  scanning: Promise<void> | null;
+}
+
+/** An address or a network: its bytes and how many leading bits count. */
+interface Prefix {
+  bytes: Uint8Array;
+  bits: number;
+}
+
+const MATCH_KEYS = ["proto", "port", "srcport", "dstport", "addr", "src", "dst", "ethertype", "vlan"];
+
+/** Checks and compiles q.match: every key must hold (each a value, or a list of which one must). */
+export function rawMatch(v: unknown): Match {
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new ApiError(400, "bad-args", `match is an object with any of ${MATCH_KEYS.join(", ")}`);
+  const m = v as Record<string, unknown>;
+  for (const k of Object.keys(m)) if (!MATCH_KEYS.includes(k)) throw new ApiError(400, "bad-args", `match has no key "${printable(k).slice(0, 40)}": ${MATCH_KEYS.join(", ")}`);
+  const values = (k: string): unknown[] | null => {
+    if (m[k] === undefined) return null;
+    const list = Array.isArray(m[k]) ? (m[k] as unknown[]) : [m[k]];
+    if (!list.length || list.length > MAX_MATCH_VALUES) throw new ApiError(400, "bad-args", `match.${k} is a value or a list of 1 to ${MAX_MATCH_VALUES}`);
+    return list;
+  };
+  const numbers = (k: string, max: number, names: Record<string, number> = {}): Set<number> | null => {
+    const list = values(k);
+    if (!list) return null;
+    return new Set(
+      list.map((x) => {
+        const n = typeof x === "string" ? names[x.toLowerCase()] : x;
+        if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > max) {
+          const named = Object.keys(names).length ? ` or one of ${Object.keys(names).join(", ")}` : "";
+          throw new ApiError(400, "bad-args", `match.${k}: ${printable(JSON.stringify(x) ?? "").slice(0, 40)} is not a number from 0 to ${max}${named}`);
+        }
+        return n;
+      }),
+    );
+  };
+  const prefixes = (k: string): Prefix[] | null => values(k)?.map((x) => prefix(k, x)) ?? null;
+  const proto = numbers("proto", 255, PROTOS);
+  const [port, srcport, dstport] = [numbers("port", 65535), numbers("srcport", 65535), numbers("dstport", 65535)];
+  const [ethertype, vlan] = [numbers("ethertype", 65535), numbers("vlan", 4095)];
+  const [addr, src, dst] = [prefixes("addr"), prefixes("src"), prefixes("dst")];
+  const canon = (x: Set<number> | Prefix[] | null) => (x instanceof Set ? [...x].sort((a, b) => a - b) : x?.map((p) => `${[...p.bytes].join(".")}/${p.bits}`).sort());
+  const key = JSON.stringify(MATCH_KEYS.map((k, i) => [k, canon([proto, port, srcport, dstport, addr, src, dst, ethertype, vlan][i])]));
+  return {
+    key,
+    test: (b, p) =>
+      (!proto || proto.has(p.proto)) &&
+      (!port || port.has(p.srcport) || port.has(p.dstport)) &&
+      (!srcport || srcport.has(p.srcport)) &&
+      (!dstport || dstport.has(p.dstport)) &&
+      (!ethertype || ethertype.has(p.ethertype)) &&
+      (!vlan || p.vlans.some((id) => vlan.has(id))) &&
+      (!addr || within(addr, b, p.src, p.ip) || within(addr, b, p.dst, p.ip)) &&
+      (!src || within(src, b, p.src, p.ip)) &&
+      (!dst || within(dst, b, p.dst, p.ip)),
+  };
+}
+
+/** "10.0.0.1", "10.0.0.0/8", "fe80::1", "2001:db8::/32". */
+function prefix(k: string, x: unknown): Prefix {
+  const bad = (): never => {
+    throw new ApiError(400, "bad-args", `match.${k}: ${printable(JSON.stringify(x) ?? "").slice(0, 60)} is not an IPv4 or IPv6 address (or network, "10.0.0.0/8")`);
+  };
+  if (typeof x !== "string" || x.length > 64) return bad();
+  const [ip, len, ...rest] = x.split("/");
+  const bytes = ipBytes(ip);
+  if (!bytes || rest.length) return bad();
+  const bits = len === undefined ? bytes.length * 8 : /^\d{1,3}$/.test(len) ? Number(len) : -1;
+  if (bits < 0 || bits > bytes.length * 8) return bad();
+  return { bytes, bits };
+}
+
+function ipBytes(s: string): Uint8Array | null {
+  if (isIPv4(s)) return Uint8Array.from(s.split(".").map(Number));
+  if (!isIPv6(s) || s.includes("%")) return null;
+  const groups = (part: string): number[] =>
+    part
+      ? part.split(":").flatMap((g) => {
+          if (!g.includes(".")) return [parseInt(g, 16)];
+          const [a, b, c, d] = g.split(".").map(Number);
+          return [(a << 8) | b, (c << 8) | d];
+        })
+      : [];
+  const [head, tail] = s.includes("::") ? s.split("::") : [s, ""];
+  const h = groups(head);
+  const t = groups(tail);
+  const all = [...h, ...new Array<number>(8 - h.length - t.length).fill(0), ...t];
+  return Uint8Array.from(all.flatMap((g) => [g >> 8, g & 255]));
+}
+
+/** Whether the IPv`ip` address at `at` in `b` lies in one of the prefixes. */
+function within(prefixes: Prefix[], b: Uint8Array, at: number, ip: number): boolean {
+  if (at < 0) return false;
+  return prefixes.some(({ bytes, bits }) => {
+    if (bytes.length !== (ip === 4 ? 4 : 16) || at + bytes.length > b.length) return false;
+    let i = 0;
+    for (; i < bits >> 3; i++) if (b[at + i] !== bytes[i]) return false;
+    const rest = bits & 7;
+    return !rest || ((b[at + i] ^ bytes[i]) & (0xff00 >> rest) & 0xff) === 0;
+  });
+}
+
 const EMPTY = new Uint8Array(0);
 
 /** Ascending frame numbers as inclusive ranges, flat: [a0, b0, a1, b1, ...]. */
@@ -714,6 +1025,11 @@ export class FrameSet {
 
   static all(n: number): FrameSet {
     return n > 0 ? new FrameSet(Int32Array.of(1, n), n) : new FrameSet(new Int32Array(0), 0);
+  }
+
+  /** Of ranges already ascending, apart and merged, holding `count` frames. */
+  static ofRanges(r: Int32Array, count: number): FrameSet {
+    return new FrameSet(r, count);
   }
 
   /** From ascending frame numbers (duplicates allowed). */

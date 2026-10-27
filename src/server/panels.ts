@@ -35,6 +35,9 @@ const MAX_FRAMES_PER_SECOND = 20;
 /** View events at most this often; a comment keeps idle event streams open. */
 const VIEW_EVERY_MS = 250;
 const HEARTBEAT_MS = 15_000;
+/** A file panels read raw is looked at this often for new packets; "packets" events at most this often. */
+const TAIL_MS = 200;
+const PACKETS_EVERY_MS = 200;
 
 type Health = "not-responding" | "responding" | "stopped" | "navigated" | "isolated" | "not-isolated" | "flooding";
 
@@ -64,6 +67,10 @@ interface Instance {
   /** Event streams of its page, and what they were sent last. */
   streams: Set<ServerResponse>;
   sent: { view: string; epoch: number; frames: number };
+  /** The last "packets" event, and the count held back until PACKETS_EVERY_MS passed. */
+  packetsAt: number;
+  packetsTimer: NodeJS.Timeout | null;
+  packetsDue: number;
   inFlight: number;
   /** Bytes sent per answer, for the per-minute quota. */
   transfers: { at: number; bytes: number }[];
@@ -92,6 +99,8 @@ export class Panels extends EventEmitter {
   private data: PanelData | null = null;
   private viewTimer: NodeJS.Timeout | null = null;
   private heartbeat: NodeJS.Timeout | null = null;
+  private tailTimer: NodeJS.Timeout | null = null;
+  private tailing = false;
   /** Bytes of panel answers being sent now. */
   private sending = 0;
 
@@ -159,6 +168,9 @@ export class Panels extends EventEmitter {
       waiters: [],
       streams: new Set(),
       sent: { view: "", epoch: 0, frames: 0 },
+      packetsAt: 0,
+      packetsTimer: null,
+      packetsDue: 0,
       inFlight: 0,
       transfers: [],
       frameCalls: [],
@@ -187,6 +199,7 @@ export class Panels extends EventEmitter {
     this.byLabel.delete(inst.label);
     for (const wake of inst.waiters.splice(0)) wake();
     this.endStreams(inst, why);
+    if (inst.packetsTimer) clearTimeout(inst.packetsTimer);
     this.data?.closed(inst.label);
     return true;
   }
@@ -216,16 +229,55 @@ export class Panels extends EventEmitter {
     for (const inst of this.open.values()) {
       if (!inst.streams.size) continue;
       const sent = inst.sent;
+      const reset = view.epoch !== sent.epoch;
       for (const res of inst.streams) {
         // A reset carries the new view: the page starts over from it
-        if (view.epoch !== sent.epoch) sse(res, "reset", { epoch: view.epoch, why: this.source.resetWhy(), view });
-        else {
-          if (view.frames > sent.frames) sse(res, "packets", { frames: view.frames, live: view.live });
-          if (json !== sent.view) res.write(`event: view\ndata: ${json}\n\n`);
-        }
+        if (reset) sse(res, "reset", { epoch: view.epoch, why: this.source.resetWhy(), view });
+        else if (json !== sent.view) res.write(`event: view\ndata: ${json}\n\n`);
       }
-      inst.sent = { view: json, epoch: view.epoch, frames: view.frames };
+      inst.sent = { view: json, epoch: view.epoch, frames: reset ? view.frames : sent.frames };
+      if (reset) inst.packetsDue = view.frames;
+      else this.packets(inst, view.frames);
     }
+  }
+
+  /** Tells a panel's page there are `frames` packets now (FrameStore may know more than the view), at most every PACKETS_EVERY_MS. */
+  private packets(inst: Instance, frames: number): void {
+    inst.packetsDue = Math.max(inst.packetsDue, frames);
+    if (inst.packetsDue <= inst.sent.frames || !inst.streams.size || inst.packetsTimer) return;
+    const wait = inst.packetsAt + PACKETS_EVERY_MS - Date.now();
+    if (wait > 0) {
+      inst.packetsTimer = setTimeout(() => {
+        inst.packetsTimer = null;
+        this.packets(inst, 0);
+      }, wait);
+      return;
+    }
+    inst.packetsAt = Date.now();
+    inst.sent.frames = inst.packetsDue;
+    for (const res of inst.streams) sse(res, "packets", { frames: inst.packetsDue, live: this.source?.live() ?? false });
+  }
+
+  /** Watches the file while a panel that reads it raw listens: its page hears of new packets within TAIL_MS. */
+  private tail(): void {
+    const wanted = (): boolean => [...this.open.values()].some((i) => i.streams.size && this.data?.tailing(i.label));
+    if (this.tailTimer || !wanted()) return;
+    this.tailTimer = setInterval(async () => {
+      if (!wanted()) {
+        clearInterval(this.tailTimer!);
+        this.tailTimer = null;
+        return;
+      }
+      if (this.tailing || !this.data) return;
+      this.tailing = true;
+      try {
+        const frames = await this.data.tail().catch(() => null);
+        if (frames !== null) for (const inst of this.open.values()) this.packets(inst, frames);
+      } finally {
+        this.tailing = false;
+      }
+    }, TAIL_MS);
+    this.tailTimer.unref();
   }
 
   /** Waits until the panel is ready, failed, or `ms` passed; then what it reported. */
@@ -421,6 +473,7 @@ export class Panels extends EventEmitter {
     }
     inst.transfers.push({ at: Date.now(), bytes: out.length });
     this.sending += out.length;
+    if (method === "packets") this.tail();
     let counted = true;
     const done = (): void => {
       if (counted) this.sending -= out.length;
@@ -448,7 +501,7 @@ export class Panels extends EventEmitter {
     if (view) {
       const json = JSON.stringify(view);
       res.write(`event: view\ndata: ${json}\n\n`);
-      if (!inst.streams.size) inst.sent = { view: json, epoch: view.epoch, frames: view.frames };
+      if (!inst.streams.size) [inst.sent, inst.packetsDue] = [{ view: json, epoch: view.epoch, frames: view.frames }, view.frames];
     }
     inst.streams.add(res);
     res.on("close", () => {
@@ -456,6 +509,7 @@ export class Panels extends EventEmitter {
       this.beat();
     });
     this.beat();
+    this.tail();
     return true;
   }
 

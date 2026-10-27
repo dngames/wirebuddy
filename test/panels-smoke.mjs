@@ -1,13 +1,15 @@
-// Panels over HTTP: validity and trust, the panel host's routes, headers and checks, reports.
+// Panels over HTTP: validity and trust, the panel host's routes, headers and checks, reports, the capture's data.
 // Usage: node test/panels-smoke.mjs   (after npm run build)
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
+import * as g from "./capgen.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -331,6 +333,66 @@ try {
     assert.equal(one.n, 1);
   });
 
+  await check("panel data: raw matches, alone and with frames and filters, are what sharkd's filters find", async () => {
+    const pkts = async (body) => {
+      const r = await call("packets", body);
+      assert.equal(r.status, 200, r.body);
+      return decodePage(r.raw);
+    };
+    const byFilter = async (filter) => (await pkts({ filter })).frames;
+    for (const [match, filter] of [
+      [{ proto: "tcp" }, "tcp"],
+      [{ proto: 6, dstport: 18080 }, "tcp.dstport == 18080"],
+      [{ srcport: 18080 }, "tcp.srcport == 18080"],
+      [{ port: [18080, 1] }, "tcp.port == 18080 || tcp.port == 1"],
+      [{ addr: "127.0.0.0/8", ethertype: 0x0800 }, "ip.addr == 127.0.0.0/8"],
+      [{ src: "127.0.0.1", dst: ["10.0.0.1", "127.0.0.1"] }, "ip.src == 127.0.0.1"],
+    ]) {
+      const page = await pkts({ match });
+      assert.deepEqual(page.frames, await byFilter(filter), JSON.stringify(match));
+      assert.equal(page.total, page.n);
+    }
+    for (const match of [{ proto: "udp" }, { addr: "::1" }, { vlan: 5 }, { addr: "10.0.0.0/8" }]) {
+      const none = await pkts({ match });
+      assert.deepEqual([none.n, none.total, none.done, none.next], [0, 0, true, null], JSON.stringify(match));
+    }
+    const requests = await byFilter("tcp.dstport == 18080");
+    const within = await pkts({ match: { dstport: 18080 }, frames: [[1, 10]] });
+    assert.deepEqual(within.frames, requests.filter((f) => f <= 10));
+    const http = await pkts({ match: { dstport: 18080 }, filter: "http" });
+    assert.deepEqual(http.frames, [4, 21]);
+    const paged = await pkts({ match: { dstport: 18080 }, after: requests[2], limit: 3 });
+    assert.deepEqual([paged.frames, paged.next, paged.total], [requests.slice(3, 6), requests[5], requests.length]);
+    // Payloads of the matching packets are tcp.payload
+    const payload = await pkts({ match: { srcport: 18080 }, bytes: "payload" });
+    const field = await pkts({ frames: payload.frames.map((f) => [f, f]), bytes: "tcp.payload" });
+    assert.deepEqual(field.frames, payload.frames);
+    for (let i = 0; i < payload.n; i++) assert.ok(payload.bytes(i).equals(field.bytes(i)), `frame ${payload.frames[i]}`);
+    const bad = async (match, re) => {
+      const r = await call("packets", { match });
+      assert.equal(r.status, 400, r.body);
+      assert.equal(json(r).code, "bad-args");
+      assert.match(json(r).error, re);
+    };
+    await bad(5, /match is an object/);
+    await bad({ colour: 1 }, /no key "colour"/);
+    await bad({ port: 70000 }, /match.port: 70000 is not a number from 0 to 65535/);
+    await bad({ proto: "xyz" }, /or one of icmp, igmp, tcp, udp/);
+    await bad({ addr: "300.1.1.1" }, /not an IPv4 or IPv6 address/);
+    await bad({ addr: "10.0.0.0/33" }, /not an IPv4 or IPv6 address/);
+    await bad({ port: [] }, /a value or a list/);
+  });
+
+  await check("panel data: FrameStore's times and lengths are sharkd's", async () => {
+    const page = decodePage((await call("packets", { fields: ["frame.time_epoch", "frame.len", "frame.cap_len"], bytes: "frame" })).raw);
+    assert.equal(page.n, 29);
+    for (let i = 0; i < 29; i++) {
+      assert.ok(Math.abs(page.times[i] - Number(page.fields["frame.time_epoch"][i])) < 1e-6, `time of ${i + 1}`);
+      assert.equal(page.lens[i], Number(page.fields["frame.len"][i]));
+      assert.equal(page.bytes(i).length, Number(page.fields["frame.cap_len"][i]));
+    }
+  });
+
   await check("panel data: bad requests are explained", async () => {
     const bad = async (body, status, code, re) => {
       const r = await call("packets", body);
@@ -418,6 +480,84 @@ try {
     assert.ok(busy.length >= 10, `${busy.length} refused`);
     assert.equal(JSON.parse(busy[0].body).code, "busy");
     assert.ok(JSON.parse(busy[0].body).retryMs > 0);
+  });
+
+  // Files of our own: one that grows, and ones FrameStore can't read
+  await api("/api/panels/open", { name: "hello" });
+  const own = new URL((await api("/api/state")).json.panels.find((x) => x.name === "hello").src).host;
+  const ownDoc = /<meta name="wb-doc" content="([a-z2-7]+)">/.exec((await panelReq(own, "/", { headers: frameHeaders })).body)[1];
+  const ownCall = (method, body) =>
+    panelReq(own, `/_wb/api/${method}`, { method: "POST", body: JSON.stringify(body), headers: { origin: `http://${own}`, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-wb-doc": ownDoc } });
+  const pkts = async (body) => {
+    const r = await ownCall("packets", body);
+    assert.equal(r.status, 200, r.body);
+    return decodePage(r.raw);
+  };
+  const packetsEvent = (frames) => (ev) => ev.some((e) => e.event === "packets" && e.data.frames === frames);
+
+  await check("panel data: a growing file sends packets events, and raw pages run ahead of the view", async () => {
+    const file = join(home, "grow.pcap");
+    const rec = (i) => g.pcapRecord(1700000000 + Math.floor(i / 1000), (i % 1000) * 1000, g.udpFrame(i, { dport: i % 2 ? 9999 : 7502 }));
+    writeFileSync(file, Buffer.concat([g.pcapHeader(), ...Array.from({ length: 3000 }, (_, i) => rec(i + 1))]));
+    assert.equal((await api("/api/open", { path: file })).status, 200);
+    // More than sharkd's 2000 a page: these bytes come from the file
+    const all = await pkts({ bytes: "frame", limit: 3000 });
+    assert.deepEqual([all.n, all.done], [3000, true]);
+    const even = await pkts({ match: { dstport: 7502 }, bytes: "payload", limit: 50000 });
+    assert.equal(even.n, 1500);
+    assert.ok(even.frames.every((f, i) => f === 2 * (i + 1) && even.bytes(i).readUInt32BE(0) === f));
+    // The panel engine reads the file as it is now
+    assert.equal((await pkts({ filter: "udp", limit: 1 })).total, 3000);
+    // Appended while the page listens: the event comes without the view reading the file again
+    const grown = await readEvents(own, ownDoc, packetsEvent(3010), () => appendFileSync(file, Buffer.concat(Array.from({ length: 10 }, (_, i) => rec(3001 + i)))));
+    assert.ok(packetsEvent(3010)(grown.events), JSON.stringify(grown.events));
+    assert.equal((await api("/api/state")).json.totalFrames, 3000);
+    const ahead = await pkts({ match: { dstport: 7502 }, after: 3000 });
+    assert.deepEqual(ahead.frames, [3002, 3004, 3006, 3008, 3010]);
+    assert.deepEqual([ahead.total, ahead.pending, ahead.live, ahead.done], [1505, false, false, true]);
+    // A half-written record waits for its end
+    const half = rec(3011);
+    appendFileSync(file, half.subarray(0, 30));
+    assert.deepEqual((await pkts({ after: 3009 })).frames, [3010]);
+    const rest = await readEvents(own, ownDoc, packetsEvent(3011), () => appendFileSync(file, half.subarray(30)));
+    assert.ok(packetsEvent(3011)(rest.events), JSON.stringify(rest.events));
+    assert.deepEqual((await pkts({ match: { dstport: 9999 }, after: 3008 })).frames, [3009, 3011]);
+    // The engine is behind until the view reads the file again
+    const behind = await pkts({ match: { dstport: 9999 }, filter: "udp", after: 2990 });
+    assert.deepEqual([behind.frames, behind.pending], [[2991, 2993, 2995, 2997, 2999], true]);
+    await api("/api/reload", {});
+    assert.equal((await api("/api/state")).json.totalFrames, 3011);
+    // It reads a grown file again at most once a second
+    let caught = behind;
+    for (let tries = 0; caught.pending && tries < 20; tries++) {
+      await new Promise((done) => setTimeout(done, 200));
+      caught = await pkts({ match: { dstport: 9999 }, filter: "udp", after: 2990 });
+    }
+    assert.deepEqual([caught.frames.length, caught.pending], [11, false]);
+  });
+
+  await check("panel data: compressed files, and counts unlike Wireshark's, leave raw packets to sharkd", async () => {
+    const gz = join(home, "http.pcapng.gz");
+    writeFileSync(gz, gzipSync(readFileSync(fixture)));
+    assert.equal((await api("/api/open", { path: gz })).status, 200);
+    const m = await ownCall("packets", { match: { proto: "tcp" } });
+    assert.equal(m.status, 400);
+    assert.match(json(m).error, /can't read http\.pcapng\.gz: it is compressed\. Use a display filter instead/);
+    const frames = await pkts({ bytes: "frame", frames: [[10, 12]] });
+    for (let i = 0; i < 3; i++) assert.ok(frames.bytes(i).equals(Buffer.from((await api(`/api/frame?num=${10 + i}`)).json.bytes, "base64")));
+    // Wireshark numbers a systemd journal entry as a frame; FrameStore doesn't: off for that file
+    const journal = join(home, "journal.pcapng");
+    writeFileSync(journal, Buffer.concat([g.shb(), g.idb(1), g.epb(0, 1n, g.udpFrame(1)), g.block(9, Buffer.from("__REALTIME_TIMESTAMP=1700000000000000\nMESSAGE=hi\n")), g.epb(0, 2n, g.udpFrame(2))]));
+    await api("/api/events/take", {});
+    assert.equal((await api("/api/open", { path: journal })).status, 200);
+    const j = await ownCall("packets", { match: { proto: "udp" } });
+    assert.equal(j.status, 400);
+    assert.match(json(j).error, /found 2 packets, Wireshark 3/);
+    assert.equal((await ownCall("packets", { match: { proto: "udp" } })).status, 400);
+    const warnings = (await api("/api/events/take", {})).json.events.filter((e) => /through sharkd only/.test(e.text));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0].text, /Panels read journal\.pcapng through sharkd only/);
+    assert.equal((await pkts({ bytes: "frame" })).n, 3);
   });
 } finally {
   server.kill();

@@ -918,11 +918,16 @@ API (global wb):
                    "visible" (true/false), "theme" ("light"/"dark"); returns a function that stops it
   wb.packets(q)    one page of packets, q:
      filter        a display filter
-     frames        "displayed" | "selected" | "marked" | [[first, last], ...]   (with filter: both)
+     match         packets by their headers, read from the file without dissecting (pcap and pcapng only):
+                   {proto: "udp" | "tcp" | ..., port, srcport, dstport, addr, src, dst (also "10.0.0.0/8"),
+                   ethertype, vlan}; each a value or a list of them; every key given must hold. Per packet:
+                   IP fragments after the first have no ports
+     frames        "displayed" | "selected" | "marked" | [[first, last], ...]   (with filter or match: all hold)
      fields        up to 16 field names: display strings, all occurrences joined by ","
      bytes         "frame" | "ip" | "payload" (of UDP or TCP) | a field or protocol ("http.file_data", "rtp")
      after         continue after this frame number (page.next)
-     limit         packets a page: 1000; at most 2000 with bytes, 5000 with fields, 50000 without
+     limit         packets a page: 1000; at most 50000 without fields, 5000 with fields, 2000 with a
+                   field's bytes (or any bytes of a compressed file)
      maxBytes      bytes a page: 4 MiB, at most 16 MiB (a page has at least one packet)
    page: {n, frames, times (epoch seconds), lens, bytes(i), fields: {name: [values]}, clipped, next, done,
           live, total, dropped (packets without that layer), packets: [{frame, time, len, bytes, fields}]}
@@ -952,7 +957,8 @@ Pitfalls:
 - Field values are display strings ("0x0012", "True"); Wireshark cuts values over about 2 KB
   (page.clipped): ask for bytes: "<field>" to get a whole value.
 - page.bytes(i) are views into one buffer: slice() what you keep.
-- Bytes cost a dissection per packet, a few thousand packets a second: ask only for what you need.
+- Over ~1000 packets/s use match + bytes "payload": read straight from the file, also ahead of the view
+  while it grows. Filters, fields and a field's bytes cost a dissection per packet (a few thousand a second).
 - WebCodecs: check VideoDecoder.isConfigSupported; codec "avc1." + hex of SPS bytes 1-3; Annex B
   needs no description; close every VideoFrame.
 

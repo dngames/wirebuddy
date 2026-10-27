@@ -1,4 +1,4 @@
-// Unit checks of the panel data's parts: frame sets, the layer finder, the page format, sharkd's answer limit.
+// Unit checks of the panel data's parts: frame sets, the layer finder, raw matches, the page format, sharkd's answer limit.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -15,7 +15,7 @@ writeFileSync(
   ["paneldata", "layers", "wbpk", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { FrameSet, findLayer, encodePage, Sharkd, SharkdTooLarge } = await import(join(out, "units.mjs"));
+const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -100,6 +100,33 @@ try {
         const at = findLayer(junk, encap, "payload");
         if (at) assert.ok(at[0] >= 0 && at[0] <= at[1] && at[1] <= junk.length, `${encap} ${i}`);
       }
+    }
+  });
+
+  await check("raw matches: protocols, ports, networks, VLANs; one key for the same match", () => {
+    const v4 = (src, dst, body = udp) => Buffer.from([0x45, 0, 0, 20 + body.length, 0, 1, 0, 0, 64, 17, 0, 0, ...src, ...dst, ...body]);
+    const tagged = Buffer.concat([Buffer.alloc(12), Buffer.from([0x88, 0xa8, 0, 100, 0x81, 0, 0x20, 200, 8, 0]), v4([10, 1, 2, 3], [172, 31, 255, 1])]);
+    const p = parse(tagged, "eth", new Parsed());
+    const hit = (q) => rawMatch(q).test(tagged, p);
+    assert.ok(hit({ proto: "UDP", port: 2000, srcport: [1, 1000], dstport: 2000, ethertype: 0x0800 }));
+    assert.ok(!hit({ proto: "tcp" }) && !hit({ port: 1 }) && !hit({ ethertype: 0x86dd }));
+    assert.ok(hit({ src: "10.0.0.0/8" }) && hit({ src: "10.1.0.0/16" }) && !hit({ src: "10.2.0.0/16" }) && hit({ addr: "172.31.255.1" }) && !hit({ dst: "10.1.2.3" }));
+    // Prefixes not on a byte boundary
+    assert.ok(hit({ dst: "172.16.0.0/12" }) && !hit({ dst: "172.32.0.0/12" }) && hit({ dst: "0.0.0.0/0" }));
+    assert.ok(hit({ vlan: 200 }) && hit({ vlan: [1, 100] }) && !hit({ vlan: 5 }));
+    // Addresses of the other IP version never match
+    assert.ok(!hit({ addr: "::ffff:10.1.2.3" }) && !hit({ addr: "::/0" }));
+    const six = Buffer.concat([Buffer.from([0x60, 0, 0, 0, 0, udp.length, 17, 64, 0xfe, 0x80, ...Array(13).fill(0), 1, 0x20, 1, 0x0d, 0xb8, ...Array(11).fill(0), 9]), udp]);
+    const p6 = parse(six, "raw", new Parsed());
+    const hit6 = (q) => rawMatch(q).test(six, p6);
+    assert.ok(hit6({ src: "fe80::/10" }) && hit6({ src: "fe80::1" }) && hit6({ addr: "2001:db8::9" }) && hit6({ dst: "2001:db8::/32" }) && !hit6({ dst: "2001:db9::/32" }));
+    assert.ok(!hit6({ addr: "10.0.0.0/8" }) && hit6({ proto: 17, ethertype: 0x86dd }));
+    assert.equal(rawMatch({ port: [2, 1, 2] }).key, rawMatch({ port: [1, 2] }).key);
+    assert.equal(rawMatch({ proto: "udp" }).key, rawMatch({ proto: 17 }).key);
+    assert.equal(rawMatch({ addr: "::ffff:10.0.0.1" }).key, rawMatch({ addr: "0:0:0:0:0:ffff:a00:1/128" }).key);
+    assert.notEqual(rawMatch({ src: "10.0.0.1" }).key, rawMatch({ dst: "10.0.0.1" }).key);
+    for (const bad of [null, [], { port: -1 }, { vlan: 4096 }, { proto: "nope" }, { src: "10.0.0.0/8/8" }, { dst: "fe80::1%eth0" }, { addr: 167772161 }, { port: Array(65).fill(1) }]) {
+      assert.throws(() => rawMatch(bad), (e) => e instanceof ApiError && e.status === 400 && e.code === "bad-args", JSON.stringify(bad));
     }
   });
 

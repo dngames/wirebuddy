@@ -42,7 +42,7 @@
     "typecheck": "tsc --noEmit -p .",
     "start": "node dist/server/main.js",
     "mcp": "node dist/server/main.js --mcp",
-    "test": "node test/units.mjs && node test/api-smoke.mjs && node test/mcp-smoke.mjs && node test/panels-smoke.mjs",
+    "test": "node test/units.mjs && node test/framestore.mjs && node test/api-smoke.mjs && node test/mcp-smoke.mjs && node test/panels-smoke.mjs",
     "test:live": "node test/live-smoke.mjs",
     "demo": "node test/agent-demo.mjs",
     "prepare": "npm run build",

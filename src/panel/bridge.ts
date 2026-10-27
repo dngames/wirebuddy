@@ -10,8 +10,24 @@ import type { PanelView } from "../shared/api.ts";
 type Child = Node | string | number | null | undefined | false;
 type WbEvent = "view" | "select" | "packets" | "reset" | "visible" | "theme";
 
+/** Packets by their headers, read from the file without Wireshark: every key given must hold, a list means any of its values. */
+interface Match {
+  /** IP protocol: "udp", "tcp", "icmp", "icmpv6", "sctp", ... or its number. */
+  proto?: string | number | (string | number)[];
+  port?: number | number[];
+  srcport?: number | number[];
+  dstport?: number | number[];
+  /** Source or destination address; "10.0.0.0/8" and "2001:db8::/32" are networks. */
+  addr?: string | string[];
+  src?: string | string[];
+  dst?: string | string[];
+  ethertype?: number | number[];
+  vlan?: number | number[];
+}
+
 interface Query {
   filter?: string;
+  match?: Match;
   frames?: "displayed" | "selected" | "marked" | [number, number][];
   fields?: string[];
   bytes?: string;
@@ -439,20 +455,26 @@ const MAX_ALL = 64 * 1024 * 1024;
         wake = done;
         if (ms) setTimeout(() => wake === done && nudge(), ms);
       });
+    // The newest packet heard of: raw pages run ahead of the view while the file grows
+    let newest = view.frames;
     const offs = [
-      on("packets", nudge),
+      on("packets", (p: { frames: number }) => {
+        newest = Math.max(newest, p.frames);
+        nudge();
+      }),
       on("reset", () => {
         restart = true;
         nudge();
       }),
     ];
-    const start = (): number => (q.from === "end" ? view.frames : (q.after ?? 0));
+    const start = (): number => (q.from === "end" ? Math.max(newest, view.frames) : (q.after ?? 0));
     void (async () => {
       let after = start();
       let epoch = view.epoch;
       while (!closed) {
         if (restart || view.epoch !== epoch) {
           restart = false;
+          newest = view.frames;
           await h.reset?.();
           after = start();
           epoch = view.epoch;
