@@ -1,0 +1,11 @@
+{
+  "label": "ARMC robot arm",
+  "version": "1",
+  "description": "Decodes ARMC v1, the arm controller's commands on TCP port 7700 and its telemetry on UDP port 7701, and plots the joints over time with each command's ACK latency",
+  "panel": {
+    "title": "Arm trajectory",
+    "size": [900, 600],
+    "params": { "port": 7700, "telemetry": 7701 },
+    "offer": { "filter": "armc", "text": "Plot the arm's moves" }
+  }
+}

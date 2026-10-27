@@ -1,0 +1,60 @@
+body {
+  overflow: hidden;
+}
+
+.chart {
+  position: absolute;
+  inset: 0;
+}
+
+.chart canvas {
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.chart canvas.panning {
+  cursor: grabbing;
+}
+
+.readout {
+  position: absolute;
+  max-width: 340px;
+  padding: 6px 8px;
+  border: 1px solid var(--wb-border);
+  border-radius: 6px;
+  background: var(--wb-bg);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.readout .head {
+  font-weight: 600;
+}
+
+.readout .muted {
+  color: var(--wb-muted);
+}
+
+.readout .swatch {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+.note {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  padding: 0 16px;
+  color: var(--wb-muted);
+  text-align: center;
+  pointer-events: none;
+}

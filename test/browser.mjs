@@ -1,7 +1,7 @@
 // The example panels in a real browser, the way the agent works with them: each of
-// examples/extensions copied into the extensions folder, tested on its fixture from
-// test/media and opened over MCP in WireBuddy's UI in headless Chrome, then checked from
-// inside its frame over the DevTools protocol.
+// examples/extensions and the robot-arm investigation's solution copied into the extensions
+// folder, tested on its fixture from test/media and opened over MCP in WireBuddy's UI in
+// headless Chrome, then checked from inside its frame over the DevTools protocol.
 // Usage: node test/browser.mjs [--verbose] [--shots <dir>]   (after npm run build; skipped without Chrome)
 // CHROME=<path> picks the browser.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -12,9 +12,11 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 import { writeHttpGallery } from "./media/http-gallery.mjs";
 import { SCANS, writeLidarCapture } from "./media/lidar-wbpc.mjs";
+import { writeArmCapture } from "./media/robot-arm.mjs";
 import { writeRtpCapture } from "./media/rtp-h264.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -54,11 +56,15 @@ for (const name of ["http-gallery", "rtp-video", "lidar-wbpc"]) {
   cpSync(join(root, "examples/extensions", name), join(extDir, name), { recursive: true });
   tighten(join(extDir, name));
 }
+cpSync(join(root, "examples/investigations/robot-arm/solution/armc"), join(extDir, "armc"), { recursive: true });
+tighten(join(extDir, "armc"));
 const fixtures = join(home, "fixtures");
 mkdirSync(fixtures);
 const files = writeHttpGallery(join(fixtures, "http-gallery.pcap"));
 const streams = writeRtpCapture(join(fixtures, "rtp-h264.pcap"));
 const scans = writeLidarCapture(join(fixtures, "lidar-wbpc.pcap"));
+const arm = writeArmCapture(join(fixtures, "robot-arm.pcap"));
+const armFixed = writeArmCapture(join(fixtures, "robot-arm-fixed.pcap"), { fixed: true });
 
 const client = new Client({ name: "browser-test", version: "0" });
 await client.connect(
@@ -213,12 +219,15 @@ try {
     return { test, frame: await connect(frame.webSocketDebuggerUrl) };
   }
 
+  async function screenshot(name) {
+    if (!values.shots) return;
+    mkdirSync(values.shots, { recursive: true });
+    const shot = await page.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(values.shots, `${name}.png`), Buffer.from(shot.data, "base64"));
+  }
+
   async function finish(name, frame) {
-    if (values.shots) {
-      mkdirSync(values.shots, { recursive: true });
-      const shot = await page.send("Page.captureScreenshot", { format: "png" });
-      writeFileSync(join(values.shots, `${name}.png`), Buffer.from(shot.data, "base64"));
-    }
+    await screenshot(name);
     frame.close();
     const status = await tool("panel", { action: "status", name });
     await tool("panel", { action: "close", name });
@@ -335,6 +344,94 @@ try {
     assert.match(step, /1 bad packet skipped/);
     await finish("lidar-wbpc", frame);
     return `${got.lit} pixels lit of ${got.size}`;
+  });
+
+  await check("robot-arm: the armc solution decodes the arm, plots the delayed ACKs, then the fix", async () => {
+    const { test, frame } = await open("armc", "robot-arm.pcap");
+    assert.match(test, new RegExp(`^  armc: ${arm.armc} packets, first 1$`, "m"), test);
+    assert.match(test, /No Lua errors/, test);
+    let errors = "";
+    /** The panel's status line, and its pixels: lit, and of the critical and the good status color. */
+    const look = async () => {
+      const s = await tool("panel", { action: "status", name: "armc" });
+      if (/Errors \[panel output\]/.test(s)) errors += s;
+      const m = /Status \[panel output, untrusted\]: "p50 ACK latency ([\d.]+) ms · (\d+) commands\/s"/.exec(s);
+      const px = await frame.evaluate(`(() => {
+        const c = document.querySelector("canvas");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        const near = (i, r, g, b) => Math.abs(d[i] - r) < 8 && Math.abs(d[i + 1] - g) < 8 && Math.abs(d[i + 2] - b) < 8;
+        let lit = 0, red = 0, green = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] !== d[0] || d[i + 1] !== d[1] || d[i + 2] !== d[2]) lit++;
+          if (near(i, 0xd0, 0x3b, 0x3b)) red++;
+          if (near(i, 0x0c, 0xa3, 0x0c)) green++;
+        }
+        return { lit, red, green, size: c.width + "x" + c.height };
+      })()`);
+      return { p50: m ? Number(m[1]) : NaN, rate: m ? Number(m[2]) : NaN, ...px, status: s.split("\n")[0] };
+    };
+    /** Whether it shows the numbers of the whole capture, rounded as the panel rounds them. */
+    const all = (l, s) => l.p50 === Number(s.p50.toFixed(s.p50 < 1 ? 2 : 1)) && l.rate === Math.round(s.rate);
+    const slow = await until(async () => {
+      const l = await look();
+      return { ...l, done: all(l, arm) && l.lit > 5000 };
+    });
+    assert.equal(errors, "");
+    assert.ok(slow.p50 >= 30 && all(slow, arm), `${JSON.stringify(slow)}, generated ${arm.p50} ms, ${arm.rate}/s`);
+    assert.ok(slow.lit > 5000 && slow.red > 1000 && slow.green < 200, JSON.stringify(slow));
+    // A MOVE in the strip: its readout on hover, the packet it ends in selected on a click
+    const src = (await api("/api/state")).panels.find((x) => x.name === "armc").src;
+    const box = await page.evaluate(`(() => {
+      const r = document.querySelector(${JSON.stringify(`iframe[src^="${src}"]`)}).getBoundingClientRect();
+      return { x: r.left, y: r.top };
+    })()`);
+    const bar = await frame.evaluate(`(() => {
+      const c = document.querySelector("canvas");
+      const k = c.width / c.clientWidth;
+      const y = Math.round(c.height - 30 * k);
+      const row = c.getContext("2d").getImageData(0, y, c.width, 1).data;
+      for (let x = Math.round(c.width / 2); x < c.width; x++) if (Math.abs(row[x * 4] - 0xd0) < 8 && Math.abs(row[x * 4 + 1] - 0x3b) < 8) return { x: x / k, y: y / k };
+      return null;
+    })()`);
+    assert.ok(bar, "no MOVE bar in the strip");
+    const at = { x: box.x + bar.x, y: box.y + bar.y };
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...at });
+    const tip = await until(() => frame.evaluate(`(() => { const r = document.querySelector(".readout"); return !r.hidden && r.textContent; })()`));
+    assert.match(tip, /^MOVE seq=\d+ · frame \d+, began in \d+.*ACK in frame \d+, [\d.]+ ms after the first byte/, tip);
+    await screenshot("armc-delayed");
+    await page.send("Input.dispatchMouseEvent", { type: "mousePressed", ...at, button: "left", clickCount: 1 });
+    await page.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", clickCount: 1 });
+    const shown = Number(/^MOVE seq=\d+ · frame (\d+)/.exec(tip)[1]);
+    assert.ok(arm.moveFrames.includes(shown), `frame ${shown} is no MOVE`);
+    const selected = await until(async () => (await api("/api/state")).selected === shown || null);
+    assert.ok(selected, `frame ${shown} was not selected`);
+    // No capture, then the fixed app's: the panel starts over
+    await api("/api/close", {});
+    const empty = await until(async () => {
+      const l = await look();
+      const note = await frame.evaluate(`(() => { const n = document.querySelector(".note"); return n.hidden ? "" : n.textContent; })()`);
+      return { ...l, note, done: l.lit === 0 && /^Open a capture with ARMC traffic/.test(note) };
+    });
+    assert.ok(empty.done, JSON.stringify(empty));
+    await tool("open_capture", { path: join(fixtures, "robot-arm-fixed.pcap") });
+    const fast = await until(async () => {
+      const l = await look();
+      return { ...l, done: all(l, armFixed) && l.green > 1000 };
+    });
+    assert.equal(errors, "");
+    assert.ok(fast.p50 < 5 && all(fast, armFixed), `${JSON.stringify(fast)}, generated ${armFixed.p50} ms, ${armFixed.rate}/s`);
+    assert.ok(fast.lit > 5000 && fast.green > 1000 && fast.red < 200, JSON.stringify(fast));
+    // A compressed copy WireBuddy can't match in: read through the display filter instead
+    writeFileSync(join(fixtures, "robot-arm.pcap.gz"), gzipSync(readFileSync(join(fixtures, "robot-arm.pcap"))));
+    await tool("open_capture", { path: join(fixtures, "robot-arm.pcap.gz") });
+    const gz = await until(async () => {
+      const l = await look();
+      return { ...l, done: all(l, arm) };
+    });
+    assert.ok(gz.done, `compressed: ${JSON.stringify(gz)}, generated ${arm.p50} ms, ${arm.rate}/s`);
+    assert.equal(errors, "");
+    await finish("armc", frame);
+    return `p50 ${slow.p50} ms at ${slow.rate} commands/s, fixed ${fast.p50} ms at ${fast.rate}/s, ${slow.lit} pixels lit of ${slow.size}`;
   });
 } finally {
   page?.close();
