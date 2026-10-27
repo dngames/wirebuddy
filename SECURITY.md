@@ -28,17 +28,32 @@ Supported versions: the latest `main` and the latest release.
 - The MCP tools cannot start a capture. They can open any capture file the user can read, read
   packets, change the filter, selection, marks and columns, stop a capture, open Wireshark, and
   write new `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
-  file, except one the agent exported itself in the same session.
+  file, except one the agent exported itself in the same session and WireBuddy's own record of
+  switched-off extensions.
 - Open accepts only files whose content is a capture (pcap, pcapng, snoop, Network Monitor;
   also gzip- or zstd-compressed), whatever the name.
 - Live captures and exports are created readable only by the user.
+- Extensions are Lua code that runs as the user inside `sharkd` and the Wireshark WireBuddy
+  opens. The MCP tools and the UI can test, reload and switch them on and off, not write them;
+  switching one off doesn't stop the agent from testing it or switching it on again.
+- An extension is only read and loaded when no other user could have changed it: every folder
+  from `/` down belongs to root or the user and only they can write it (a group counts only when
+  it is the user's own private group and no ACL lets others in; sticky folders like `/tmp` protect
+  only the user's entries), or a folder of the user's on the way is closed to others and the
+  extension is on the same filesystem. Its files must be regular files, not symbolic links, and are
+  checked again as they are read. Folders on network or FUSE filesystems, whose owners and modes
+  don't say who can write, and folders that fail these checks are not looked into.
+- On every reload WireBuddy copies the extensions into its own plugin folder, created fresh with a
+  random name in a folder only the user can write; `sharkd` and Wireshark load those copies.
+- Extensions are not supported on Windows, where these checks don't apply.
 - Packet contents are untrusted and are always rendered as text, never as HTML.
 - Problems in the viewer and what the user does there are reported to the attached agent
   (`--watch` reads them through an instance file only the user can read).
 
 In scope: anything that lets a web page, another local user, a crafted capture file, or an MCP
 client limited to WireBuddy's tools break these rules (for example start a capture, read
-arbitrary files, replace the user's files, or run script in the UI).
+arbitrary files, replace the user's files, run script in the UI, or get Lua loaded that the user
+didn't put in an extension folder).
 
 Out of scope: anyone who already has the session URL with its token, including an agent given
 a shell or the browser pane — treat the token like a password.

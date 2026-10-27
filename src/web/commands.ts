@@ -7,6 +7,7 @@ import { applySelectedAsColumn, collapseAll, expandAll, expandSubtrees, selected
 import { openConvDialog } from "./dialogs/conv.ts";
 import { openExpertDialog } from "./dialogs/expert.ts";
 import { openExportDialog } from "./dialogs/export.ts";
+import { openExtensionsDialog } from "./dialogs/extensions.ts";
 import { FOLLOW, openFollowDialog } from "./dialogs/follow.ts";
 import { openGotoDialog } from "./dialogs/goto.ts";
 import { openIoGraphDialog } from "./dialogs/iograph.ts";
@@ -155,6 +156,8 @@ export const commands = {
   followTls: follow("TLS"),
   followHttp: follow("HTTP"),
   expertInfo: { label: "Expert Information", enabled: hasFile, run: () => openExpertDialog() },
+  extensions: { label: "Extensions…", tip: "Lua dissectors for protocols Wireshark doesn't decode", run: () => openExtensionsDialog() },
+  reloadLua: { label: "Reload Lua Plugins", shortcut: "Ctrl+Shift+L", run: () => void act.reloadExtensions() },
 
   // Statistics
   protocolHierarchy: { label: "Protocol Hierarchy", enabled: hasFile, run: () => openPhsDialog() },

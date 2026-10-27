@@ -93,6 +93,14 @@ function init(): void {
     setDetailsFrame(fd);
   });
 
+  // Reloaded extensions dissect the shown packet differently
+  let extKey = "";
+  bus.on("state", (s) => {
+    const key = `${s.instance}|${s.extensions.revision}`;
+    if (extKey && key !== extKey) act.reloadFrame();
+    extKey = key;
+  });
+
   let lastLoadError: string | null = null;
   bus.on("state", (s) => {
     // With an agent attached the server has told it already

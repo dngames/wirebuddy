@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { Extensions } from "./extensions.ts";
 import { Viewer } from "./viewer.ts";
 import { startHttp } from "./http.ts";
 import { startMcp } from "./mcp.ts";
@@ -24,7 +25,8 @@ const USAGE = `Usage: wirebuddy [options] [capture-file]
   -h, --help          show this help
 
 Environment: WIREBUDDY_PORT, WIREBUDDY_TOKEN, WIREBUDDY_CAPTURE_DIR, WIREBUDDY_PROFILE
-set the defaults of the options of the same name.`;
+set the defaults of the options of the same name. WIREBUDDY_EXTENSIONS lists more folders
+of Lua extensions (separated by ":"), after ~/.local/share/wirebuddy/extensions.`;
 
 function which(name: string): string | null {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
@@ -77,6 +79,10 @@ if (!sharkd) {
 const dumpcap = which("dumpcap");
 if (!dumpcap) log("dumpcap not found on PATH; live capture is unavailable");
 
+const extensions = new Extensions();
+await extensions.init(sharkd);
+if (extensions.unavailable) log(`extensions are unavailable: ${extensions.unavailable}`);
+
 const viewer = new Viewer({
   captureDir: resolve(values["capture-dir"] ?? join(homedir(), ".local/share/wirebuddy/captures")),
   sharkd,
@@ -85,7 +91,9 @@ const viewer = new Viewer({
   profile: values.profile,
   editcap: which("editcap") ?? "editcap",
   mergecap: which("mergecap") ?? "mergecap",
+  extensions,
 });
+viewer.refreshExtensions();
 const tlsKeylog = values["tls-keylog"];
 if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(`TLS key log: ${(err as Error).message}`));
 else void viewer.loadTlsPreference();

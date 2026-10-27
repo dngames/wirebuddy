@@ -31,6 +31,9 @@ same capture, filter, selected packet and marks.
 - **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
 - **MCP server** so an agent can read the capture, apply filters, select and mark packets, and
   follow streams. The MCP tools have no way to start a capture; that stays your click in the UI.
+- **Extensions:** when traffic shows up as undecoded "Data", the agent can write a Lua dissector
+  for it, test it on the open capture and reload the view, which then decodes the new protocol
+  with fields you can filter on.
 
 All protocol decoding is done by Wireshark's own engine (`sharkd`), so dissection is identical
 to Wireshark.
@@ -78,6 +81,7 @@ Options (`--help` shows the same):
 | `--capture-dir <dir>` | `WIREBUDDY_CAPTURE_DIR` | where live captures go; default `~/.local/share/wirebuddy/captures` |
 | `--profile <name>` | `WIREBUDDY_PROFILE` | Wireshark configuration profile for dissection and Open in Wireshark |
 | `--tls-keylog <file>` | | decrypt TLS with this key log file |
+| | `WIREBUDDY_EXTENSIONS` | more folders of extensions, separated by `:` |
 | `--mcp` | | also serve MCP over stdio; logs go to stderr |
 | `--watch <file>` | | wait for the next problem in a running viewer, print it, exit (see below) |
 | `--version` | | print the version |
@@ -96,20 +100,51 @@ inside TLS become visible, and "Open in Wireshark" passes the key log on. A key 
 Wireshark's own preferences is picked up automatically. The agent can see whether decryption is
 on, but only you choose the file. Treat the key log like a password.
 
+## Extensions
+
+Wireshark decodes thousands of protocols, but not your company's sensor stream or a game's
+network protocol: those show up as "Data". Ask the agent to decode them. It finds the undecoded
+traffic (`capture_summary` lists it), works out the format from the bytes or from a spec you give
+it, and writes a Lua dissector into WireBuddy's extension folder:
+
+```
+~/.local/share/wirebuddy/extensions/<name>/
+  extension.json    {"label": "ACME telemetry", "version": "1", "description": "…"}
+  acme.lua          a Wireshark Lua dissector
+```
+
+It tests the extension against the open capture in a separate `sharkd` first, then reloads the
+view, which decodes the new protocol: its fields appear in the details tree, in filters and
+autocompletion, as columns and in "Open in Wireshark". Problems come back to the agent: Lua that
+doesn't load, dissectors failing on some packets (with the frame and line), endless loops (stopped
+after a second), an extension that crashes `sharkd` (switched off when it crashes while loading;
+the view keeps its previous extensions when one crashes while reading the capture).
+
+**Analyze › Extensions…** lists the extensions with their status and switches them on and off;
+**Analyze › Reload Lua Plugins** (Ctrl+Shift+L) loads them again after you edited one. You can
+write extensions yourself the same way, or share a folder of them with `WIREBUDDY_EXTENSIONS`.
+
+Extensions are Lua code that runs as you, with access to your files. WireBuddy only loads
+extensions no other user could have changed (see [SECURITY.md](SECURITY.md)): a shared team
+folder that colleagues can write is ignored, and so is a folder on a network or FUSE filesystem,
+where that can't be checked. Only let an agent write extensions if you would let it run commands,
+and look at what it wrote. Extensions are not supported on Windows.
+
 ## Dissector plugins and profiles
 
 WireBuddy decodes with `sharkd`, which loads the same plugins and settings as Wireshark:
 
 - **C plugins** from the global folder (e.g. `/usr/lib/x86_64-linux-gnu/wireshark/plugins/4.6/epan`)
   and the personal one (`~/.local/lib/wireshark/plugins/4.6/epan`).
-- **Lua plugins** from `~/.config/wireshark/plugins` (and the global Lua plugin folder).
+- **Lua plugins** from the global folder, `~/.local/lib/wireshark/plugins` and
+  `~/.config/wireshark/plugins`.
 - **Preferences, Decode As, enabled/disabled protocols, coloring rules** from `~/.config/wireshark`.
 - **Profiles**: `--profile <name>` starts `sharkd` (and "Open in Wireshark") with that
   configuration profile.
 
 A plugin's fields show up in the details tree, can be filtered on, appear in filter
-autocompletion, and are visible to the agent through `inspect_frame`. Restart WireBuddy after
-adding or changing a plugin.
+autocompletion, and are visible to the agent through `inspect_frame`. After changing a Lua
+plugin, use Analyze › Reload Lua Plugins; restart WireBuddy after adding a C plugin.
 
 ## Use with Claude Code
 
@@ -163,6 +198,7 @@ Example prompts:
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `stop_capture` | Stop the running capture |
 | `open_in_wireshark` | Open the capture in the real Wireshark at the selected frame |
+| `extensions` | Lua dissector extensions: a guide with templates, list, test one on the open capture, reload, enable, disable |
 
 Every agent action that changes the view shows a notice in the UI. Every tool result also
 carries what happened in the viewer since the agent's last call: problems and what you did.
@@ -199,6 +235,10 @@ carries what happened in the viewer since the agent's last call: problems and wh
 - Open only accepts files whose content is a capture (pcap, pcapng, snoop, Network Monitor; also
   gzip- or zstd-compressed), whatever their name, so it can't be used to read other files.
 - Live captures and exports are readable only by you (files `0600`, capture folder `0700`).
+- Extensions are Lua code that runs as you inside `sharkd` and the Wireshark WireBuddy opens. The
+  MCP tools can test, reload and switch extensions, not write them: an agent writes them with its
+  own file tools, so it needs file access anyway. Extensions another user could have changed are
+  not loaded.
 - The traffic sparklines and `list_interfaces` only read per-interface packet counters
   (`dumpcap -S`), never packet contents; that sampler runs only while something shows it.
 

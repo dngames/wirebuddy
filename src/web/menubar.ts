@@ -83,6 +83,9 @@ function analyzeItems(): MenuItem[] {
     { label: "Follow", sub: follow },
     SEP,
     item("expertInfo"),
+    SEP,
+    item("extensions"),
+    item("reloadLua"),
   ];
 }
 

@@ -49,6 +49,7 @@ const ICONS = {
   iface: `<rect x="1.5" y="4.5" width="13" height="7" rx="1" ${S}/><path d="M4 7h1M6.5 7h1M9 7h1M11.5 7h1" ${S}/>`,
   export:
     `<path d="M3.5 6.5v8h9v-8" ${S}/><path d="M8 10.5V1.8M5 4.6 8 1.6l3 3" ${S}/>`,
+  puzzle: `<path d="M2.5 5.5h3a1.5 1.5 0 1 1 3 0h3v3a1.5 1.5 0 1 1 0 3v2.5h-9z" ${S}/>`,
   lock:
     '<rect x="3" y="7" width="10" height="7.5" rx="1.3" fill="#d9a520" stroke="#9a7212" stroke-width="1"/>' +
     `<path d="M5.3 7V5.2a2.7 2.7 0 0 1 5.4 0V7" ${S}/>`,

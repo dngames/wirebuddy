@@ -6,6 +6,7 @@ import { APP_NAME, get } from "./api.ts";
 import { agentName, app, bus } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
 import { maxItemSeverity, openExpertDialog } from "./dialogs/expert.ts";
+import { openExtensionsDialog } from "./dialogs/extensions.ts";
 import { openTlsDialog } from "./dialogs/tls.ts";
 import { maxSeverity, sevClass } from "./frame.ts";
 import { icon } from "./icons.ts";
@@ -15,6 +16,8 @@ import { reconnectNow } from "./ws.ts";
 export function createStatusBar(): HTMLElement {
   const led = h("button", { class: "sb-led", attrs: { "aria-label": "Expert information" }, onclick: () => openExpertDialog() });
   const tlsSeg = h("button", { class: "sb-seg sb-tls", hidden: true, onclick: () => openTlsDialog() }, icon("lock"), "TLS keys");
+  const extText = h("span");
+  const extSeg = h("button", { class: "sb-seg sb-tls sb-ext", hidden: true, onclick: () => openExtensionsDialog() }, icon("puzzle"), extText);
   const fileSeg = h("span", { class: "sb-seg sb-file" });
   const errSeg = h("span", { class: "sb-seg sb-err", hidden: true }, "Open failed");
   const fieldSeg = h("span", { class: "sb-seg sb-field" });
@@ -46,7 +49,7 @@ export function createStatusBar(): HTMLElement {
       return;
     }
     // Only what changes dissection; filter and column changes don't.
-    const key = `${s.instance}|${s.file}|${s.fileSize}|${s.totalFrames}|${s.tlsKeylog ?? ""}`;
+    const key = `${s.instance}|${s.file}|${s.fileSize}|${s.totalFrames}|${s.tlsKeylog ?? ""}|${s.extensions.revision}`;
     if (key === capKey) return;
     if (s.file !== capFile) capKnown = false;
     capKey = key;
@@ -75,6 +78,11 @@ export function createStatusBar(): HTMLElement {
     const tls = s?.tlsKeylog ?? null;
     tlsSeg.hidden = !tls;
     setTitle(tlsSeg, tls ? `Decrypting TLS with ${tls}` : "");
+    const ext = s?.extensions;
+    extSeg.hidden = !ext || (!ext.active && !ext.failing);
+    extSeg.classList.toggle("failing", !!ext?.failing);
+    setText(extText, ext?.failing ? `${ext.failing} extension${ext.failing === 1 ? "" : "s"} failing` : `${ext?.active ?? 0} extension${ext?.active === 1 ? "" : "s"}`);
+    setTitle(extSeg, "Lua extensions decoding this capture. Click for Analyze › Extensions.");
 
     // While loading, state.file is still the previous capture.
     setText(
@@ -148,5 +156,5 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   update();
-  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), agentSeg, tlsSeg, pktSeg, markSeg, capSeg, connSeg);
+  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), agentSeg, tlsSeg, extSeg, pktSeg, markSeg, capSeg, connSeg);
 }

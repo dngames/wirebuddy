@@ -1,6 +1,6 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
-import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks } from "./app.ts";
@@ -477,6 +477,18 @@ export async function findPacket(filter: string, dir: 1 | -1): Promise<FindResul
     if (!(await flushSelection())) throw new Error("the packet list changed, find again");
   }
   return r;
+}
+
+/** Analyze > Reload Lua Plugins: the extensions as they are on disk now. */
+export async function reloadExtensions(): Promise<ExtensionList | null> {
+  try {
+    const list = await post<ExtensionList>("api/extensions/reload", {});
+    if (app.conn !== "open") void refreshState();
+    return list;
+  } catch (e) {
+    toastError(e, "Reloading the extensions failed");
+    return null;
+  }
 }
 
 /** View > Reload: re-reads the file, keeping marks and selection. */

@@ -34,7 +34,7 @@ await mcp.connect(new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "dist/server/main.js"), "--mcp", "--port", String(PORT), "--capture-dir", mkdtempSync(join(tmpdir(), "wb-video-"))],
   // Empty home: no recent-file history from the real Wireshark config can appear on screen
-  env: { ...process.env, HOME: join(outdir, "home"), WIREBUDDY_TOKEN: TOKEN },
+  env: { ...process.env, HOME: join(outdir, "home"), XDG_CONFIG_HOME: join(outdir, "home/.config"), XDG_DATA_HOME: join(outdir, "home/.local/share"), WIREBUDDY_EXTENSIONS: "", WIREBUDDY_TOKEN: TOKEN },
   stderr: "ignore",
 }));
 const tool = async (name, args = {}) => {
