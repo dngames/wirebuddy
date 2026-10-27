@@ -562,6 +562,7 @@ try {
   });
 
   // Control: what a panel may change in the user's view (relayed by the page after a click), what it keeps, offers
+  await api("/api/open", { path: fixture });
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const events = async () => (await api("/api/events/take", {})).json.events.map((e) => `${e.level} ${e.text}`).join("\n");
   const until = async (what, fn) => {
