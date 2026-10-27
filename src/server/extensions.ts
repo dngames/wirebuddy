@@ -28,7 +28,7 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, extname, join, resolve, sep } from "node:path";
 import type { ExtensionInfo, ExtensionList } from "../shared/api.ts";
 import type { LuaReport } from "./sharkd.ts";
 import { printable } from "./text.ts";
@@ -37,6 +37,37 @@ import { printable } from "./text.ts";
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MANIFEST = "extension.json";
 const MAX_MANIFEST = 64 * 1024;
+/** A panel's folder in its extension, and what may be in it. */
+const PANEL_DIR = "panel";
+const PANEL_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const PANEL_MAX_DEPTH = 4;
+const PANEL_MAX_FILES = 200;
+const PANEL_MAX_FILE = 8 * 1024 * 1024;
+const PANEL_MAX_TOTAL = 16 * 1024 * 1024;
+/** Files a panel's frame is served, by type; others are left out. */
+export const PANEL_TYPES: Record<string, string> = {
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".wasm": "application/wasm",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".bin": "application/octet-stream",
+  ".glsl": "text/plain",
+};
 const OVERLAY_PREFIX = "wirebuddy-plugins-";
 
 /** Runs before every Wireshark plugin while WireBuddy's plugin folder is used. */
@@ -374,6 +405,29 @@ interface Entry {
   info: ExtensionInfo;
   folder: string;
   trust: RootTrust;
+  panel: PanelManifest | null;
+}
+
+/** A panel as its extension.json describes it. */
+export interface PanelManifest {
+  title: string;
+  size: [number, number];
+  params: Record<string, unknown>;
+  offer: { filter: string; text: string } | null;
+  /** "control": it may set the user's display filter (after a click in it). */
+  permissions: string[];
+  wasm: boolean;
+}
+
+/** A panel's files as read, and checked, when it opens: all its frame is ever served. */
+export interface PanelFiles {
+  folder: string;
+  manifest: PanelManifest;
+  files: Map<string, { bytes: Buffer; type: string }>;
+  /** body.html, put into the generated page. */
+  body: string;
+  /** Changes when a file of it changes on disk. */
+  fingerprint: string;
 }
 
 export class Extensions {
@@ -472,7 +526,7 @@ export class Extensions {
   refresh(): void {
     const next = new Map<string, string>();
     const failed = new Map<string, Last>();
-    for (const e of this.entries()) if (e.info.enabled && loadable(e.info)) this.take(e, next, failed);
+    for (const e of this.entries()) if (e.info.enabled && loadable(e.info) && e.info.lua) this.take(e, next, failed);
     this.change(next);
     for (const name of this.last.keys()) if (!next.has(name)) this.last.delete(name);
     for (const [name, last] of failed) this.last.set(name, last);
@@ -484,7 +538,7 @@ export class Extensions {
     const failed = new Map<string, Last>();
     next.delete(name);
     const e = on ? this.entries().find((x) => x.info.name === name) : undefined;
-    if (e && loadable(e.info)) this.take(e, next, failed);
+    if (e && loadable(e.info) && e.info.lua) this.take(e, next, failed);
     this.change(next);
     this.last.delete(name);
     for (const [n, last] of failed) this.last.set(n, last);
@@ -613,22 +667,35 @@ export class Extensions {
         }
         if (!st || (!st.isDirectory() && !st.isSymbolicLink())) continue;
         seen.add(name);
-        let info: ExtensionInfo;
+        let found: { info: ExtensionInfo; panel: PanelManifest | null };
         try {
-          info = this.describe(name, folder, trust);
+          found = this.describe(name, folder, trust);
         } catch {
-          info = { name: printable(name), folder: printable(folder), label: printable(name), version: "", description: "", enabled: false, status: "untrusted", error: `${printable(folder)} can't be read`, protocols: [] };
+          const info: ExtensionInfo = { name: printable(name), folder: printable(folder), label: printable(name), version: "", description: "", enabled: false, status: "untrusted", error: `${printable(folder)} can't be read`, protocols: [], lua: false, panel: null };
+          found = { info, panel: null };
         }
-        out.push({ info, folder, trust });
+        out.push({ ...found, folder, trust });
       }
     }
     return out;
   }
 
-  private describe(name: string, folder: string, trust: RootTrust): ExtensionInfo {
+  private describe(name: string, folder: string, trust: RootTrust): { info: ExtensionInfo; panel: PanelManifest | null } {
     const shown = printable(name);
-    const info: ExtensionInfo = { name: shown, folder: printable(folder), label: shown, version: "", description: "", enabled: !Object.hasOwn(this.state.off, name), status: "new", protocols: [] };
-    if (!NAME.test(name)) return { ...info, status: "invalid", error: "folder names may only use letters, digits, '.', '_' and '-'" };
+    const info: ExtensionInfo = {
+      name: shown,
+      folder: printable(folder),
+      label: shown,
+      version: "",
+      description: "",
+      enabled: !Object.hasOwn(this.state.off, name),
+      status: "new",
+      protocols: [],
+      lua: false,
+      panel: null,
+    };
+    const done = (patch: Partial<ExtensionInfo>, panel: PanelManifest | null = null) => ({ info: { ...info, ...patch }, panel });
+    if (!NAME.test(name)) return done({ status: "invalid", error: "folder names may only use letters, digits, '.', '_' and '-'" });
     // Checked before anything is read: what others could change stays unread
     let lua: string[] = [];
     let problem = entryProblem(folder, "folder", trust);
@@ -638,20 +705,67 @@ export class Extensions {
       problem = `${printable(folder)} can't be read`;
     }
     problem ??= entryProblem(join(folder, MANIFEST), "file", trust, true) ?? lua.map((f) => entryProblem(join(folder, f), "file", trust)).find(Boolean) ?? null;
-    if (problem) return { ...info, status: "untrusted", error: `${problem}; WireBuddy doesn't load it` };
+    const tree = problem ? null : panelTree(folder, trust);
+    problem ??= tree?.problem ?? null;
+    if (problem) return done({ status: "untrusted", error: `${problem}; WireBuddy doesn't load it` });
+    let m: Record<string, unknown>;
     try {
-      const m = JSON.parse(readChecked(join(folder, MANIFEST), trust, MAX_MANIFEST).toString("utf8")) as Record<string, unknown>;
+      m = JSON.parse(readChecked(join(folder, MANIFEST), trust, MAX_MANIFEST).toString("utf8")) as Record<string, unknown>;
       info.label = typeof m.label === "string" && m.label ? printable(m.label).slice(0, 60) : shown;
       info.version = typeof m.version === "string" ? printable(m.version).slice(0, 20) : "";
       info.description = typeof m.description === "string" ? printable(m.description).slice(0, 300) : "";
     } catch (err) {
-      return { ...info, status: "invalid", error: `${MANIFEST}: ${printable((err as Error).message)}` };
+      return done({ status: "invalid", error: `${MANIFEST}: ${printable((err as Error).message)}` });
     }
-    if (!lua.length) return { ...info, status: "invalid", error: "no .lua file" };
-    if (!info.enabled) return { ...info, status: "off", error: this.state.off[name] || undefined };
+    info.lua = lua.length > 0;
+    let panel: PanelManifest | null = null;
+    if (m.panel !== undefined && m.panel !== false) {
+      try {
+        panel = panelManifest(m.panel, info.label);
+      } catch (err) {
+        return done({ status: "invalid", error: `${MANIFEST}: panel: ${printable((err as Error).message)}` });
+      }
+      if (tree?.invalid) return done({ status: "invalid", error: tree.invalid });
+      info.panel = { title: panel.title, open: false, stale: false };
+    }
+    if (!info.lua && !panel) return done({ status: "invalid", error: "neither a .lua file nor a panel" });
+    if (!info.enabled) return done({ status: "off", error: this.state.off[name] || undefined }, panel);
+    // A panel alone never goes to sharkd
+    if (!info.lua) return done({ status: "loaded" }, panel);
     const last = this.last.get(name);
-    return last ? { ...info, status: last.status, error: last.error, protocols: last.protocols } : info;
+    return done(last ? { status: last.status, error: last.error, protocols: last.protocols } : {}, panel);
   }
+
+  /** A panel's files, read and checked again now: what its frame will be served. */
+  panelFiles(name: string): PanelFiles {
+    const e = this.panelEntry(name);
+    const tree = panelTree(e.folder, e.trust);
+    if (tree.problem || tree.invalid) throw new Error(`${tree.problem ?? tree.invalid}`);
+    const files = new Map<string, { bytes: Buffer; type: string }>();
+    let body = "";
+    for (const f of tree.files) {
+      const bytes = readChecked(f.path, e.trust, PANEL_MAX_FILE);
+      if (f.rel === "body.html") body = bytes.toString("utf8");
+      else files.set(f.rel, { bytes, type: PANEL_TYPES[extname(f.rel).toLowerCase()] });
+    }
+    return { folder: e.folder, manifest: e.panel!, files, body, fingerprint: fingerprint(e.folder, tree) };
+  }
+
+  /** Changes when the panel's files or extension.json change; null without a panel. */
+  panelFingerprint(name: string): string | null {
+    const e = this.entries().find((x) => x.info.name === name);
+    return e?.panel ? fingerprint(e.folder, panelTree(e.folder, e.trust)) : null;
+  }
+
+  private panelEntry(name: string): Entry {
+    const e = this.entries().find((x) => x.info.name === name);
+    if (!e) throw new Error(this.missing(name));
+    if (!loadable(e.info)) throw new Error(`extension "${name}" can't load: ${e.info.error}`);
+    if (!e.panel) throw new Error(`extension "${name}" has no panel ("panel" in its extension.json, and panel/main.js)`);
+    if (!e.info.enabled) throw new Error(`extension "${name}" is switched off`);
+    return e;
+  }
+
 
   /** Records a sharkd load report, which covers every extension it loaded; returns what changed, for the agent. */
   report(r: LuaReport): { level: "INFO" | "WARNING" | "ERROR"; text: string }[] {
@@ -701,7 +815,8 @@ export class Extensions {
     writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2), { mode: 0o600 });
   }
 
-  guide(): string {
+  guide(topic: "lua" | "panel" = "lua"): string {
+    if (topic === "panel") return this.panelGuide();
     const shared = this.shared.length ? `\nShared extensions (read-only for you unless the user says otherwise): ${this.shared.join(", ")}` : "";
     const own = existsSync(this.dir) ? rootTrust(this.dir).problem : null;
     const why = this.unavailable ? `\n\nExtensions are unavailable right now: ${this.unavailable}` : own ? `\n\nWireBuddy can't use ${this.dir} right now: ${own}. Tell the user.` : "";
@@ -754,7 +869,60 @@ ${TEMPLATES.heuristic}
 Template, post-dissector (computed field on packets decoded by others):
 ${TEMPLATES.postdissector}
 Template, a known protocol on another port:
-${TEMPLATES.decodeAs}${why}`;
+${TEMPLATES.decodeAs}
+Panels (a window of your own in the user's view: images, video, point clouds, charts): topic "panel".${why}`;
+  }
+
+  /** How to write a panel: for the agent. */
+  private panelGuide(): string {
+    return `# WireBuddy panels
+
+A panel is a small web page you write; WireBuddy shows it in a window of its UI. It lives in an
+extension folder, with or without a Lua dissector (topic "lua"), and runs sandboxed on an origin
+of its own: no network, no access to WireBuddy's page or API.
+
+Folder: ${this.dir}/<name>/
+  extension.json   {"label": "...", "version": "1", "description": "...",
+                    "panel": {"title": "...", "size": [800, 560], "params": {...}}}   ("panel": true for defaults)
+  panel/main.js    required: an ES module; \`wb\` is a global; top-level await works
+  panel/body.html  optional HTML put into <body> (no scripts, no on*= attributes)
+  panel/style.css  optional; panel/... more modules (import "./x.js"), workers, images, fonts, data
+  At most 4 folders deep, 200 files, 8 MiB a file, 16 MiB in all.
+
+Loop:
+1. Write the files with your file tools.
+2. extensions action "test": manifest, file trust, JavaScript syntax (file:line) and lints.
+3. panel action "open": starts it in the user's view and reports whether it got ready, its errors
+   (file:line) and what it shows.
+4. Fix, then panel action "reload"; repeat. panel action "status" shows errors and console lines since
+   your last look.
+5. Tell the user what the panel shows and that View › Panels opens it again.
+
+Rules:
+- No network: only the panel's own files. Copy libraries into panel/.
+- No inline scripts, on*= attributes, eval or new Function (the page's policy blocks them).
+- Text from packets goes into the page with textContent or wb.h, never innerHTML.
+- Don't navigate or open windows: a panel that navigates is closed. One that stops responding
+  for 20 s is stopped.
+- Call wb.ready() once the first view is drawn.
+
+API (global wb):
+  wb.params                 the panel's "params" from extension.json
+  wb.ready()                it works: the agent hears it, with what it shows
+  wb.status(text)           a short status line under the window
+  wb.title(text)            the window's title
+  wb.h(tag, attrs, ...children)   an element; attrs: class, style (object), on<event> functions, others as attributes
+  wb.canvas({context: "2d" | "webgl2", onResize(w, h, dpr)})   a canvas filling the panel: {canvas, ctx} or {canvas, gl}
+  wb.hex(bytes, max)  wb.text(bytes)  wb.fmt.bytes(n)  wb.fmt.duration(s)
+  console.* lines and uncaught errors are reported to you.
+
+Minimal panel/main.js:
+  const { ctx, canvas } = wb.canvas({ context: "2d" });
+  ctx.fillStyle = "steelblue";
+  ctx.fillRect(10, 10, canvas.width / 2, canvas.height / 2);
+  wb.status("Hello from a panel");
+  wb.ready();
+with extension.json {"label": "Hello", "version": "1", "description": "A first panel", "panel": true}`;
   }
 
   /** Throws unless `name` is an extension that exists (and with `loadable`, could load). */
@@ -771,7 +939,7 @@ ${TEMPLATES.decodeAs}${why}`;
 
   /** Whether any extension decodes now (also one that loaded only partly). */
   active(): number {
-    return this.list().filter((e) => e.status === "loaded" || (e.status === "error" && e.protocols.length)).length;
+    return this.list().filter((e) => e.lua && (e.status === "loaded" || (e.status === "error" && e.protocols.length))).length;
   }
 
   failing(): number {
@@ -793,6 +961,89 @@ function luaFiles(folder: string): string[] {
   return readdirSync(folder)
     .filter((f) => f.endsWith(".lua") && !/[\t\n]/.test(f))
     .sort();
+}
+
+interface PanelTree {
+  files: { rel: string; path: string; size: number; mtimeMs: number }[];
+  /** Others could have changed something in it. */
+  problem: string | null;
+  invalid: string | null;
+}
+
+/** The files of an extension's panel folder, checked like its Lua; none when there is no panel folder. */
+function panelTree(folder: string, trust: RootTrust): PanelTree {
+  const root = join(folder, PANEL_DIR);
+  const out: PanelTree = { files: [], problem: null, invalid: null };
+  if (!lstatSync(root, { throwIfNoEntry: false })) return out;
+  let total = 0;
+  const walk = (dir: string, rel: string, depth: number): void => {
+    out.problem ??= entryProblem(dir, "folder", trust);
+    for (const name of out.problem ? [] : readdirSync(dir).sort()) {
+      if (out.problem || out.invalid) return;
+      const path = join(dir, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const shown = `${PANEL_DIR}/${printable(r)}`;
+      if (!PANEL_SEGMENT.test(name) || (!rel && name === "_wb")) {
+        out.invalid = `${shown}: names may only use letters, digits, '.', '_' and '-' and start with a letter or digit ("_wb" is WireBuddy's)`;
+        return;
+      }
+      const st = lstatSync(path);
+      if (st.isDirectory()) {
+        if (depth >= PANEL_MAX_DEPTH) out.invalid = `${shown}: more than ${PANEL_MAX_DEPTH} folders deep`;
+        else walk(path, r, depth + 1);
+        continue;
+      }
+      out.problem ??= entryProblem(path, "file", trust);
+      // Only what a frame can use is served
+      if (out.problem || (r !== "body.html" && !PANEL_TYPES[extname(name).toLowerCase()])) continue;
+      total += st.size;
+      if (st.size > PANEL_MAX_FILE) out.invalid = `${shown} is larger than ${PANEL_MAX_FILE / 1024 / 1024} MiB`;
+      else if (total > PANEL_MAX_TOTAL) out.invalid = `${PANEL_DIR}/ holds more than ${PANEL_MAX_TOTAL / 1024 / 1024} MiB`;
+      else if (out.files.length >= PANEL_MAX_FILES) out.invalid = `${PANEL_DIR}/ holds more than ${PANEL_MAX_FILES} files`;
+      else out.files.push({ rel: r, path, size: st.size, mtimeMs: st.mtimeMs });
+    }
+  };
+  try {
+    walk(root, "", 1);
+  } catch {
+    out.problem ??= `${printable(root)} can't be read`;
+  }
+  if (!out.problem && !out.invalid && !out.files.some((f) => f.rel === "main.js")) out.invalid = `${PANEL_DIR}/main.js is missing`;
+  return out;
+}
+
+function fingerprint(folder: string, tree: PanelTree): string {
+  const manifest = lstatSync(join(folder, MANIFEST), { throwIfNoEntry: false });
+  return [`${manifest?.size}:${manifest?.mtimeMs}`, ...tree.files.map((f) => `${f.rel}:${f.size}:${f.mtimeMs}`)].join("|");
+}
+
+/** The "panel" of an extension.json: true for all defaults, or an object. */
+function panelManifest(value: unknown, label: string): PanelManifest {
+  const o = value === true ? {} : value;
+  if (!o || typeof o !== "object" || Array.isArray(o)) throw new Error("must be true or an object");
+  const p = o as Record<string, unknown>;
+  const num = (v: unknown, lo: number, hi: number, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : fallback);
+  const size = Array.isArray(p.size) ? p.size : [];
+  const params = p.params ?? {};
+  if (typeof params !== "object" || Array.isArray(params) || params === null) throw new Error("params must be an object");
+  if (JSON.stringify(params).length > 8192) throw new Error("params are larger than 8 KiB");
+  let offer: PanelManifest["offer"] = null;
+  if (p.offer !== undefined) {
+    const of = p.offer as Record<string, unknown>;
+    if (!of || typeof of.filter !== "string" || !of.filter.trim() || of.filter.length > 1024) throw new Error("offer.filter must be a display filter of at most 1 KiB");
+    offer = { filter: of.filter.trim(), text: typeof of.text === "string" && of.text.trim() ? printable(of.text).slice(0, 40) : "Open" };
+  }
+  const permissions = p.permissions ?? [];
+  if (!Array.isArray(permissions) || !permissions.every((x) => x === "control")) throw new Error('permissions may only list "control"');
+  if (p.wasm !== undefined && typeof p.wasm !== "boolean") throw new Error("wasm must be true or false");
+  return {
+    title: typeof p.title === "string" && p.title.trim() ? printable(p.title).slice(0, 60) : label,
+    size: [num(size[0], 320, 1600, 800), num(size[1], 200, 1200, 560)],
+    params: params as Record<string, unknown>,
+    offer,
+    permissions: [...new Set(permissions as string[])],
+    wasm: p.wasm === true,
+  };
 }
 
 function readState(file: string): State {

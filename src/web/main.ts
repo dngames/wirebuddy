@@ -15,6 +15,7 @@ import { nodeAtOffset, srcIndex } from "./frame.ts";
 import { menuOpen } from "./menu.ts";
 import { createMenuBar, menuBarKey } from "./menubar.ts";
 import { createPacketList, focusPacketList } from "./packetlist.ts";
+import { initPanels } from "./panels.ts";
 import { createPanes } from "./panes.ts";
 import { createStatusBar } from "./statusbar.ts";
 import { createToastHost, reportProblem, toast } from "./toast.ts";
@@ -41,6 +42,7 @@ function init(): void {
   const menuBar = createMenuBar();
   const toolbar = createToolbar();
   initCapture();
+  initPanels();
   const filterBar = createFilterBar();
   const findBar = createFindBar();
   const banner = createBanner();

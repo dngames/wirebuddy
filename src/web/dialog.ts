@@ -130,6 +130,8 @@ export class Dialog {
     e.preventDefault();
     const bar = e.currentTarget as HTMLElement;
     bar.setPointerCapture(e.pointerId);
+    // Panel frames would swallow the pointer while it moves over them
+    document.body.classList.add("dlg-moving");
     const r = this.win.getBoundingClientRect();
     const dx = e.clientX - r.left;
     const dy = e.clientY - r.top;
@@ -138,6 +140,7 @@ export class Dialog {
       this.win.style.top = `${clamp(ev.clientY - dy, 0, window.innerHeight - 30)}px`;
     };
     const up = (): void => {
+      document.body.classList.remove("dlg-moving");
       bar.removeEventListener("pointermove", move);
       bar.removeEventListener("pointerup", up);
       bar.removeEventListener("pointercancel", up);

@@ -1,0 +1,45 @@
+/* A panel's base style: WireBuddy's colors, a full-size body */
+
+:root {
+  color-scheme: light dark;
+  --wb-bg: #ffffff;
+  --wb-fg: #1d1d1f;
+  --wb-muted: #5f6368;
+  --wb-accent: #2e6fd8;
+  --wb-border: #c4c4c4;
+  --wb-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wb-bg: #1e1f22;
+    --wb-fg: #dfe1e5;
+    --wb-muted: #a4a8ae;
+    --wb-accent: #6ea0f2;
+    --wb-border: #45474c;
+  }
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  font: 13px/1.4 system-ui, sans-serif;
+  overflow: auto;
+}
+
+pre,
+code {
+  font-family: var(--wb-mono);
+}
+
+canvas.wb-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

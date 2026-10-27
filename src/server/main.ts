@@ -92,6 +92,7 @@ const viewer = new Viewer({
   editcap: which("editcap") ?? "editcap",
   mergecap: which("mergecap") ?? "mergecap",
   extensions,
+  panelRuntime: join(dirname(fileURLToPath(import.meta.url)), "../panel"),
 });
 // The status bar's count only: never a reason not to start
 try {

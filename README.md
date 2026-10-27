@@ -131,6 +131,20 @@ folder that colleagues can write is ignored, and so is a folder on a network or 
 where that can't be checked. Only let an agent write extensions if you would let it run commands,
 and look at what it wrote. Extensions need Linux.
 
+### Panels
+
+An extension can also bring a **panel**: a small web page of its own (`panel/main.js`, plus
+optional HTML, CSS and further modules) that WireBuddy shows in a window next to the packets.
+The agent writes one when a picture says more than packet rows, checks it
+(`extensions action "test"` finds syntax errors with file and line), opens it with the `panel`
+tool and gets told whether it started, what it shows and every error it throws. You open panels
+under **View › Panels** or in Analyze › Extensions.
+
+Each panel runs sandboxed on a one-time origin of its own (`p<random>.localhost`), in its own
+browser process: it can't reach WireBuddy's API, its token or the network, only its own files. A
+panel that stops responding is stopped after 20 seconds without slowing WireBuddy down; one that
+tries to navigate is closed.
+
 ## Dissector plugins and profiles
 
 WireBuddy decodes with `sharkd`, which loads the same plugins and settings as Wireshark:
@@ -199,7 +213,8 @@ Example prompts:
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `stop_capture` | Stop the running capture |
 | `open_in_wireshark` | Open the capture in the real Wireshark at the selected frame |
-| `extensions` | Lua dissector extensions: a guide with templates, list, test one on the open capture, reload, enable, disable |
+| `extensions` | Lua dissector extensions and panels: a guide with templates, list, test one on the open capture, reload, enable, disable |
+| `panel` | Open, reload, check on or close an extension's panel in the user's view |
 
 Every agent action that changes the view shows a notice in the UI. Every tool result also
 carries what happened in the viewer since the agent's last call: problems and what you did.

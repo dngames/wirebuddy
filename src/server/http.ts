@@ -95,6 +95,10 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/capture/stop": () => (viewer.capture.stop(), ok),
     "/api/extensions/enable": async (_q, b) => (await viewer.setExtensionEnabled(String(b.name ?? ""), flag(b.on, "on")), viewer.extensionList()),
     "/api/extensions/reload": async () => (await viewer.reloadExtensions(), viewer.extensionList()),
+    "/api/panels/open": (_q, b) => (viewer.panels.openPanel(String(b.name ?? ""), "user"), ok),
+    "/api/panels/reload": (_q, b) => (viewer.panels.openPanel(String(b.name ?? ""), "user"), ok),
+    "/api/panels/close": (_q, b) => (viewer.panels.close(String(b.name ?? "")), ok),
+    "/api/panels/health": (_q, b) => (viewer.panels.health(String(b.name ?? ""), String(b.label ?? ""), panelHealth(b.state)), ok),
     // Problems in the page itself (exceptions), for the agent
     "/api/events": (_q, b) => (viewer.events.add(eventLevel(b.level), String(b.text ?? "").slice(0, 500), b.details && typeof b.details === "object" ? b.details : undefined), ok),
     "/api/events/take": () => ({ events: viewer.events.take() }),
@@ -132,11 +136,13 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
 
   const server = createServer(async (req, res) => {
     try {
+      // Panels have hosts of their own and never reach what follows
+      if (await viewer.panels.handle(req, res, req.headers.host ?? "")) return;
       if (!trusted(req)) return send(res, 403, { error: "forbidden" });
       const url = parseUrl(req.url);
       if (!url) return send(res, 400, { error: "bad request" });
 
-      if (!url.pathname.startsWith("/api/")) return serveStatic(res, webRoot, url.pathname);
+      if (!url.pathname.startsWith("/api/")) return serveStatic(res, webRoot, url.pathname, port);
       // A header, never the query string: URLs end up in logs, history and Referer headers
       if (!tokenOk(req.headers["x-wirebuddy-token"])) return send(res, 401, { error: "missing or wrong token" });
 
@@ -215,6 +221,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
   });
   const address = server.address();
   port = typeof address === "object" && address ? address.port : port;
+  viewer.panels.port = port;
 
   return {
     url: `http://127.0.0.1:${port}/?token=${token}`,
@@ -245,8 +252,12 @@ const MAX_BODY = 1024 * 1024;
 
 const SECURITY_HEADERS = { "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin" };
 
-/** The page loads only its own code; inline styles come from the UI's own style properties. */
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'";
+/**
+ * The page loads only its own code; inline styles come from the UI's own style properties.
+ * Frames only on panel hosts of this server, which also keeps a panel from navigating away.
+ */
+const csp = (port: number): string =>
+  `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src http://*.localhost:${port}; object-src 'none'; base-uri 'none'; form-action 'none'`;
 
 /** Longest a watcher's request waits for an event. */
 const MAX_EVENT_WAIT_MS = 60_000;
@@ -273,6 +284,8 @@ const ACTIONS: Record<string, string> = {
   "/api/capture/stop": "Stopping the capture",
   "/api/extensions/enable": "Switching an extension",
   "/api/extensions/reload": "Reloading the extensions",
+  "/api/panels/open": "Opening a panel",
+  "/api/panels/reload": "Reloading a panel",
   "/api/files": "Listing a folder",
   "/api/stats/phs": "Protocol hierarchy",
   "/api/stats/conv": "Conversations",
@@ -321,9 +334,21 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       return { level: "INFO", text: `The user switched the extension "${String(b.name ?? "")}" ${b.on ? "on" : "off"}` };
     case "/api/extensions/reload":
       return { level: "INFO", text: "The user reloaded the extensions" };
+    case "/api/panels/open":
+    case "/api/panels/reload":
+      return { level: "INFO", text: `The user opened the panel "${String(b.name ?? "")}"` };
+    case "/api/panels/close":
+      return { level: "INFO", text: `The user closed the panel "${String(b.name ?? "")}"` };
     default:
       return null;
   }
+}
+
+function panelHealth(value: unknown): Parameters<Viewer["panels"]["health"]>[2] {
+  const states = ["not-responding", "responding", "stopped", "navigated", "isolated", "not-isolated", "flooding"] as const;
+  const v = states.find((s) => s === value);
+  if (!v) throw new HttpError(400, `state must be one of ${states.join(", ")}`);
+  return v;
 }
 
 function eventLevel(value: unknown): ViewerEvent["level"] {
@@ -398,7 +423,7 @@ function readJson(req: IncomingMessage): Promise<any> {
   });
 }
 
-function serveStatic(res: ServerResponse, root: string, pathname: string): void {
+function serveStatic(res: ServerResponse, root: string, pathname: string, port: number): void {
   const rel = pathname === "/" ? "index.html" : decodeURIComponent(pathname).replace(/^\/+/, "");
   const file = resolve(root, rel);
   if (!file.startsWith(resolve(root) + "/") || !existsSync(file) || !statSync(file).isFile()) {
@@ -412,7 +437,7 @@ function serveStatic(res: ServerResponse, root: string, pathname: string): void 
     "content-type": MIME[extname(file)] ?? "application/octet-stream",
     "cache-control": "no-cache",
     ...SECURITY_HEADERS,
-    ...(html ? { "content-security-policy": CSP } : {}),
+    ...(html ? { "content-security-policy": csp(port) } : {}),
   });
   res.end(readFileSync(file));
 }

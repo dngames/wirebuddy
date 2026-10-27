@@ -9,6 +9,7 @@ import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
+import { Panels } from "./panels.ts";
 import { printable } from "./text.ts";
 import { launchWireshark } from "./wireshark.ts";
 import { countRanges, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
@@ -127,6 +128,8 @@ export class Viewer extends EventEmitter {
   private wiresharkAt = 0;
   /** Lua dissector extensions sharkd and Wireshark load. */
   readonly extensions: Extensions;
+  /** Extensions' panels open in the UI. */
+  readonly panels: Panels;
   /** sharkd starts an extension crashed; a load is retried after each. */
   private extensionCrashes = 0;
   /** Lua errors the extensions reported for the open file, told to the agent in batches. */
@@ -162,9 +165,13 @@ export class Viewer extends EventEmitter {
     editcap?: string;
     mergecap?: string;
     extensions?: Extensions;
+    /** Where the panels' bridge and base style are built (dist/panel). */
+    panelRuntime?: string;
   }) {
     super();
     this.extensions = opts.extensions ?? new Extensions();
+    this.panels = new Panels(this.extensions, this.events, opts.panelRuntime ?? "");
+    this.panels.on("change", () => this.set({ panels: this.panels.list() }));
     this.sharkdBin = opts.sharkd ?? "sharkd";
     const env = () => this.extensions.env();
     const generation = () => this.extensions.generation;
@@ -211,6 +218,7 @@ export class Viewer extends EventEmitter {
       customColumns: [],
       tlsKeylog: null,
       extensions: { active: 0, failing: 0, revision: 0 },
+      panels: [],
     };
     this.capture.on("change", (capture: CaptureState) => {
       if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
@@ -1051,7 +1059,13 @@ export class Viewer extends EventEmitter {
 
   /** Extensions as the UI lists them. */
   extensionList(): ExtensionList {
-    return this.extensions.listing();
+    const list = this.extensions.listing();
+    for (const e of list.extensions) {
+      if (!e.panel || !this.panels.isOpen(e.name)) continue;
+      e.panel.open = true;
+      e.panel.stale = this.panels.report(e.name, false).stale;
+    }
+    return list;
   }
 
   /** Re-counts active and failing extensions for the status bar. */
@@ -1120,6 +1134,9 @@ export class Viewer extends EventEmitter {
   async setExtensionEnabled(name: string, on: boolean): Promise<void> {
     this.extensions.check(name, on);
     this.extensions.setEnabled(name, on);
+    if (!on) this.panels.close(name);
+    // A panel alone needs no sharkd restart
+    if (on && !this.extensions.list().find((e) => e.name === name)?.lua) return this.refreshExtensions();
     await this.reloadExtensions({ name, on });
   }
 

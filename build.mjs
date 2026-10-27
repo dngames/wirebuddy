@@ -30,7 +30,20 @@ await build({
   logLevel: "info",
 });
 
+// Panels load this classic script first, from their own origin
+await build({
+  entryPoints: ["src/panel/bridge.ts"],
+  outfile: "dist/panel/bridge.js",
+  bundle: true,
+  platform: "browser",
+  format: "iife",
+  target: "es2022",
+  define,
+  logLevel: "info",
+});
+
 mkdirSync("dist/web", { recursive: true });
 cpSync("src/web/index.html", "dist/web/index.html");
 cpSync("src/web/styles.css", "dist/web/styles.css");
+cpSync("src/panel/base.css", "dist/panel/base.css");
 

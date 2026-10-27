@@ -251,14 +251,29 @@ try {
   await call("query_packets", { filter: "acme", limit: 1 }, (t, r) => assert.ok(r.isError || /0 of|no packets|0 rows/i.test(t), t));
   rmSync(join(extDir, "acme_heur"), { recursive: true });
   await call("extensions", { action: "reload" }, (t) => {
-    assert.match(t, /^acme \[loaded\] acme v1 — test; protocols: acme$/m);
+    assert.match(t, /^acme \[loaded\] \[lua\] acme v1 — test; protocols: acme$/m);
     assert.match(t, /^acme_gap \[loaded\]/m);
     assert.match(t, /Extension "acme" loaded \(protocols: acme\)/);
   });
   await call("query_packets", { filter: "acme.kind == 2", fields: ["acme.seq"] }, (t) => assert.match(t, /\b18\b/));
   await call("extensions", { action: "disable", name: "acme_gap" }, (t) => assert.match(t, /^acme_gap \[off\]/m));
   await call("extensions", { action: "test", name: "acme_gap" }, (t) => assert.match(t, /extensions action "enable" applies it/));
-  await call("extensions", { action: "list" }, (t) => assert.match(t, /^acme \[loaded\]/m));
+  await call("extensions", { action: "list" }, (t) => assert.match(t, /^acme \[loaded\] \[lua\]/m));
+
+  // Panels: written by the agent, checked before they run
+  await call("extensions", { action: "guide", topic: "panel" }, (t) => assert.match(t, /wb\.ready\(\)/));
+  mkdirSync(join(extDir, "viewpanel", "panel"), { recursive: true });
+  writeFileSync(join(extDir, "viewpanel", "extension.json"), JSON.stringify({ label: "View", version: "1", panel: true }));
+  writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "const x = 1;\nconst y = ;\n");
+  await call("extensions", { action: "test", name: "viewpanel" }, (t) => assert.match(t, /viewpanel\/panel\/main\.js:2: SyntaxError/));
+  await call("panel", { action: "open", name: "viewpanel" }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /not opened/);
+  });
+  writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "wb.ready();\n");
+  await call("panel", { action: "open", name: "viewpanel", wait_ms: 200 }, (t) => assert.match(t, /The panel starts once the viewer is open: open http/));
+  await call("panel", { action: "status" }, (t) => assert.match(t, /^viewpanel: starting/m));
+  await call("panel", { action: "close", name: "viewpanel" }, (t) => assert.match(t, /Closed the panel "viewpanel"/));
 } finally {
   await client.close();
   rmSync(out, { recursive: true, force: true });

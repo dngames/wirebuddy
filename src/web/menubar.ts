@@ -10,6 +10,7 @@ import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
 import { closeMenus, menuOpen, menuOwner, SEP, showMenu, toggleMenuAt, type MenuItem } from "./menu.ts";
 import { packetCopyItems } from "./packetlist.ts";
+import { panelItems } from "./panels.ts";
 import { toast } from "./toast.ts";
 import { baseName, h, IS_MAC, isTextInput, keyLetter } from "./util.ts";
 
@@ -108,7 +109,12 @@ const MENUS: TopMenu[] = [
     title: "View",
     key: "V",
     items: () =>
-      items("zoomIn", "zoomOut", "zoomNormal", "resizeColumns", "resetLayout", SEP, "expandSubtrees", "collapseSubtrees", "expandAll", "collapseAll", SEP, "colorize", "autoScroll", SEP, "reload"),
+      [
+        ...items("zoomIn", "zoomOut", "zoomNormal", "resizeColumns", "resetLayout", SEP, "expandSubtrees", "collapseSubtrees", "expandAll", "collapseAll", SEP, "colorize", "autoScroll", SEP),
+        { label: "Panels", sub: panelItems() },
+        SEP,
+        ...items("reload"),
+      ],
   },
   {
     title: "Go",

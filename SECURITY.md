@@ -48,6 +48,16 @@ Supported versions: the latest `main` and the latest release.
 - On every reload WireBuddy copies the extensions into its own plugin folder, created fresh with a
   random name in a folder only the user can write; `sharkd` and Wireshark load those copies.
 - Extensions are only supported on Linux, where these checks apply.
+- An extension's panel (its own web page) runs in a sandboxed frame on a one-time origin of its
+  own, `p<130 random bits>.localhost:<port>`, never with the token. Its responses carry a Content
+  Security Policy that allows only its own files and requests to its own origin, and the panel
+  host serves nothing but the files read (and checked like Lua) when the panel opened, and only to
+  that page. The main page frames only panel hosts, so a panel can't navigate elsewhere either;
+  one that tries is closed, and one that stops responding is stopped.
+- Residual risks of panels: code in a panel can still reach the network through WebRTC, which no
+  Content Security Policy blocks, so a panel has the same trust as the Lua the agent writes; and
+  the isolation needs a browser that puts each `*.localhost` site into a process of its own (the
+  page checks this and reports a panel that isn't).
 - Packet contents are untrusted and are always rendered as text, never as HTML.
 - Problems in the viewer and what the user does there are reported to the attached agent
   (`--watch` reads them through an instance file only the user can read).

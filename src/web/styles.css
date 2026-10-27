@@ -2967,3 +2967,58 @@ button.sb-led:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------- panels */
+
+.dlg-panel .dlg-body {
+  padding: 0;
+  overflow: hidden;
+}
+
+.panel-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--panel);
+}
+
+/* Frames would catch the pointer while a window moves or resizes */
+body.dlg-moving .panel-frame {
+  pointer-events: none;
+}
+
+.dlg-panel.pn-max {
+  left: 4px !important;
+  top: 4px !important;
+  width: calc(100vw - 8px) !important;
+  height: calc(100vh - 8px) !important;
+}
+
+.dlg-panel.pn-hung .panel-frame {
+  opacity: 0.5;
+}
+
+.pn-dead {
+  margin: auto;
+  padding: 16px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.pn-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pn-status.not-responding,
+.pn-status.stopped,
+.pn-status.error,
+.pn-status.has-errors {
+  color: var(--danger);
+}
+
+.ext-panel {
+  padding: 1px 8px;
+}

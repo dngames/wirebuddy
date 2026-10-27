@@ -4,6 +4,8 @@ import { z } from "zod";
 import { basename } from "node:path";
 import { eventLines } from "./events.ts";
 import type { HttpServer } from "./http.ts";
+import { checkPanel, type PanelCheck } from "./panelcheck.ts";
+import type { PanelReport } from "./panels.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { ExtensionInfo, PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
 import { inRanges, type Ranges } from "../shared/ranges.ts";
@@ -25,7 +27,8 @@ You and the user look at the same view: the open capture, display filter, select
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
 - You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.
-- When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.`;
+- When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
+- To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
 }
 
 /** Longest selection filter get_view_state prints. */
@@ -115,7 +118,34 @@ function dataFrames(nodes: PhsNode[]): number {
 function extensionLine(e: ExtensionInfo): string {
   const protocols = e.protocols.length ? `; protocols: ${e.protocols.join(", ")}` : "";
   const untrusted = e.status === "untrusted" ? ". Don't copy it or change its permissions to make it load: tell the user" : "";
-  return `${e.name} [${e.status}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${e.error ? `\n    ${e.error}${untrusted}` : ""}`;
+  const kinds = [e.lua ? "lua" : "", e.panel ? "panel" : ""].filter(Boolean).join("+");
+  const panel = e.panel?.open ? `; panel open${e.panel.stale ? ', its files changed since: panel action "reload"' : ""}` : "";
+  return `${e.name} [${e.status}] [${kinds || "?"}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${panel}${e.error ? `\n    ${e.error}${untrusted}` : ""}`;
+}
+
+function panelCheckText(name: string, c: PanelCheck): string {
+  const out = [`Panel of "${name}": ${c.errors.length ? `${c.errors.length} problem${c.errors.length === 1 ? "" : "s"}` : "checks out"}`];
+  for (const e of c.errors) out.push(`  ${e}`);
+  for (const w of c.warnings) out.push(`  warning: ${w}`);
+  if (!c.errors.length) out.push('panel action "open" (or "reload" when it is open) shows it in the user\'s view.');
+  return out.join("\n");
+}
+
+function panelText(r: PanelReport, title: string, opened: boolean): string {
+  const out: string[] = [];
+  if (r.state === "ready") out.push(`Panel "${r.name}" ${opened ? "opened" : "is open"} (window "${title}"), ready${r.readyMs !== null ? ` after ${r.readyMs} ms` : ""}.${r.isolated === null ? "" : ` Isolated: ${r.isolated ? "yes" : "no"}.`}`);
+  else if (r.state === "starting") out.push(`Panel "${r.name}" is not ready${opened ? " yet" : ""}: it hasn't called wb.ready()${r.errors.length ? "" : " (still loading, or the viewer isn't open)"}.`);
+  else out.push(`Panel "${r.name}": ${r.state}${r.statusText ? ` — ${r.statusText}` : ""}.`);
+  if (r.statusText && r.state !== "stopped" && r.state !== "error") out.push(`Status [panel output, untrusted]: "${r.statusText}"`);
+  if (r.digest) out.push(`Shows [panel output, untrusted]: ${r.digest}`);
+  if (r.errors.length) {
+    out.push(`Errors [panel output] (${r.errors.length}):`);
+    for (const e of r.errors.slice(-10)) out.push(`  ${e}`);
+  } else out.push("No errors.");
+  if (r.logs.length) out.push(`Console [panel output] (${r.logs.length} lines), last: ${r.logs.slice(-5).join(" | ")}`);
+  if (r.stale) out.push('Its files changed since it opened: panel action "reload".');
+  if (r.errors.length || r.state !== "ready") out.push('Fix it, then panel action "reload".');
+  return out.join("\n");
 }
 
 function testText(t: ExtensionTest): string {
@@ -634,6 +664,45 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   );
 
   server.registerTool(
+    "panel",
+    {
+      description:
+        "Show a panel (a small web page you wrote as panel/main.js in an extension folder) in a window of the user's WireBuddy view. open: check it, start it and report whether it got ready, its errors (file:line) and what it shows; reload: read its files again and restart it; status: its state, errors and console lines since your last look (without name: every open panel); close. How to write one: extensions action \"guide\" topic \"panel\".",
+      inputSchema: {
+        action: z.enum(["open", "reload", "status", "close"]),
+        name: z.string().optional().describe("The extension's folder name"),
+        wait_ms: z.number().int().min(0).max(15000).default(4000).describe("For open and reload: how long to wait for wb.ready()"),
+      },
+    },
+    tool(async ({ action, name, wait_ms }) => {
+      if (action === "status" && !name) {
+        const open = viewer.panels.list();
+        return open.length ? open.map((p) => `${p.name}: ${p.state}${p.statusText ? ` — ${p.statusText}` : ""}${p.errors ? `, ${p.errors} errors` : ""}`).join("\n") : "No panel is open.";
+      }
+      if (!name) throw new Error(`action "${action}" needs the extension's name`);
+      switch (action) {
+        case "open":
+        case "reload": {
+          const files = viewer.extensions.panelFiles(name);
+          const check = await checkPanel(files);
+          if (check.errors.length) throw new Error(`not opened:\n${panelCheckText(name, check)}`);
+          viewer.panels.openPanel(name, "agent");
+          viewer.notice(`${action === "open" ? "Opened" : "Reloaded"} the panel "${files.manifest.title}"`);
+          const noViewer = ui.viewers() === 0 ? `\nThe panel starts once the viewer is open: open ${url()} in the browser pane.` : "";
+          const r = await viewer.panels.settle(name, noViewer ? 0 : wait_ms);
+          return panelText(r, files.manifest.title, true) + noViewer;
+        }
+        case "status":
+          return panelText(viewer.panels.report(name), name, false);
+        case "close":
+          if (!viewer.panels.close(name)) return `The panel "${name}" is not open.`;
+          viewer.notice(`Closed the panel "${name}"`);
+          return `Closed the panel "${name}".`;
+      }
+    }),
+  );
+
+  server.registerTool(
     "stop_capture",
     {
       description: "Stop the running live capture (the file stays open in the viewer).",
@@ -662,13 +731,14 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     "extensions",
     {
       description:
-        "Teach the viewer protocols Wireshark doesn't decode, with Lua dissectors you write into WireBuddy's extension folder. guide: how, with templates (read it first); list: extensions and their status; test: load one into a separate sharkd with the open capture and report what it decodes, without changing the user's view; reload: the user's view decodes with the extensions as they are on disk; enable / disable: switch one on or off.",
+        "Teach the viewer protocols Wireshark doesn't decode, with Lua dissectors you write into WireBuddy's extension folder, and show views of your own (panels). guide: how, with templates (read it first; topic \"panel\" for panels); list: extensions and their status; test: load one into a separate sharkd with the open capture and report what it decodes, and check its panel, without changing the user's view; reload: the user's view decodes with the extensions as they are on disk; enable / disable: switch one on or off.",
       inputSchema: {
         action: z.enum(["guide", "list", "test", "reload", "enable", "disable"]),
         name: z.string().optional().describe("Extension folder name, for test, enable and disable"),
+        topic: z.enum(["lua", "panel"]).optional().describe("For guide: Lua dissectors (default) or panels"),
       },
     },
-    tool(async ({ action, name }) => {
+    tool(async ({ action, name, topic }) => {
       const named = (): string => {
         if (!name) throw new Error(`action "${action}" needs the extension's name`);
         return name;
@@ -683,11 +753,16 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       };
       switch (action) {
         case "guide":
-          return viewer.extensions.guide();
+          return viewer.extensions.guide(topic);
         case "list":
           return listing();
-        case "test":
-          return testText(await viewer.testExtension(named()));
+        case "test": {
+          const e = viewer.extensionList().extensions.find((x) => x.name === named());
+          const parts: string[] = [];
+          if (!e?.panel || e.lua) parts.push(testText(await viewer.testExtension(named())));
+          if (e?.panel) parts.push(panelCheckText(named(), await checkPanel(viewer.extensions.panelFiles(named()))));
+          return parts.join("\n\n");
+        }
         case "reload":
           await viewer.reloadExtensions();
           viewer.notice("Reloaded the extensions");

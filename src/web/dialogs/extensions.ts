@@ -5,6 +5,7 @@ import { errorText, get, post } from "../api.ts";
 import * as act from "../actions.ts";
 import { agentName, app, bus } from "../app.ts";
 import { Dialog } from "../dialog.ts";
+import { closePanel, openPanel } from "../panels.ts";
 import { h } from "../util.ts";
 
 const STATUS: Record<ExtensionInfo["status"], string> = {
@@ -58,16 +59,17 @@ export function openExtensionsDialog(): void {
         h("td", { class: "left" }, h("div", { class: "ext-label" }, e.label), e.description ? h("div", { class: "ext-desc" }, e.description) : null),
         h("td", { class: "left" }, e.version),
         h("td", { class: "left ext-protos" }, e.protocols.join(", ")),
+        h("td", { class: "left" }, panelCell(e)),
         h("td", { class: `left ext-status ${e.status}` }, STATUS[e.status]),
       );
       row.title = e.folder;
-      return e.error ? [row, h("tr", { class: "ext-error" }, h("td"), h("td", { class: "left", colSpan: 4 }, e.error))] : [row];
+      return e.error ? [row, h("tr", { class: "ext-error" }, h("td"), h("td", { class: "left", colSpan: 5 }, e.error))] : [row];
     });
     wrap.replaceChildren(
       h(
         "table",
         { class: "stat-table ext-table" },
-        h("thead", null, h("tr", null, h("th", { class: "left" }, "On"), h("th", { class: "left" }, "Extension"), h("th", { class: "left" }, "Version"), h("th", { class: "left" }, "Protocols"), h("th", { class: "left" }, "Status"))),
+        h("thead", null, h("tr", null, h("th", { class: "left" }, "On"), h("th", { class: "left" }, "Extension"), h("th", { class: "left" }, "Version"), h("th", { class: "left" }, "Protocols"), h("th", { class: "left" }, "Panel"), h("th", { class: "left" }, "Status"))),
         h("tbody", null, rows),
       ),
     );
@@ -102,6 +104,15 @@ export function openExtensionsDialog(): void {
     else await refresh();
   };
   const setEnabled = (name: string, on: boolean): Promise<void> => run(() => post<ExtensionList>("api/extensions/enable", { name, on }));
+
+  // A panel's Open/Close; "files changed" when it shows older files than the folder has
+  const panelCell = (e: ExtensionInfo): (HTMLElement | string)[] => {
+    if (!e.panel) return [];
+    const usable = e.enabled && e.status !== "invalid" && e.status !== "untrusted";
+    const btn = h("button", { class: "btn ext-panel", disabled: !usable, title: e.panel.title }, e.panel.open ? "Close" : "Open");
+    btn.addEventListener("click", () => void run(async () => (await (e.panel!.open ? closePanel(e.name) : openPanel(e.name)), null)));
+    return e.panel.stale ? [btn, h("span", { class: "ext-desc" }, " files changed")] : [btn];
+  };
 
   const reloadBtn = d.button("Reload", () => void run(() => act.reloadExtensions()), { title: "Load the extensions again from disk (Ctrl+Shift+L)" });
   d.button("Close", () => d.close(), { primary: true });

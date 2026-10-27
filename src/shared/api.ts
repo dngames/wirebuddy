@@ -50,6 +50,13 @@
  * | GET    | /api/extensions               |                                      | ExtensionList          |
  * | POST   | /api/extensions/enable        | { name, on }                         | ExtensionList          |
  * | POST   | /api/extensions/reload        |                                      | ExtensionList          |
+ * | POST   | /api/panels/open              | { name }                             | { ok: true }           |
+ * | POST   | /api/panels/close             | { name }                             | { ok: true }           |
+ * | POST   | /api/panels/reload            | { name }                             | { ok: true }           |
+ * | POST   | /api/panels/health            | { name, label, state }               | { ok: true }           |
+ *
+ * Panels are served on hosts of their own, `p<label>.localhost:<port>`
+ * (src/server/panels.ts), never with the token.
  * | GET    | /api/events                   | ?after=<seq>&wait=<ms>&problems=1    | { events, last, taken } |
  * | POST   | /api/events                   | { level, text, details? } (from the page) | { ok: true }      |
  * | POST   | /api/events/take              |                                      | { events }             |
@@ -144,6 +151,29 @@ export interface ViewState {
    * grows with every reload, after which packets dissect differently.
    */
   extensions: { active: number; failing: number; revision: number };
+  /** Open panel windows (views of the capture that extensions bring). */
+  panels: PanelState[];
+}
+
+/** A panel window: an extension's web page in a sandboxed frame of its own. */
+export interface PanelState {
+  /** Extension name. */
+  name: string;
+  /** This opening's one-time label: its origin is p<label>.localhost. */
+  label: string;
+  /** Window title: the manifest's, or what the panel set with wb.title(). */
+  title: string;
+  /** Where the frame loads it: a one-time origin of its own. */
+  src: string;
+  size: [number, number];
+  by: "user" | "agent";
+  state: "starting" | "ready" | "not-responding" | "stopped" | "error";
+  /** wb.status() text, or why it stopped. */
+  statusText: string;
+  /** Errors reported since it opened. */
+  errors: number;
+  /** Whether it runs in a process of its own (null: not probed yet). */
+  isolated: boolean | null;
 }
 
 export interface Mark {
@@ -441,6 +471,10 @@ export interface ExtensionInfo {
   error?: string;
   /** Protocols it registered, as filter names. */
   protocols: string[];
+  /** It has Lua files for sharkd. */
+  lua: boolean;
+  /** Its panel, if it has one; `open` and `stale` (files changed since it opened) come from the viewer. */
+  panel: { title: string; open: boolean; stale: boolean } | null;
 }
 
 export interface ExtensionList {
