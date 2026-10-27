@@ -89,6 +89,11 @@ export function fieldInfoText(n: TreeNode): string {
 
 const SEV_RANK: Record<ExpertSeverity, number> = { Comment: 1, Chat: 2, Note: 3, Warning: 4, Warn: 4, Error: 5 };
 
+/** 1 (Comment) … 5 (Error); 0 for unknown values. */
+export function sevRank(s: ExpertSeverity | string | null | undefined): number {
+  return (s && SEV_RANK[s as ExpertSeverity]) || 0;
+}
+
 export function sevClass(s: ExpertSeverity | undefined): string {
   switch (s) {
     case "Comment":

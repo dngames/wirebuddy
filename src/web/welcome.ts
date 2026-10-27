@@ -3,6 +3,7 @@
 import type { RecentFiles } from "../shared/api.ts";
 import { APP_NAME, get } from "./api.ts";
 import * as act from "./actions.ts";
+import { activityBus, paintSpark, pollActivity, watchActivity } from "./activity.ts";
 import { app, bus, captureActive } from "./app.ts";
 import { cap, capBus, capOpts, captureStatusText, loadInterfaces, paintFilterInput, setOpts, startCaptureClicked } from "./capture.ts";
 import { openFileDialog } from "./dialogs/openfile.ts";
@@ -13,6 +14,7 @@ import { baseName, dirName, fmtDateTime, fmtSize, h, setText } from "./util.ts";
 export function createWelcome(): HTMLElement {
   const recentList = h("div", { class: "wl-list" });
   const ifaceList = h("div", { class: "wl-list" });
+  const sparks = new Map<string, HTMLElement>();
   const errBox = h("div", { class: "wl-error", hidden: true });
   const capStatus = h("div", { class: "wl-capstatus", hidden: true });
   const filterIn = h("input", {
@@ -74,12 +76,16 @@ export function createWelcome(): HTMLElement {
       return;
     }
     const list = cap.interfaces ?? [];
+    sparks.clear();
     if (!list.length) {
       ifaceList.replaceChildren(h("div", { class: "wl-empty" }, "No capture interfaces found"));
       return;
     }
     ifaceList.replaceChildren(
       ...list.map((i) => {
+        const spark = h("span", { class: "wl-spark" });
+        sparks.set(i.name, spark);
+        paintSpark(spark, i.name);
         const start = h(
           "button",
           { class: "btn wl-start", disabled: active || cap.filterState === "error", title: `Start capturing on ${i.name}`, onclick: () => void startCaptureClicked(i.name) },
@@ -96,6 +102,7 @@ export function createWelcome(): HTMLElement {
             h("span", { class: "wl-name" }, i.name, i.description && i.description !== i.name ? h("span", { class: "wl-desc" }, ` ${i.description}`) : null, i.loopback ? h("span", { class: "wl-tag" }, "loopback") : null),
             h("span", { class: "wl-path" }, i.addresses.length ? i.addresses.join(", ") : "no addresses"),
           ),
+          spark,
           start,
         );
       }),
@@ -141,6 +148,12 @@ export function createWelcome(): HTMLElement {
     ),
   );
 
+  const shown = (): boolean => !!app.state && !app.state.file && !app.state.loading;
+  watchActivity(shown);
+  activityBus.on("update", () => {
+    for (const [name, el] of sparks) paintSpark(el, name);
+  });
+
   let wasVisible = false;
   bus.on("state", (s) => {
     renderState();
@@ -148,6 +161,7 @@ export function createWelcome(): HTMLElement {
     if (visible && !wasVisible) {
       void loadRecent();
       if (!cap.interfaces && !cap.ifaceLoading) void loadInterfaces();
+      void pollActivity();
     }
     wasVisible = visible;
     renderIfaces();

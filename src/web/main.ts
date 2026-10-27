@@ -8,6 +8,7 @@ import { clearBytesHighlight, createBytesPane, highlightBytes, setBytesFrame } f
 import { createCaptureBar } from "./capture.ts";
 import { createDetailsPane, selectByOffset, setDetailsFrame } from "./details.ts";
 import { closeTopDialog, dialogOpen } from "./dialog.ts";
+import { openExportDialog } from "./dialogs/export.ts";
 import { openGotoDialog } from "./dialogs/goto.ts";
 import { openFileDialog } from "./dialogs/openfile.ts";
 import { createFilterBar, focusFilter } from "./filterbar.ts";
@@ -38,6 +39,9 @@ function onGlobalKey(e: KeyboardEvent): void {
   } else if (mod && !e.altKey && !e.shiftKey && key === "g") {
     e.preventDefault();
     openGotoDialog();
+  } else if (mod && !e.altKey && e.shiftKey && key === "x") {
+    e.preventDefault();
+    openExportDialog();
   } else if (mod && !e.altKey && !e.shiftKey && key === "o") {
     e.preventDefault();
     openFileDialog();

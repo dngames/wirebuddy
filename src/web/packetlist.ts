@@ -12,6 +12,7 @@ import type { PacketRow, RowsResponse, ViewState } from "../shared/api.ts";
 import { get, HttpError } from "./api.ts";
 import * as act from "./actions.ts";
 import { app, bus, captureActive, hooks } from "./app.ts";
+import { promptDialog } from "./dialog.ts";
 import { openFollowDialog } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
@@ -50,6 +51,8 @@ let spacer: HTMLDivElement;
 let overlay: HTMLDivElement;
 
 let columns: string[] = [];
+/** Titles plus custom column fields; the header is rebuilt when it changes. */
+let headerKey = "";
 let widths: number[] = [];
 const colW: Record<string, number> = load<Record<string, number>>("colwidths", {});
 let total = 0;
@@ -161,11 +164,56 @@ function computeWidths(): void {
   spacer.style.width = `${totalW}px`;
 }
 
+/** Index into state.customColumns for list column j, or -1 for a default column. */
+function customIndex(j: number): number {
+  const custom = app.state?.customColumns ?? [];
+  const k = j - (columns.length - custom.length);
+  return k >= 0 && k < custom.length ? k : -1;
+}
+
+async function editColumnTitle(k: number): Promise<void> {
+  const c = app.state?.customColumns[k];
+  if (!c) return;
+  const t = await promptDialog("Edit Column Title", "Title:", c.title, "Apply");
+  if (t === null) return;
+  const title = t.trim() || c.field;
+  const now = app.state?.customColumns ?? [];
+  void act.setCustomColumns(now.map((x) => (x.field === c.field ? { ...x, title } : x)));
+}
+
+function headerMenu(j: number, x: number, y: number): void {
+  const custom = app.state?.customColumns ?? [];
+  const k = customIndex(j);
+  const why = k < 0 ? "Only custom columns can be changed" : undefined;
+  const items: MenuItem[] = [];
+  if (k >= 0) items.push({ label: `Custom column: ${custom[k].field}`, header: true });
+  items.push(
+    { label: "Resize to Contents", action: () => autosize(j) },
+    SEP,
+    { label: "Edit Column Title…", disabled: k < 0, title: why, action: () => void editColumnTitle(k) },
+    { label: "Remove Column", disabled: k < 0, title: why, action: () => void act.setCustomColumns(custom.filter((_, i) => i !== k)) },
+    SEP,
+    { label: "Reset Custom Columns", disabled: !custom.length, action: () => void act.setCustomColumns([]) },
+  );
+  showMenu(items, x, y);
+}
+
 function buildHeader(): void {
   headerInner.replaceChildren();
   columns.forEach((c, j) => {
+    const k = customIndex(j);
+    const field = k >= 0 ? app.state?.customColumns[k]?.field : undefined;
     const grip = h("div", { class: "pl-grip", title: "Drag to resize, double-click to fit" });
-    const cell = h("div", { class: `pl-hcell${rightAligned(c) ? " right" : ""}`, style: `width:var(--c${j})`, title: c }, h("span", { class: "pl-htext" }, c), grip);
+    const cell = h(
+      "div",
+      { class: `pl-hcell${rightAligned(c) ? " right" : ""}${k >= 0 ? " custom" : ""}`, style: `width:var(--c${j})`, title: field ? `${c} (${field})` : c },
+      h("span", { class: "pl-htext" }, c),
+      grip,
+    );
+    cell.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      headerMenu(j, e.clientX, e.clientY);
+    });
     grip.addEventListener("pointerdown", (e) => startResize(e, j));
     grip.addEventListener("dblclick", (e) => {
       e.stopPropagation();
@@ -586,7 +634,9 @@ export function createPacketList(): HTMLElement {
 
   bus.on("state", (s, prev) => {
     const cols = s.columns ?? [];
-    if (cols.join("\u0001") !== columns.join("\u0001")) {
+    const key = `${cols.join("\u0001")}\u0002${(s.customColumns ?? []).map((c) => c.field).join("\u0001")}`;
+    if (key !== headerKey) {
+      headerKey = key;
       columns = cols.slice();
       buildHeader();
     }

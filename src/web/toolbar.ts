@@ -5,9 +5,13 @@ import * as act from "./actions.ts";
 import { app, bus, captureActive, hooks } from "./app.ts";
 import { cap, capBus, setBarOpen } from "./capture.ts";
 import { openConvDialog } from "./dialogs/conv.ts";
+import { openExpertDialog } from "./dialogs/expert.ts";
+import { openExportDialog } from "./dialogs/export.ts";
 import { openGotoDialog } from "./dialogs/goto.ts";
+import { openIoGraphDialog } from "./dialogs/iograph.ts";
 import { openFileDialog } from "./dialogs/openfile.ts";
 import { openPhsDialog } from "./dialogs/phs.ts";
+import { openTlsDialog } from "./dialogs/tls.ts";
 import { icon, type IconName } from "./icons.ts";
 import { SEP, toggleMenuAt, type MenuItem } from "./menu.ts";
 import { h } from "./util.ts";
@@ -55,6 +59,7 @@ function marksMenu(): MenuItem[] {
 export function createToolbar(): HTMLElement {
   const openBtn = tbButton("open", "Open", "Open a capture file (Ctrl+O)");
   const closeBtn = tbButton("close", "Close", "Close this capture file");
+  const exportBtn = tbButton("export", "Export", "Export specified packets (Ctrl+Shift+X)");
   const startBtn = tbButton("fin", "Start", "Start capturing packets");
   const stopBtn = tbButton("stop", "Stop", "Stop capturing packets");
   const optsBtn = tbButton("options", "Options", "Show capture options");
@@ -62,6 +67,7 @@ export function createToolbar(): HTMLElement {
   const gotoBtn = tbButton("goto", "Go to", "Go to packet (Ctrl+G)");
   const marksBtn = tbButton("marks", "Marks", "Marked packets", { menu: true });
   const autoBtn = tbButton("autoscroll", "Auto-scroll", "Scroll to the last packet during a live capture");
+  const tlsBtn = tbButton("lock", "TLS Keys", "Decrypt TLS with a key log file");
   const wsBtn = h(
     "button",
     { class: "tb-wireshark", title: "Open this capture in Wireshark at the selected packet" },
@@ -71,6 +77,8 @@ export function createToolbar(): HTMLElement {
 
   openBtn.addEventListener("click", () => openFileDialog());
   closeBtn.addEventListener("click", () => void act.closeFile());
+  exportBtn.addEventListener("click", () => openExportDialog());
+  tlsBtn.addEventListener("click", () => openTlsDialog());
   startBtn.addEventListener("click", () => hooks.startCapture());
   stopBtn.addEventListener("click", () => void act.stopCapture());
   optsBtn.addEventListener("click", () => setBarOpen(!cap.barOpen));
@@ -79,6 +87,9 @@ export function createToolbar(): HTMLElement {
       { label: "Protocol Hierarchy", action: () => openPhsDialog() },
       { label: "Conversations", action: () => openConvDialog("conv") },
       { label: "Endpoints", action: () => openConvDialog("endpt") },
+      SEP,
+      { label: "I/O Graphs", action: () => openIoGraphDialog() },
+      { label: "Expert Information", action: () => openExpertDialog() },
     ]),
   );
   gotoBtn.addEventListener("click", () => openGotoDialog());
@@ -94,6 +105,7 @@ export function createToolbar(): HTMLElement {
     sep(),
     openBtn,
     closeBtn,
+    exportBtn,
     sep(),
     startBtn,
     stopBtn,
@@ -103,6 +115,8 @@ export function createToolbar(): HTMLElement {
     gotoBtn,
     marksBtn,
     autoBtn,
+    sep(),
+    tlsBtn,
     h("span", { class: "tb-spacer" }),
     wsBtn,
   );
@@ -112,6 +126,11 @@ export function createToolbar(): HTMLElement {
     const hasFile = !!s?.file && !s.loading;
     const active = captureActive(s);
     closeBtn.disabled = !s?.file;
+    exportBtn.disabled = !hasFile;
+    const tls = s?.tlsKeylog ?? null;
+    tlsBtn.classList.toggle("pressed", !!tls);
+    tlsBtn.setAttribute("aria-pressed", tls ? "true" : "false");
+    tlsBtn.title = tls ? `Decrypting TLS with ${tls}` : "Decrypt TLS with a key log file";
     startBtn.disabled = active;
     stopBtn.disabled = !(s && (s.capture.status === "running" || s.capture.status === "starting"));
     startBtn.classList.toggle("live", s?.capture.status === "running");

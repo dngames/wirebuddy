@@ -15,6 +15,7 @@ const USAGE = `Usage: wirebuddy [options] [capture-file]
   --token <t>         session token for the UI/API (default: random; env WIREBUDDY_TOKEN)
   --capture-dir <d>   where live captures are written (default ~/.local/share/wirebuddy/captures)
   --profile <name>    Wireshark configuration profile for dissection (also used by Open in Wireshark)
+  --tls-keylog <file> decrypt TLS with this key log file (SSLKEYLOGFILE format)
   -h, --help          show this help`;
 
 function which(name: string): string | null {
@@ -39,6 +40,7 @@ const { values, positionals } = parseArgs({
     token: { type: "string", default: process.env.WIREBUDDY_TOKEN },
     "capture-dir": { type: "string", default: process.env.WIREBUDDY_CAPTURE_DIR },
     profile: { type: "string", default: process.env.WIREBUDDY_PROFILE },
+    "tls-keylog": { type: "string" },
     help: { type: "boolean", short: "h", default: false },
   },
 });
@@ -65,7 +67,12 @@ const viewer = new Viewer({
   dumpcap: dumpcap ?? "dumpcap",
   wireshark: which("wireshark"),
   profile: values.profile,
+  editcap: which("editcap") ?? "editcap",
+  mergecap: which("mergecap") ?? "mergecap",
 });
+const tlsKeylog = values["tls-keylog"];
+if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(`TLS key log: ${(err as Error).message}`));
+else void viewer.loadTlsPreference();
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), "../web");
 const http = await startHttp(viewer, {

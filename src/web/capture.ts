@@ -6,6 +6,7 @@
 import type { CaptureInterface, CaptureRequest, FilterCheck, ViewState } from "../shared/api.ts";
 import { errorText, get } from "./api.ts";
 import * as act from "./actions.ts";
+import { activityBus, paintSpark, pollActivity, watchActivity } from "./activity.ts";
 import { app, bus, captureActive, hooks } from "./app.ts";
 import { icon } from "./icons.ts";
 import { toast, toastError } from "./toast.ts";
@@ -242,6 +243,7 @@ function numInput(key: keyof CaptureOpts, placeholder: string, title: string): H
 export function createCaptureBar(): HTMLElement {
   const ifaceSel = h("select", { class: "cb-iface", title: "Capture interface", attrs: { "aria-label": "Capture interface" } });
   const refreshBtn = h("button", { class: "tb-mini", title: "Refresh interfaces", attrs: { "aria-label": "Refresh interfaces" }, onclick: () => void loadInterfaces() }, icon("refresh"));
+  const spark = h("span", { class: "cb-spark" });
   const filterIn = h("input", {
     class: "cb-filter",
     type: "text",
@@ -274,6 +276,7 @@ export function createCaptureBar(): HTMLElement {
     { class: "cb-row" },
     h("label", { class: "cb-lbl" }, "Interface"),
     ifaceSel,
+    spark,
     refreshBtn,
     h("label", { class: "cb-lbl" }, "Capture filter"),
     filterIn,
@@ -337,17 +340,23 @@ export function createCaptureBar(): HTMLElement {
     renderStatus();
   };
 
+  const renderSpark = (): void => paintSpark(spark, capOpts.iface);
+  watchActivity(() => cap.barOpen);
+  activityBus.on("update", renderSpark);
+
   capBus.on("ifaces", renderIfaces);
   capBus.on("check", renderState);
   capBus.on("opts", (src) => {
     if (src !== "bar:filter" && document.activeElement !== filterIn) filterIn.value = capOpts.filter;
     if (src !== "bar:iface") ifaceSel.value = capOpts.iface;
+    renderSpark();
     ringChk.checked = capOpts.ring;
     renderState();
   });
   capBus.on("bar", (open) => {
     bar.hidden = !open;
     if (open && !cap.interfaces && !cap.ifaceLoading) void loadInterfaces();
+    if (open) void pollActivity();
   });
   bus.on("state", renderState);
   bus.on("tick", renderStatus);
@@ -355,6 +364,7 @@ export function createCaptureBar(): HTMLElement {
   hooks.startCapture = (iface) => void startCaptureClicked(iface);
   renderIfaces();
   renderState();
+  renderSpark();
   runCheck();
   if (cap.barOpen) void loadInterfaces();
   return bar;

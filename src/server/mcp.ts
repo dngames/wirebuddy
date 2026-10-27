@@ -10,9 +10,12 @@ You and the user look at the same view: the open capture, display filter, select
 
 - Start with get_view_state: it tells you what the user is looking at (file, filter, selected frame, live capture).
 - Show the UI with the URL from viewer_url (open it in the browser pane).
-- Go from coarse to fine to save tokens: capture_summary -> query_packets (paginated summary rows) -> inspect_frame / follow_stream for single frames or streams.
+- Go from coarse to fine to save tokens: capture_summary / expert_info / io_graph -> query_packets (paginated summary rows, or exact field values with fields: [...]) -> inspect_frame / follow_stream for single frames or streams.
+- query_packets with fields (like tshark -T fields) is the precise way to tabulate values, e.g. fields: ["dns.qry.name", "dns.flags.rcode"].
+- export_packets writes the relevant packets to a new small capture file, e.g. a minimal repro for a bug report.
+- TLS payloads are only readable when the user has set a key log file in the UI; get_view_state tells you whether it is set.
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
-- set_display_filter, goto_frame and mark_frames change what the user sees; the user gets a notice for each.
+- set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
 - You cannot start a capture: the user starts it with a click in the UI. You can read and filter it while it runs, and stop it.`;
 
 type Text = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -133,6 +136,7 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
         lines.push(`File: ${s.file} (${s.fileSize} bytes)`);
         lines.push(`Frames: ${s.totalFrames}, displayed: ${s.displayedFrames}, duration: ${s.duration.toFixed(3)} s`);
         lines.push(`Display filter: ${s.filter || "(none)"}`);
+        if (s.customColumns.length) lines.push(`Custom columns: ${s.customColumns.map((c) => `${c.title} (${c.field})`).join(", ")}`);
         if (s.selected !== null) {
           const row = await viewer.row(s.selected);
           const hidden = s.selectedIndex < 0 ? " (hidden by the filter)" : "";
@@ -144,6 +148,7 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
           for (const m of s.marks.slice(0, 50)) lines.push(`  ${m.frame} [${m.by}]${m.note ? ` ${m.note}` : ""}`);
         }
       }
+      lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
       if (c.status !== "idle" || c.files.length) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
         lines.push(`Capture: ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
@@ -195,16 +200,23 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
   server.registerTool(
     "query_packets",
     {
-      description: "Summary rows (No. | Time | Source | Destination | Protocol | Length | Info) for a display filter, paginated. Does not change the user's view. Omit filter to use the filter the user has applied.",
+      description: "Rows for a display filter, paginated, without changing the user's view. By default the summary columns (No. | Time | Source | Destination | Protocol | Length | Info, plus the user's custom columns); with fields, exact field values per frame like tshark -T fields (all occurrences, comma-separated). Omit filter to use the filter the user has applied.",
       inputSchema: {
         filter: z.string().optional().describe("Wireshark display filter, e.g. dns.flags.rcode != 0; omit for the view's filter, \"\" for all frames"),
+        fields: z.array(z.string()).max(12).optional().describe("Field names to extract instead of the summary, e.g. [\"ip.src\", \"tcp.analysis.ack_rtt\"]"),
         offset: z.number().int().min(0).default(0),
         limit: z.number().int().min(1).max(200).default(25),
       },
       annotations: { readOnlyHint: true },
     },
-    tool(async ({ filter, offset, limit }) => {
+    tool(async ({ filter, fields, offset, limit }) => {
       const f = filter ?? viewer.state.filter;
+      if (fields?.length) {
+        const { total, rows } = await viewer.extract(f, fields, offset, limit);
+        const head = `${total} frames match ${f ? `"${f}"` : "(no filter)"}; showing ${rows.length ? `${offset + 1}-${offset + rows.length}` : "none"}`;
+        const more = offset + rows.length < total ? `\n(more: offset=${offset + rows.length})` : "";
+        return [head, ["No.", ...fields].join(" | "), ...rows.map((r) => [r.num, ...r.values].join(" | "))].join("\n") + more;
+      }
       const { total, rows } = await viewer.query(f, offset, limit);
       const cols = viewer.state.columns;
       const head = `${total} frames match ${f ? `"${f}"` : "(no filter)"}; showing ${rows.length ? `${offset + 1}-${offset + rows.length}` : "none"}`;
@@ -374,14 +386,144 @@ export async function startMcp(viewer: Viewer, url: () => string): Promise<void>
   );
 
   server.registerTool(
+    "set_columns",
+    {
+      description: "Show fields as extra columns in the user's packet list, like Wireshark's Apply as Column (replaces earlier custom columns; [] removes them).",
+      inputSchema: {
+        columns: z.array(z.object({ field: z.string(), title: z.string().optional() })).max(10).describe("e.g. [{\"field\": \"http.response.code\"}]; the title defaults to the field's name"),
+      },
+    },
+    tool(async ({ columns }) => {
+      const r = await viewer.setColumns(columns.map((c) => ({ field: c.field, title: c.title ?? "" })), "agent");
+      if (!r.ok) throw new Error(r.error);
+      const s = viewer.state;
+      return s.customColumns.length ? `Columns now: ${s.columns.join(" | ")}` : "Removed the custom columns";
+    }),
+  );
+
+  server.registerTool(
+    "expert_info",
+    {
+      description: "Wireshark's Expert Information: dissector warnings and errors (retransmissions, malformed packets, resets, ...) grouped by severity and message, with example frames. The quickest way to find what's wrong.",
+      inputSchema: {
+        min_severity: z.enum(["Comment", "Chat", "Note", "Warning", "Error"]).default("Note"),
+        filter: z.string().optional().describe("Only packets matching this display filter"),
+        frames_per_item: z.number().int().min(1).max(50).default(8),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    tool(async ({ min_severity, filter, frames_per_item }) => {
+      const order = ["Comment", "Chat", "Note", "Warning", "Error"];
+      const rank = (sev: string) => order.indexOf(sev === "Warn" ? "Warning" : sev);
+      const items = (await viewer.expert(filter)).filter((e) => rank(e.severity) >= rank(min_severity));
+      if (!items.length) return `No expert items at ${min_severity} or above${filter ? ` for "${filter}"` : ""}`;
+      const groups = new Map<string, { severity: string; group: string; protocol: string; message: string; frames: number[] }>();
+      for (const e of items) {
+        const key = `${e.severity}|${e.group}|${e.protocol}|${e.message}`;
+        const g = groups.get(key) ?? { severity: e.severity, group: e.group, protocol: e.protocol, message: e.message, frames: [] };
+        g.frames.push(e.frame);
+        groups.set(key, g);
+      }
+      const sorted = [...groups.values()].sort((a, b) => rank(b.severity) - rank(a.severity) || b.frames.length - a.frames.length);
+      const out = [`${items.length} expert items in ${sorted.length} groups${filter ? ` for "${filter}"` : ""} (severity / group / protocol / message: count, frames)`];
+      for (const g of sorted.slice(0, 60)) {
+        const frames = g.frames.slice(0, frames_per_item).join(", ") + (g.frames.length > frames_per_item ? ", ..." : "");
+        out.push(`${g.severity} / ${g.group} / ${g.protocol} / ${g.message}: ${g.frames.length}  [${frames}]`);
+      }
+      if (sorted.length > 60) out.push(`... ${sorted.length - 60} more groups; raise min_severity or add a filter`);
+      return out.join("\n");
+    }),
+  );
+
+  server.registerTool(
+    "io_graph",
+    {
+      description: "Wireshark's I/O Graph as numbers: packets, bytes or bits per time interval for up to 4 display filters. Finds spikes, gaps and stalls; returns peaks, empty stretches and a downsampled series.",
+      inputSchema: {
+        filters: z.array(z.string()).min(1).max(4).default([""]).describe("One display filter per series; \"\" for all packets"),
+        metric: z.enum(["packets", "bytes", "bits"]).default("packets"),
+        interval_ms: z.number().int().min(1).optional().describe("Bucket width; default fits about 100 buckets to the capture"),
+        points: z.number().int().min(10).max(400).default(60).describe("Values to return per series (buckets are summed down to this)"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    tool(async ({ filters, metric, interval_ms, points }) => {
+      const s = viewer.state;
+      if (!s.file) throw new Error("no capture is open");
+      const auto = Math.max(1, Math.ceil((s.duration * 1000) / 100));
+      const r = await viewer.ioGraph(filters.map((filter) => ({ metric, filter })), interval_ms ?? auto);
+      const out = [`${metric} per ${r.interval} ms over ${s.duration.toFixed(3)} s (${r.series[0]?.values.length ?? 0} buckets)`];
+      for (const series of r.series) {
+        const v = series.values;
+        const total = v.reduce((a, b) => a + b, 0);
+        let peak = 0;
+        for (let i = 1; i < v.length; i++) if (v[i] > v[peak]) peak = i;
+        const gaps: string[] = [];
+        for (let i = 0; i < v.length; ) {
+          if (v[i] !== 0) {
+            i++;
+            continue;
+          }
+          let j = i;
+          while (j < v.length && v[j] === 0) j++;
+          if (j - i >= 3) gaps.push(`${((i * r.interval) / 1000).toFixed(3)}-${((j * r.interval) / 1000).toFixed(3)} s`);
+          i = j;
+        }
+        const step = Math.max(1, Math.ceil(v.length / points));
+        const down: number[] = [];
+        for (let i = 0; i < v.length; i += step) down.push(v.slice(i, i + step).reduce((a, b) => a + b, 0));
+        out.push(
+          "",
+          `"${series.filter || "all packets"}": total ${total}, peak ${v[peak] ?? 0} at ${((peak * r.interval) / 1000).toFixed(3)} s` +
+            (gaps.length ? `, empty: ${gaps.slice(0, 10).join(", ")}${gaps.length > 10 ? ", ..." : ""}` : ""),
+          `per ${step * r.interval} ms: ${down.join(" ")}`,
+        );
+      }
+      return out.join("\n");
+    }),
+  );
+
+  server.registerTool(
+    "export_packets",
+    {
+      description: "Write packets of the open capture to a new pcapng/pcap file (Wireshark's Export Specified Packets), e.g. a minimal capture with just the relevant packets. Choose by display filter, the user's view, marks or a frame range.",
+      inputSchema: {
+        path: z.string().describe("Absolute path ending in .pcapng or .pcap; its directory must exist"),
+        filter: z.string().optional().describe("Export the frames matching this display filter"),
+        which: z.enum(["displayed", "marked", "selected", "range", "all"]).default("displayed").describe("Used when no filter is given"),
+        range: z.string().optional().describe("For which=range, e.g. \"1-10,25\""),
+        overwrite: z.boolean().default(false),
+      },
+    },
+    tool(async ({ path, filter, which, range, overwrite }) => {
+      const r = await viewer.exportPackets({ path, which, range, overwrite, ...(filter !== undefined ? { filter } : {}) }, "agent");
+      return `Wrote ${r.frames} packet${r.frames === 1 ? "" : "s"} (${r.size} bytes) to ${r.path}`;
+    }),
+  );
+
+  server.registerTool(
     "list_interfaces",
     {
-      description: "Capture interfaces available to dumpcap (for advising the user; only the user can start a capture, in the UI).",
+      description: "Capture interfaces available to dumpcap with their current traffic (packets/s), to advise the user which one to capture on. Only the user can start a capture, in the UI.",
       annotations: { readOnlyHint: true },
     },
     tool(async () => {
       const list = await viewer.capture.interfaces();
-      return list.map((i) => `${i.name}${i.description ? ` (${i.description})` : ""}${i.loopback ? " [loopback]" : ""}${i.addresses.length ? `: ${i.addresses.join(", ")}` : ""}`).join("\n");
+      let activity = viewer.capture.activity();
+      // Freshly started statistics need two samples for a rate
+      if (!Object.keys(activity.ifaces).length && !activity.error) {
+        await new Promise((r) => setTimeout(r, 2300));
+        activity = viewer.capture.activity();
+      }
+      const rate = (name: string) => {
+        const h = activity.ifaces[name];
+        if (!h?.length) return Object.keys(activity.ifaces).length ? " — no traffic statistics (dumpcap can't open it)" : "";
+        const avg = h.reduce((a, b) => a + b, 0) / h.length;
+        return ` — ${h[h.length - 1]} pkt/s now, ${avg < 10 ? avg.toFixed(1) : Math.round(avg)} pkt/s avg over ${h.length} s`;
+      };
+      const lines = list.map((i) => `${i.name}${i.description ? ` (${i.description})` : ""}${i.loopback ? " [loopback]" : ""}${i.addresses.length ? `: ${i.addresses.join(", ")}` : ""}${rate(i.name)}`);
+      if (activity.error) lines.push(`(traffic statistics unavailable: ${activity.error})`);
+      return lines.join("\n");
     }),
   );
 

@@ -1,14 +1,19 @@
 /** Status bar: expert LED, file, field info, packet counts, marks, capture, connection. */
 
-import { APP_NAME } from "./api.ts";
+import type { ExpertItem, ExpertSeverity, ViewState } from "../shared/api.ts";
+import { APP_NAME, get } from "./api.ts";
 import { app, bus } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
+import { maxItemSeverity, openExpertDialog } from "./dialogs/expert.ts";
+import { openTlsDialog } from "./dialogs/tls.ts";
 import { maxSeverity, sevClass } from "./frame.ts";
+import { icon } from "./icons.ts";
 import { baseName, fmtInt, fmtPct, fmtSize, h, setText, setTitle } from "./util.ts";
 import { reconnectNow } from "./ws.ts";
 
 export function createStatusBar(): HTMLElement {
-  const led = h("span", { class: "sb-led" });
+  const led = h("button", { class: "sb-led", attrs: { "aria-label": "Expert information" }, onclick: () => openExpertDialog() });
+  const tlsSeg = h("button", { class: "sb-seg sb-tls", hidden: true, onclick: () => openTlsDialog() }, icon("lock"), "TLS keys");
   const fileSeg = h("span", { class: "sb-seg sb-file" });
   const errSeg = h("span", { class: "sb-seg sb-err", hidden: true }, "Open failed");
   const fieldSeg = h("span", { class: "sb-seg sb-field" });
@@ -18,11 +23,50 @@ export function createStatusBar(): HTMLElement {
   const connSeg = h("button", { class: "sb-seg sb-conn", onclick: () => reconnectNow() });
   let fieldText = "";
 
+  // Capture-wide expert severity: only for finished captures of moderate size.
+  let capSev: ExpertSeverity | null = null;
+  let capKnown = false;
+  let capKey = "";
+  let capFile = "";
+  let capSeq = 0;
+  const syncCaptureExpert = (s: ViewState): void => {
+    const live = s.capture.status !== "idle" && s.capture.status !== "error";
+    if (!s.file || s.loading || live || s.totalFrames <= 0 || s.totalFrames > 200_000) {
+      capKnown = false;
+      capKey = "";
+      capSeq++;
+      return;
+    }
+    // Only what changes dissection; filter and column changes don't.
+    const key = `${s.instance}|${s.file}|${s.fileSize}|${s.totalFrames}|${s.tlsKeylog ?? ""}`;
+    if (key === capKey) return;
+    if (s.file !== capFile) capKnown = false;
+    capKey = key;
+    capFile = s.file;
+    const seq = ++capSeq;
+    get<ExpertItem[]>("api/stats/expert")
+      .then((items) => {
+        if (seq !== capSeq) return;
+        capSev = maxItemSeverity(Array.isArray(items) ? items : []);
+        capKnown = true;
+        update();
+      })
+      .catch(() => {
+        if (seq !== capSeq) return;
+        capKnown = false;
+        update();
+      });
+  };
+
   const update = (): void => {
     const s = app.state;
-    const sev = maxSeverity(app.frame);
+    const sev = capKnown ? capSev : maxSeverity(app.frame);
     led.className = `sb-led ${sev ? sevClass(sev) : "none"}`;
-    setTitle(led, sev ? `Highest expert severity in this packet: ${sev}` : "No expert information for this packet");
+    const scope = capKnown ? "this capture" : "this packet";
+    setTitle(led, `${sev ? `Highest expert severity in ${scope}: ${sev}` : `No expert information for ${scope}`}. Click for Expert Information.`);
+    const tls = s?.tlsKeylog ?? null;
+    tlsSeg.hidden = !tls;
+    setTitle(tlsSeg, tls ? `Decrypting TLS with ${tls}` : "");
 
     // While loading, state.file is still the previous capture.
     setText(
@@ -73,7 +117,10 @@ export function createStatusBar(): HTMLElement {
     }
   };
 
-  bus.on("state", update);
+  bus.on("state", (s) => {
+    syncCaptureExpert(s);
+    update();
+  });
   bus.on("frame", update);
   bus.on("conn", update);
   bus.on("tick", update);
@@ -82,5 +129,5 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   update();
-  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), pktSeg, markSeg, capSeg, connSeg);
+  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), tlsSeg, pktSeg, markSeg, capSeg, connSeg);
 }

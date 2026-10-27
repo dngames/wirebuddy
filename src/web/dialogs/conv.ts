@@ -6,6 +6,7 @@ import { app, hooks } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import { showMenu } from "../menu.ts";
 import { copyText, csvField, fmtInt, h } from "../util.ts";
+import { scopeControl } from "./scope.ts";
 
 type Kind = "conv" | "endpt";
 type Row = ConvRow | EndpointRow;
@@ -77,7 +78,17 @@ export function openConvDialog(kind: Kind, initial = "ipv4"): void {
   const tabs = h("div", { class: "tabs", role: "tablist" });
   const wrap = h("div", { class: "stat-wrap" });
   d.body.append(tabs, wrap);
-  d.footerLeft.textContent = s.filter ? "All packets (display filter not applied)" : "All packets";
+  const scope = scopeControl(() => {
+    scopeSeq++;
+    data.clear();
+    setSelected(null);
+    d.footerLeft.textContent = scope.text();
+    renderTabs();
+    void load();
+  });
+  let scopeSeq = 0;
+  d.body.prepend(h("div", { class: "stat-bar" }, scope.el));
+  d.footerLeft.textContent = scope.text();
 
   const data = new Map<string, Row[] | string>();
   const sortBy = new Map<string, { col: number; desc: boolean }>();
@@ -210,15 +221,18 @@ export function openConvDialog(kind: Kind, initial = "ipv4"): void {
 
   const load = async (): Promise<void> => {
     const t = type;
+    const sc = scopeSeq;
     renderTable();
     if (data.has(t) && typeof data.get(t) !== "string") return;
     data.delete(t);
     renderTable();
     try {
-      const rows = await get<Row[]>(kind === "conv" ? "api/stats/conv" : "api/stats/endpt", { type: t });
+      const rows = await get<Row[]>(kind === "conv" ? "api/stats/conv" : "api/stats/endpt", { type: t, filter: scope.filter() });
+      if (sc !== scopeSeq) return;
       data.set(t, Array.isArray(rows) ? rows : []);
       if (!sortBy.has(t)) sortBy.set(t, { col: colsFor(t).findIndex((c) => c.title === "Packets"), desc: true });
     } catch (e) {
+      if (sc !== scopeSeq) return;
       data.set(t, errorText(e));
     }
     renderTabs();

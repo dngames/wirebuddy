@@ -13,10 +13,15 @@ an AI chat (e.g. the Claude Code desktop app's browser pane) so you and the agen
 same capture, filter, selected packet and marks.
 
 - **Packet list / details / bytes** like Wireshark: coloring rules, display filter bar with live
-  validation and field autocompletion, linked tree ↔ hex highlighting, follow stream,
-  protocol hierarchy, conversations, endpoints.
-- **Live capture** with `dumpcap`: interface picker, capture-filter check, auto-stop
-  (duration / size / packets), ring buffer. The view updates about once a second.
+  validation and field autocompletion, linked tree ↔ hex highlighting, custom columns
+  ("Apply as Column"), follow stream.
+- **Statistics:** Expert Information, I/O Graph, protocol hierarchy, conversations and
+  endpoints, optionally limited to the display filter.
+- **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
+  (displayed, marked, selected or a range) to a new pcapng/pcap.
+- **Live capture** with `dumpcap`: interface picker with live traffic sparklines (like
+  Wireshark's start page), capture-filter check, auto-stop (duration / size / packets), ring
+  buffer. The view updates about once a second.
 - **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
 - **MCP server** so an agent can read the capture, apply filters, select and mark packets, and
   follow streams. The agent **cannot start a capture** — only you can, with a click in the UI.
@@ -46,6 +51,20 @@ node dist/server/main.js path/to/capture.pcapng   # open a file right away
 
 Options: `--port <n>` (default 8765, falls back to a free port), `--token <t>`,
 `--capture-dir <dir>` (default `~/.local/share/wirebuddy/captures`), `--profile <name>`, `--mcp`.
+
+## TLS decryption
+
+Start the program whose traffic you want to read with `SSLKEYLOGFILE` set, e.g.
+
+```bash
+SSLKEYLOGFILE=~/tls-keys.log firefox
+```
+
+then choose that file under **TLS Keys…** in WireBuddy (or start WireBuddy with
+`--tls-keylog ~/tls-keys.log`). The capture is re-dissected, HTTP/2, HTTP and other protocols
+inside TLS become visible, and "Open in Wireshark" passes the key log on. A key log file set in
+Wireshark's own preferences is picked up automatically. The agent can see whether decryption is
+on, but only you choose the file. Treat the key log like a password.
 
 ## Dissector plugins and profiles
 
@@ -91,14 +110,18 @@ the browser pane next to the chat. Example prompts:
 | `get_view_state` | What the user sees: file, counts, filter, selected frame, marks, capture status |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
-| `query_packets` | Paginated summary rows for any display filter (doesn't change the view) |
+| `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
 | `inspect_frame` | Protocol tree of one frame as compact text, optionally limited to protocols, with hex |
 | `follow_stream` | Reassembled stream payload as text |
+| `expert_info` | Expert Information grouped by severity and message, with example frames |
+| `io_graph` | Packets/bytes/bits over time for up to 4 filters: peaks, empty stretches, a downsampled series |
+| `export_packets` | Write matching, displayed, marked or ranged packets to a new capture file |
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
 | `mark_frames` / `clear_marks` | Highlight frames with a note |
-| `list_interfaces` | Capture interfaces (read-only) |
+| `set_columns` | Show fields as extra columns in the user's packet list |
+| `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `stop_capture` | Stop the running capture |
 | `open_in_wireshark` | Open the capture in the real Wireshark at the selected frame |
 
@@ -123,7 +146,9 @@ Every agent action that changes the view shows a notice in the UI.
 
 - Binds to `127.0.0.1` only; every API/WebSocket call needs the per-session token from the URL.
 - Requests with a foreign `Host` (DNS rebinding) or a cross-site `Origin` are rejected.
-- Capture starts only through the UI's Start button; there is no MCP tool for it.
+- Capture starts only through the UI's Start button; there is no MCP tool for it. The traffic
+  sparklines and `list_interfaces` only read per-interface packet counters (`dumpcap -S`), never
+  packet contents; that sampler runs only while something shows it and stops 10 s later.
 - `open_capture` / Open only accept capture files (by extension or pcap/pcapng/compressed magic
   bytes), so they can't be used to read arbitrary files.
 - Anyone who has the URL with its token can read captures and start captures as you — don't
@@ -142,8 +167,7 @@ node test/live-smoke.mjs    # live capture on loopback (needs dumpcap permission
 
 - A live capture re-reads the whole current file on every update, so very long or busy captures
   get slower to refresh; use a ring buffer or a capture filter for those.
-- Statistics cover the whole capture, not just the displayed packets.
-- No packet comments, time references, IO graph or export yet.
+- No packet comments or time references yet.
 
 ## Contributing
 

@@ -1,6 +1,8 @@
 // End-to-end check of the HTTP API against test/fixtures/http.pcapng.
 // Usage: node test/api-smoke.mjs   (after npm run build)
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -202,6 +204,124 @@ try {
     assert.equal(after.selected, 5);
     assert.equal(after.marks.length, before.marks.length);
     assert.ok(after.loadError);
+  });
+
+  await check("custom columns", async () => {
+    await api("/api/filter", { filter: "" });
+    const r = await api("/api/columns", { columns: [{ field: "http.response.code", title: "" }] });
+    assert.equal(r.json.ok, true, JSON.stringify(r.json));
+    const s = (await api("/api/state")).json;
+    assert.equal(s.columns.at(-1), "Status Code");
+    assert.deepEqual(s.customColumns, [{ field: "http.response.code", title: "Status Code" }]);
+    const rows = (await api(`/api/rows?gen=${s.generation}&start=11&count=1`)).json.rows;
+    assert.equal(rows[0].c.at(-1), "200");
+    assert.equal(rows[0].c.length, s.columns.length);
+    const bad = (await api("/api/columns", { columns: [{ field: "no.such.field", title: "" }] })).json;
+    assert.equal(bad.ok, false);
+    assert.equal((await api("/api/columns", { columns: [] })).json.ok, true);
+    assert.equal((await api("/api/state")).json.customColumns.length, 0);
+  });
+
+  await check("expert info, optionally limited to a display filter", async () => {
+    const all = (await api("/api/stats/expert")).json;
+    assert.equal(all.length, 12);
+    assert.ok(all.every((e) => e.frame && e.severity && e.message));
+    const one = (await api("/api/stats/expert?filter=" + encodeURIComponent("tcp.stream eq 1"))).json;
+    assert.equal(one.length, 6);
+    assert.equal((await api("/api/stats/expert?filter=" + encodeURIComponent("tcp port 80"))).status, 400);
+    const phs = (await api("/api/stats/phs?filter=http")).json;
+    assert.equal(phs[0].frames, 4);
+  });
+
+  await check("I/O graph and time to frame", async () => {
+    const graphs = encodeURIComponent(JSON.stringify([{ metric: "packets", filter: "" }, { metric: "bytes", filter: "http" }]));
+    const r = (await api(`/api/stats/iograph?interval=1&graphs=${graphs}`)).json;
+    assert.equal(r.interval, 1);
+    assert.equal(r.series.length, 2);
+    assert.equal(r.series[0].values.reduce((a, b) => a + b, 0), 29);
+    assert.equal(r.series[0].values.length, 11);
+    assert.equal(r.series[1].values.reduce((a, b) => a + b, 0), 16422);
+    assert.equal((await api("/api/frame-at?t=0.005")).json.frame, 18);
+    assert.equal((await api("/api/frame-at?t=99")).json.frame, null);
+  });
+
+  await check("export specified packets", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-export-test-"));
+    try {
+      const count = (f) => Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-c", f], { encoding: "utf8" }))[1]);
+      const out = join(dir, "range.pcapng");
+      const r = await api("/api/export", { path: out, which: "range", range: "21,23-25" });
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal(r.json.frames, 4);
+      assert.equal(count(out), 4);
+      const again = await api("/api/export", { path: out, which: "range", range: "1-3" });
+      assert.equal(again.status, 400);
+      assert.match(again.json.error, /already exists/);
+      assert.equal((await api("/api/export", { path: out, which: "range", range: "1-3", overwrite: true })).json.frames, 3);
+      assert.equal(count(out), 3);
+      await api("/api/filter", { filter: "http" });
+      const shown = await api("/api/export", { path: join(dir, "shown.pcap"), which: "displayed" });
+      assert.equal(shown.json.frames, 4);
+      assert.equal(count(join(dir, "shown.pcap")), 4);
+      await api("/api/filter", { filter: "" });
+      assert.equal((await api("/api/export", { path: join(dir, "x.txt"), which: "all" })).status, 400);
+      const spaced = await api("/api/export", { path: join(dir, "spaced.pcapng"), which: "range", range: "1 -3, 20- 22" });
+      assert.equal(spaced.json.frames, 6, JSON.stringify(spaced.json));
+      const alias = await api("/api/export", { path: join(dirname(fixture), ".", "http.pcapng"), which: "range", range: "1", overwrite: true });
+      assert.equal(alias.status, 400);
+      assert.match(alias.json.error, /open capture/);
+      assert.equal((await api("/api/export", { path: join(dir, "bad.pcapng"), which: "range", range: "5-99" })).status, 400);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("TLS key log setting", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-tls-test-"));
+    try {
+      assert.equal((await api("/api/tls", { keylog: join(dir, "missing.log") })).status, 400);
+      const keys = join(dir, "keys.log");
+      writeFileSync(keys, "");
+      const gen = (await api("/api/state")).json.generation;
+      assert.equal((await api("/api/tls", { keylog: keys })).status, 200);
+      const s = (await api("/api/state")).json;
+      assert.equal(s.tlsKeylog, keys);
+      assert.ok(s.generation > gen, "the capture is re-dissected");
+      const listing = (await api("/api/files?kind=any&dir=" + encodeURIComponent(dir))).json;
+      assert.ok(listing.entries.some((e) => e.name === "keys.log"));
+      await api("/api/tls", { keylog: null });
+      assert.equal((await api("/api/state")).json.tlsKeylog, null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("I/O graph over a capture spanning 100 days stays exact", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-span-test-"));
+    try {
+      const shifted = join(dir, "shifted.pcapng");
+      const long = join(dir, "long.pcapng");
+      execFileSync("editcap", ["-t", String(100 * 86400), fixture, shifted]);
+      execFileSync("mergecap", ["-w", long, fixture, shifted]);
+      assert.equal((await api("/api/open", { path: long })).status, 200);
+      const graphs = encodeURIComponent(JSON.stringify([{ metric: "packets", filter: "" }]));
+      const r = (await api(`/api/stats/iograph?interval=1000&graphs=${graphs}`)).json;
+      assert.ok(r.interval <= 2_000_000, `interval ${r.interval} overflows sharkd`);
+      assert.equal(r.series[0].values.reduce((a, b) => a + b, 0), 58);
+    } finally {
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("interface activity from dumpcap -S", async () => {
+    const first = (await api("/api/capture/activity")).json;
+    assert.equal(first.interval, 1);
+    await new Promise((r) => setTimeout(r, 2600));
+    const later = (await api("/api/capture/activity")).json;
+    assert.ok(!later.error, later.error);
+    assert.ok(later.ifaces.lo?.length >= 1, JSON.stringify(later).slice(0, 200));
+    assert.ok(later.ifaces.lo.every((n) => Number.isInteger(n) && n >= 0));
   });
 
   await check("files and recent", async () => {

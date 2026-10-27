@@ -22,17 +22,24 @@
  * | POST   | /api/select                   | { frame: number \| null }            | { ok: true }           |
  * | POST   | /api/open                     | { path }                             | { ok: true }           |
  * | POST   | /api/close                    |                                      | { ok: true }           |
- * | GET    | /api/files                    | ?dir= (omit for the default dir)     | DirListing             |
+ * | GET    | /api/files                    | ?dir=&kind=capture\|any              | DirListing             |
  * | GET    | /api/recent                   |                                      | RecentFiles            |
- * | GET    | /api/stats/phs                |                                      | PhsNode[]              |
- * | GET    | /api/stats/conv               | ?type=eth\|ipv4\|ipv6\|tcp\|udp      | ConvRow[]              |
- * | GET    | /api/stats/endpt              | ?type=eth\|ipv4\|ipv6\|tcp\|udp      | EndpointRow[]          |
+ * | GET    | /api/stats/phs                | ?filter= (optional)                  | PhsNode[]              |
+ * | GET    | /api/stats/conv               | ?type=eth\|ipv4\|ipv6\|tcp\|udp&filter= | ConvRow[]         |
+ * | GET    | /api/stats/endpt              | ?type=eth\|ipv4\|ipv6\|tcp\|udp&filter= | EndpointRow[]     |
+ * | GET    | /api/stats/expert             | ?filter= (optional)                  | ExpertItem[]           |
+ * | GET    | /api/stats/iograph            | ?interval=<ms>&graphs=<JSON IoGraphSpec[]> | IoGraphResult    |
+ * | GET    | /api/frame-at                 | ?t=<seconds since first frame>       | { frame: number \| null } |
+ * | POST   | /api/columns                  | { columns: CustomColumn[] }          | FilterCheck            |
+ * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
+ * | POST   | /api/export                   | ExportRequest                        | ExportResult           |
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
  * | POST   | /api/marks                    | { frames, note }                     | { ok: true }           |
  * | POST   | /api/marks/clear              | { frames? } (omit: clear all)        | { ok: true }           |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
  * | GET    | /api/capture/interfaces       |                                      | CaptureInterface[]     |
  * | GET    | /api/capture/check            | ?iface=&filter=                      | FilterCheck            |
+ * | GET    | /api/capture/activity         |                                      | InterfaceActivity      |
  * | POST   | /api/capture/start            | CaptureRequest                       | { ok: true }           |
  * | POST   | /api/capture/stop             |                                      | { ok: true }           |
  */
@@ -85,6 +92,14 @@ export interface ViewState {
   agentNotice: AgentNotice | null;
   /** Whether a `wireshark` executable was found for "Open in Wireshark". */
   wiresharkAvailable: boolean;
+  /**
+   * Extra packet list columns, shown after the default ones. Their titles are
+   * the last entries of {@link columns} and their values the last entries of
+   * each {@link PacketRow.c}.
+   */
+  customColumns: CustomColumn[];
+  /** Keylog file used to decrypt TLS (SSLKEYLOGFILE format), or null. */
+  tlsKeylog: string | null;
 }
 
 export interface Mark {
@@ -184,7 +199,7 @@ export interface DirEntry {
 export interface DirListing {
   dir: string;
   parent: string | null;
-  /** Directories first, then capture files (pcap, pcapng, cap, ...). */
+  /** Directories first, then capture files (pcap, pcapng, cap, ...), or all files with kind=any. */
   entries: DirEntry[];
 }
 
@@ -247,6 +262,16 @@ export interface CaptureInterface {
   loopback: boolean;
 }
 
+/** Recent traffic per capture interface, sampled with `dumpcap -S`. */
+export interface InterfaceActivity {
+  /** Seconds between samples. */
+  interval: number;
+  /** Packets received per sample, oldest first, at most 60 per interface. */
+  ifaces: Record<string, number[]>;
+  /** Set when the statistics can't be collected. */
+  error?: string;
+}
+
 export interface CaptureRequest {
   iface: string;
   /** Capture (BPF) filter, "" for none. */
@@ -276,6 +301,51 @@ export interface CaptureState {
   /** Packets captured so far, as reported by dumpcap. */
   packets: number;
   error: string | null;
+}
+
+/** A packet list column showing a field, like Wireshark's "Apply as Column". */
+export interface CustomColumn {
+  /** Field name, e.g. `http.response.code`. */
+  field: string;
+  title: string;
+}
+
+export interface ExpertItem {
+  frame: number;
+  severity: ExpertSeverity;
+  /** Expert group, e.g. "Sequence", "Malformed", "Protocol". */
+  group: string;
+  protocol: string;
+  message: string;
+}
+
+export interface IoGraphSpec {
+  metric: "packets" | "bytes" | "bits";
+  /** Display filter for this graph, "" for all packets. */
+  filter: string;
+}
+
+export interface IoGraphResult {
+  /** Bucket width in milliseconds; raised by the server when the capture needs too many buckets. */
+  interval: number;
+  /** One series per requested graph; values[i] covers [i * interval, (i + 1) * interval) ms after the first frame. */
+  series: { metric: IoGraphSpec["metric"]; filter: string; values: number[] }[];
+}
+
+export interface ExportRequest {
+  /** Absolute path ending in .pcapng or .pcap. */
+  path: string;
+  /** Which packets: the displayed ones, the marked ones, the selected one, or a range like "1-10,25". */
+  which: "displayed" | "marked" | "selected" | "range" | "all";
+  range?: string;
+  /** Replace an existing file. */
+  overwrite?: boolean;
+}
+
+export interface ExportResult {
+  path: string;
+  frames: number;
+  size: number;
 }
 
 export type ServerEvent =

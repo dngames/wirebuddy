@@ -1,6 +1,6 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
-import type { CaptureRequest, FilterCheck, FrameDetail, ViewState } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, FilterCheck, FrameDetail, ViewState } from "../shared/api.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks } from "./app.ts";
 import { toast, toastError } from "./toast.ts";
@@ -345,6 +345,49 @@ export async function stopCapture(): Promise<void> {
   } catch (e) {
     toastError(e, "Stopping the capture failed");
   }
+}
+
+// ------------------------------------------------------------ columns, tls
+
+/** Replaces the custom columns; false (after a toast) when the server rejects them. */
+export async function setCustomColumns(columns: CustomColumn[]): Promise<boolean> {
+  try {
+    const r = await post<FilterCheck>("api/columns", { columns });
+    if (r && r.ok === false) {
+      toast("error", `Column not applied: ${r.error ?? "rejected"}`);
+      return false;
+    }
+    if (app.conn !== "open") void refreshState();
+    return true;
+  } catch (e) {
+    toastError(e, "Changing the columns failed");
+    return false;
+  }
+}
+
+/** "Apply as Column" for a details field. */
+export function addCustomColumn(field: string, title: string): void {
+  const cur = app.state?.customColumns ?? [];
+  if (cur.some((c) => c.field === field)) {
+    toast("info", `${field} is already a column`);
+    return;
+  }
+  void setCustomColumns([...cur, { field, title }]);
+}
+
+/** Sets or clears the TLS key log file; returns an error message or null. */
+export async function setTlsKeylog(keylog: string | null): Promise<string | null> {
+  try {
+    await post("api/tls", { keylog });
+    if (app.conn !== "open") void refreshState();
+    return null;
+  } catch (e) {
+    return errorText(e);
+  }
+}
+
+export function exportPackets(req: ExportRequest): Promise<ExportResult> {
+  return post<ExportResult>("api/export", req);
 }
 
 export function setAutoScroll(on: boolean): void {
