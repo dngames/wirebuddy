@@ -6,7 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-First version.
+## [0.9.0] - 2026-10-27
+
+First public version.
 
 - Wireshark-style packet list, details tree and bytes view, decoded by `sharkd`
 - Wireshark's menu bar, main toolbar and keyboard shortcuts
@@ -36,3 +38,6 @@ First version.
   status bar when a capture fits
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
+
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/dngames/wirebuddy/releases/tag/v0.9.0
