@@ -265,36 +265,6 @@ As in the demo above, the agent:
 The example's [README](examples/investigations/robot-arm/README.md) has the setup and, at its
 end, the solution; `solution/armc` is a dissector and a panel as the agent might write them.
 
-### Example: which site did I just visit?
-
-> Capture my traffic while I open a website, then tell me which site it was.
-
-The agent picks the interface that carries the default route and calls `start_capture` with a
-capture filter that keeps only DNS queries, plain HTTP requests and the first packet of every TLS
-and QUIC connection, never the encrypted page data:
-
-```
-port 53 or (tcp dst port 80)
-  or (ip and tcp dst port 443 and tcp[((tcp[12]&0xf0)>>2)] = 0x16 and tcp[((tcp[12]&0xf0)>>2)+5] = 1)
-  or (ip6 and ip6[6] = 6 and tcp dst port 443 and ip6[40 + ((ip6[52]&0xf0)>>2)] = 0x16 and ip6[40 + ((ip6[52]&0xf0)>>2) + 5] = 1)
-  or (ip and udp dst port 443 and (udp[8] & 0xf0) = 0xc0)
-  or (ip6 and ip6[6] = 17 and udp dst port 443 and (ip6[48] & 0xf0) = 0xc0)
-```
-
-When you say you are done, it stops the capture and lists the names with `query_packets`, filter
-`tls.handshake.type == 1 || dns.flags.response == 0 || http.request` and fields
-`frame.time_relative`, `tls.handshake.extensions_server_name`, `dns.qry.name` and `http.host`.
-The TLS field covers QUIC too: Wireshark decrypts QUIC's Initial packets and finds the same
-ClientHello inside. The agent then names the site, tells it apart from background traffic by
-time, and lists the CDN and third parties (consent managers, trackers) the page pulled in.
-
-- The page itself stays encrypted: no content, no video title. To read your own browser's
-  traffic, start it with `SSLKEYLOGFILE` and set that file in WireBuddy.
-- Encrypted DNS and Encrypted Client Hello can hide the name; other programs on the machine show
-  up in the same capture.
-- libpcap's `tcp[...]` and `udp[...]` offsets only match IPv4, hence the `ip6[...]` clauses (they
-  assume no IPv6 extension headers). Without them every IPv6 connection is dropped silently.
-
 ### MCP tools
 
 | Tool | What it does |
