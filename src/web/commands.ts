@@ -2,7 +2,8 @@
 
 import * as act from "./actions.ts";
 import { app, captureActive, hooks } from "./app.ts";
-import { cap, loadInterfaces, restartCaptureClicked, setBarOpen } from "./capture.ts";
+import { loadInterfaces, restartCaptureClicked } from "./capture.ts";
+import { captureOptionsOpen, openCaptureOptions } from "./dialogs/capopts.ts";
 import { applySelectedAsColumn, collapseAll, expandAll, expandSubtrees, selectedField } from "./details.ts";
 import { openConvDialog } from "./dialogs/conv.ts";
 import { openExpertDialog } from "./dialogs/expert.ts";
@@ -136,7 +137,7 @@ export const commands = {
   lastPacket: { label: "Last Packet", tip: "Go to last packet", shortcut: "Ctrl+End", enabled: hasRows, run: () => selectEdge(1) },
 
   // Capture: starting needs the user's click or key press here, never the agent
-  captureOptions: { label: "Options…", tip: "Show the capture options", shortcut: "Ctrl+K", anywhere: true, checked: () => cap.barOpen, run: () => setBarOpen(!cap.barOpen) },
+  captureOptions: { label: "Options…", tip: "Show the capture options", shortcut: "Ctrl+K", anywhere: true, run: () => openCaptureOptions() },
   startCapture: { label: "Start", tip: "Start capturing packets", shortcut: "Ctrl+E", anywhere: true, enabled: () => !captureActive(), run: () => hooks.startCapture() },
   stopCapture: { label: "Stop", tip: "Stop capturing packets", shortcut: "Ctrl+E", anywhere: true, enabled: capturing, run: () => void act.stopCapture() },
   restartCapture: { label: "Restart", tip: "Restart current capture", shortcut: "Ctrl+R", enabled: capturing, run: () => void restartCaptureClicked() },
@@ -145,7 +146,7 @@ export const commands = {
     label: "Refresh Interfaces",
     shortcut: "F5",
     anywhere: true,
-    enabled: () => cap.barOpen || (!!app.state && !app.state.file && !app.state.loading),
+    enabled: () => captureOptionsOpen() || (!!app.state && !app.state.file && !app.state.loading),
     run: () => void loadInterfaces(),
   },
 

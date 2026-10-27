@@ -1,42 +1,90 @@
 /**
- * Capture options (shared by the capture bar and the welcome page) and the
- * collapsible capture bar. A capture is only ever started from a user click.
+ * Capture options, shared by the Capture Options dialog and the welcome page,
+ * and starting a capture. A capture is only ever started from a user click.
  */
 
 import type { CaptureInterface, CaptureRequest, FilterCheck, ViewState } from "../shared/api.ts";
 import { errorText, get } from "./api.ts";
 import * as act from "./actions.ts";
-import { activityBus, paintSpark, pollActivity, watchActivity } from "./activity.ts";
 import { app, bus, captureActive, hooks } from "./app.ts";
-import { icon } from "./icons.ts";
 import { toast, toastError } from "./toast.ts";
-import { baseName, debounce, Emitter, fmtElapsed, fmtInt, h, load, posInt, save } from "./util.ts";
+import { debounce, Emitter, fmtElapsed, fmtInt, load, posInt, save } from "./util.ts";
 
+export type SizeUnit = "kB" | "MB" | "GB";
+export type TimeUnit = "s" | "min" | "h";
+
+/** Like Wireshark's Capture Options; numbers as typed, "" for off. */
 export interface CaptureOpts {
   iface: string;
   filter: string;
-  stopDur: string;
-  stopSize: string;
-  stopPkts: string;
+  promisc: boolean;
+  /** "Create a new file automatically…" after any of these. */
+  newFile: boolean;
+  newPkts: string;
+  newSize: string;
+  newSizeUnit: SizeUnit;
+  newTime: string;
+  newTimeUnit: TimeUnit;
+  newEvery: string;
+  newEveryUnit: TimeUnit;
+  /** "Use a ring buffer with N files". */
   ring: boolean;
   ringFiles: string;
-  ringSize: string;
-  ringDur: string;
+  /** "Stop capture automatically after…". */
+  stopPkts: string;
+  stopFiles: string;
+  stopSize: string;
+  stopSizeUnit: SizeUnit;
+  stopTime: string;
+  stopTimeUnit: TimeUnit;
 }
 
 const DEFAULTS: CaptureOpts = {
   iface: "",
   filter: "",
-  stopDur: "",
-  stopSize: "",
-  stopPkts: "",
+  promisc: true,
+  newFile: false,
+  newPkts: "",
+  newSize: "",
+  newSizeUnit: "MB",
+  newTime: "",
+  newTimeUnit: "s",
+  newEvery: "",
+  newEveryUnit: "h",
   ring: false,
   ringFiles: "2",
-  ringSize: "",
-  ringDur: "",
+  stopPkts: "",
+  stopFiles: "",
+  stopSize: "",
+  stopSizeUnit: "MB",
+  stopTime: "",
+  stopTimeUnit: "s",
 };
 
-export const capOpts: CaptureOpts = { ...DEFAULTS, ...load<Partial<CaptureOpts>>("capture", {}) };
+const KB: Record<SizeUnit, number> = { kB: 1, MB: 1000, GB: 1000 * 1000 };
+const SECONDS: Record<TimeUnit, number> = { s: 1, min: 60, h: 3600 };
+
+/** Options saved by the capture bar of earlier versions. */
+function migrate(o: Record<string, unknown>): Partial<CaptureOpts> {
+  if (!("ringSize" in o || "ringDur" in o || "stopDur" in o)) return o as Partial<CaptureOpts>;
+  const str = (k: string): string => (typeof o[k] === "string" ? (o[k] as string) : "");
+  return {
+    iface: str("iface"),
+    filter: str("filter"),
+    newFile: o.ring === true,
+    ring: o.ring === true,
+    ringFiles: str("ringFiles") || "2",
+    newSize: str("ringSize"),
+    newSizeUnit: "kB",
+    newTime: str("ringDur"),
+    stopPkts: str("stopPkts"),
+    stopSize: str("stopSize"),
+    stopSizeUnit: "kB",
+    stopTime: str("stopDur"),
+  };
+}
+
+export const capOpts: CaptureOpts = { ...DEFAULTS, ...migrate(load<Record<string, unknown>>("capture", {})) };
 
 export const cap = {
   interfaces: null as CaptureInterface[] | null,
@@ -44,7 +92,6 @@ export const cap = {
   ifaceLoading: false,
   filterState: "none" as "none" | "checking" | "ok" | "error",
   filterError: "",
-  barOpen: load<boolean>("capturebar", false),
 };
 
 type CapEvents = {
@@ -52,7 +99,6 @@ type CapEvents = {
   opts: [source: string];
   ifaces: [];
   check: [];
-  bar: [open: boolean];
 };
 
 export const capBus = new Emitter<CapEvents>();
@@ -125,87 +171,89 @@ export function ifaceLabel(i: CaptureInterface): string {
   return s;
 }
 
-export function ringError(): string | null {
-  if (!capOpts.ring) return null;
-  const files = posInt(capOpts.ringFiles);
-  if (!files || files < 2) return "The ring buffer needs at least 2 files";
-  if (!posInt(capOpts.ringSize) && !posInt(capOpts.ringDur)) return "The ring buffer needs a file size or a duration per file";
+/** What keeps the options from starting a capture, with the dialog tab to fix it on. */
+export function optionsError(): { tab: "input" | "output" | "options"; text: string } | null {
+  if (cap.filterState === "error") return { tab: "input", text: cap.filterError || "Invalid capture filter" };
+  const bad = (v: string): boolean => !!v.trim() && !posInt(v);
+  if (capOpts.newFile) {
+    if ([capOpts.newPkts, capOpts.newSize, capOpts.newTime, capOpts.newEvery].some(bad)) return { tab: "output", text: "New files need whole numbers" };
+    if (![capOpts.newPkts, capOpts.newSize, capOpts.newTime, capOpts.newEvery].some((v) => posInt(v))) return { tab: "output", text: "Choose when to create a new file" };
+    if (capOpts.ring && (posInt(capOpts.ringFiles) ?? 0) < 2) return { tab: "output", text: "The ring buffer needs at least 2 files" };
+  }
+  if ([capOpts.stopPkts, capOpts.stopFiles, capOpts.stopSize, capOpts.stopTime].some(bad)) return { tab: "options", text: "Stop conditions need whole numbers" };
+  if (posInt(capOpts.stopFiles) && !capOpts.newFile) return { tab: "options", text: "Stopping after a number of files needs new files to be created automatically" };
+  // dumpcap reads a size limit as the size of new files
+  if (posInt(capOpts.stopSize) && capOpts.newFile) return { tab: "options", text: "Stopping after a size can't be combined with new files" };
   return null;
 }
 
 export function buildRequest(iface: string): CaptureRequest {
-  const autostop: CaptureRequest["autostop"] = {};
-  const d = posInt(capOpts.stopDur);
-  const sz = posInt(capOpts.stopSize);
-  const pk = posInt(capOpts.stopPkts);
-  if (d) autostop.durationSec = d;
-  // With a ring buffer dumpcap reads a size limit as the file switch size, not a stop condition.
-  if (sz && !capOpts.ring) autostop.filesizeKB = sz;
-  if (pk) autostop.packets = pk;
-  let ring: CaptureRequest["ring"] = null;
-  if (capOpts.ring) {
-    ring = { files: posInt(capOpts.ringFiles) ?? 2 };
-    const rs = posInt(capOpts.ringSize);
-    const rd = posInt(capOpts.ringDur);
-    if (rs) ring.filesizeKB = rs;
-    if (rd) ring.durationSec = rd;
-  }
-  return { iface, filter: capOpts.filter.trim(), autostop, ring };
+  const num = (v: string, scale = 1): number | undefined => {
+    const n = posInt(v);
+    return n ? n * scale : undefined;
+  };
+  const autostop: CaptureRequest["autostop"] = {
+    packets: num(capOpts.stopPkts),
+    files: capOpts.newFile ? num(capOpts.stopFiles) : undefined,
+    filesizeKB: capOpts.newFile ? undefined : num(capOpts.stopSize, KB[capOpts.stopSizeUnit]),
+    durationSec: num(capOpts.stopTime, SECONDS[capOpts.stopTimeUnit]),
+  };
+  const ring: CaptureRequest["ring"] = capOpts.newFile
+    ? {
+        packets: num(capOpts.newPkts),
+        filesizeKB: num(capOpts.newSize, KB[capOpts.newSizeUnit]),
+        durationSec: num(capOpts.newTime, SECONDS[capOpts.newTimeUnit]),
+        intervalSec: num(capOpts.newEvery, SECONDS[capOpts.newEveryUnit]),
+        files: capOpts.ring ? num(capOpts.ringFiles) : undefined,
+      }
+    : null;
+  return { iface, filter: capOpts.filter.trim(), promiscuous: capOpts.promisc, autostop, ring };
 }
 
 export function canStart(s: ViewState | null = app.state): boolean {
   const st = s?.capture.status ?? "idle";
-  return (st === "idle" || st === "error") && !!capOpts.iface && cap.filterState === "ok" && !ringError();
-}
-
-export function setBarOpen(open: boolean): void {
-  if (cap.barOpen === open) return;
-  cap.barOpen = open;
-  save("capturebar", open);
-  capBus.emit("bar", open);
+  return (st === "idle" || st === "error") && !!capOpts.iface && cap.filterState === "ok" && !optionsError();
 }
 
 /**
- * Starts a capture on `iface` (default: the bar's interface). Only called from
- * click handlers of Start buttons.
+ * Starts a capture on `iface` (default: the options' interface). Only called
+ * from click handlers. What keeps it from starting opens the options dialog.
  */
-export async function startCaptureClicked(iface?: string): Promise<void> {
-  if (captureActive()) return;
+export async function startCaptureClicked(iface?: string): Promise<boolean> {
+  if (captureActive()) return false;
   const target = iface ?? capOpts.iface;
   if (!target) {
-    setBarOpen(true);
-    toast("info", "Choose an interface to capture on");
-    return;
+    hooks.captureOptions("input");
+    return false;
   }
-  const rErr = ringError();
-  if (rErr) {
-    setBarOpen(true);
-    toast("error", rErr);
-    return;
+  const problem = optionsError();
+  if (problem && problem.tab !== "input") {
+    hooks.captureOptions(problem.tab);
+    return false;
   }
   const f = capOpts.filter.trim();
   if (f) {
     try {
       const r = await get<FilterCheck>("api/capture/check", { iface: target, filter: f });
       if (!r.ok) {
-        setBarOpen(true);
+        hooks.captureOptions("input");
         toast("error", `Invalid capture filter for ${target}: ${r.error ?? "syntax error"}`);
-        return;
+        return false;
       }
     } catch (e) {
       toastError(e, "Checking the capture filter failed");
-      return;
+      return false;
     }
   }
   if (target !== capOpts.iface) setOpts({ iface: target }, "start");
-  await act.startCapture(buildRequest(target));
+  return act.startCapture(buildRequest(target));
 }
 
 /** Capture > Restart: stops, waits until the capture is down, starts it again as it was. */
 export async function restartCaptureClicked(): Promise<void> {
   const c = app.state?.capture;
   if (!c?.iface || !captureActive()) return;
-  const req: CaptureRequest = { iface: c.iface, filter: c.filter, autostop: c.autostop, ring: c.ring };
+  const req: CaptureRequest = { iface: c.iface, filter: c.filter, promiscuous: c.promiscuous, autostop: c.autostop, ring: c.ring };
   if (!(await act.stopCapture())) return;
   // The idle state may already be here
   const stopped = !captureActive() || await new Promise<boolean>((resolve) => {
@@ -248,146 +296,7 @@ export function paintFilterInput(el: HTMLInputElement): void {
   el.title = cap.filterState === "error" ? cap.filterError : "";
 }
 
-// ------------------------------------------------------------------ the bar
-
-function numInput(key: keyof CaptureOpts, placeholder: string, title: string): HTMLInputElement {
-  const el = h("input", { class: "cb-num", type: "text", inputMode: "numeric", placeholder, title, value: String(capOpts[key]) });
-  el.addEventListener("input", () => {
-    el.classList.toggle("invalid", !!el.value.trim() && !posInt(el.value));
-    setOpts({ [key]: el.value } as Partial<CaptureOpts>, `bar:${key}`);
-  });
-  capBus.on("opts", (src) => {
-    if (src !== `bar:${key}` && document.activeElement !== el) el.value = String(capOpts[key]);
-  });
-  return el;
-}
-
-export function createCaptureBar(): HTMLElement {
-  const ifaceSel = h("select", { class: "cb-iface", title: "Capture interface", attrs: { "aria-label": "Capture interface" } });
-  const refreshBtn = h("button", { class: "tb-mini", title: "Refresh interfaces", attrs: { "aria-label": "Refresh interfaces" }, onclick: () => void loadInterfaces() }, icon("refresh"));
-  const spark = h("span", { class: "cb-spark" });
-  const filterIn = h("input", {
-    class: "cb-filter",
-    type: "text",
-    spellcheck: false,
-    autocomplete: "off",
-    placeholder: "Enter a capture filter … (e.g. tcp port 443)",
-    value: capOpts.filter,
-    attrs: { "aria-label": "Capture filter" },
-  });
-  const startBtn = h("button", { class: "btn cb-start", title: "Start capturing with these options" }, icon("fin"), h("span", null, "Start"));
-  const stopBtn = h("button", { class: "btn cb-stop", title: "Stop the running capture" }, icon("stop"), h("span", null, "Stop"));
-  const errLine = h("div", { class: "cb-err", hidden: true });
-  const ringChk = h("input", { type: "checkbox", checked: capOpts.ring });
-  const ringFiles = numInput("ringFiles", "2", "Number of files in the ring");
-  const ringSize = numInput("ringSize", "KB", "Switch to the next file after this many kilobytes");
-  const ringDur = numInput("ringDur", "s", "Switch to the next file after this many seconds");
-  const stopSize = numInput("stopSize", "KB", "Stop after this many kilobytes");
-  const statusDot = h("span", { class: "cb-dot" });
-  const statusText = h("span", { class: "cb-status-text" });
-  const fileText = h("span", { class: "cb-file" });
-
-  filterIn.addEventListener("input", () => setOpts({ filter: filterIn.value }, "bar:filter"));
-  ifaceSel.addEventListener("change", () => setOpts({ iface: ifaceSel.value }, "bar:iface"));
-  ringChk.addEventListener("change", () => setOpts({ ring: ringChk.checked }, "bar:ring"));
-  startBtn.addEventListener("click", () => void startCaptureClicked());
-  stopBtn.addEventListener("click", () => void act.stopCapture());
-
-  const row1 = h(
-    "div",
-    { class: "cb-row" },
-    h("label", { class: "cb-lbl" }, "Interface"),
-    ifaceSel,
-    spark,
-    refreshBtn,
-    h("label", { class: "cb-lbl" }, "Capture filter"),
-    filterIn,
-    startBtn,
-    stopBtn,
-  );
-  const row2 = h(
-    "div",
-    { class: "cb-row cb-row2" },
-    h("span", { class: "cb-group" }, h("span", { class: "cb-lbl" }, "Stop after"), numInput("stopDur", "s", "Stop after this many seconds"), h("span", { class: "cb-unit" }, "s"), stopSize, h("span", { class: "cb-unit" }, "KB"), numInput("stopPkts", "pkts", "Stop after this many packets"), h("span", { class: "cb-unit" }, "packets")),
-    h("span", { class: "cb-group" }, h("label", { class: "cb-check" }, ringChk, "Ring buffer"), ringFiles, h("span", { class: "cb-unit" }, "files of"), ringSize, h("span", { class: "cb-unit" }, "KB or"), ringDur, h("span", { class: "cb-unit" }, "s")),
-  );
-  const row3 = h("div", { class: "cb-row cb-status" }, statusDot, statusText, fileText);
-  const bar = h("div", { class: "capturebar", hidden: !cap.barOpen }, row1, errLine, row2, row3);
-
-  const renderIfaces = (): void => {
-    const opts: HTMLOptionElement[] = [];
-    if (cap.ifaceLoading && !cap.interfaces) opts.push(h("option", { value: "" }, "Loading interfaces…"));
-    else if (cap.ifaceError) opts.push(h("option", { value: "" }, `No interfaces: ${cap.ifaceError}`));
-    else if (cap.interfaces && !cap.interfaces.length) opts.push(h("option", { value: "" }, "No capture interfaces found"));
-    for (const i of cap.interfaces ?? []) opts.push(h("option", { value: i.name, title: ifaceLabel(i) }, ifaceLabel(i)));
-    ifaceSel.replaceChildren(...opts);
-    ifaceSel.value = capOpts.iface;
-    ifaceSel.title = cap.ifaceError ?? "Capture interface";
-  };
-
-  let fileKey = "";
-  // Runs every second: touch only what changed so selection and tooltips survive.
-  const renderStatus = (): void => {
-    const s = app.state;
-    if (!s) return;
-    const st = captureStatusText(s);
-    const dotCls = `cb-dot ${st.cls}`;
-    if (statusDot.className !== dotCls) statusDot.className = dotCls;
-    if (statusText.textContent !== st.text) statusText.textContent = st.text;
-    const c = s.capture;
-    const file = c.currentFile ?? c.files[c.files.length - 1] ?? null;
-    const key = `${file ?? ""}|${c.dir}|${c.files.length}`;
-    if (key === fileKey) return;
-    fileKey = key;
-    fileText.replaceChildren();
-    if (file) fileText.append("File: ", h("span", { class: "cb-path", title: file }, baseName(file)));
-    if (c.dir) fileText.append(file ? " in " : "Directory: ", h("span", { class: "cb-path", title: c.dir }, c.dir));
-    if (c.files.length > 1) fileText.append(` · ${c.files.length} files`);
-  };
-
-  const renderState = (): void => {
-    const s = app.state;
-    const active = captureActive(s);
-    startBtn.disabled = !canStart(s);
-    const rErr = ringError();
-    startBtn.title = rErr ?? (cap.filterState === "error" ? "Fix the capture filter first" : active ? "A capture is running" : "Start capturing with these options");
-    stopBtn.disabled = !(s && (s.capture.status === "running" || s.capture.status === "starting"));
-    ringFiles.disabled = ringSize.disabled = ringDur.disabled = !capOpts.ring;
-    stopSize.disabled = capOpts.ring;
-    stopSize.title = capOpts.ring ? "Not available with a ring buffer (use duration or packets)" : "Stop after this many kilobytes";
-    paintFilterInput(filterIn);
-    const errs = [cap.filterState === "error" ? cap.filterError : "", rErr ?? ""].filter(Boolean).join(" · ");
-    if (errLine.textContent !== errs) errLine.textContent = errs;
-    errLine.hidden = !errs;
-    renderStatus();
-  };
-
-  const renderSpark = (): void => paintSpark(spark, capOpts.iface);
-  watchActivity(() => cap.barOpen);
-  activityBus.on("update", renderSpark);
-
-  capBus.on("ifaces", renderIfaces);
-  capBus.on("check", renderState);
-  capBus.on("opts", (src) => {
-    if (src !== "bar:filter" && document.activeElement !== filterIn) filterIn.value = capOpts.filter;
-    if (src !== "bar:iface") ifaceSel.value = capOpts.iface;
-    renderSpark();
-    ringChk.checked = capOpts.ring;
-    renderState();
-  });
-  capBus.on("bar", (open) => {
-    bar.hidden = !open;
-    if (open && !cap.interfaces && !cap.ifaceLoading) void loadInterfaces();
-    if (open) void pollActivity();
-  });
-  bus.on("state", renderState);
-  bus.on("tick", renderStatus);
-
+export function initCapture(): void {
   hooks.startCapture = (iface) => void startCaptureClicked(iface);
-  renderIfaces();
-  renderState();
-  renderSpark();
   runCheck();
-  if (cap.barOpen) void loadInterfaces();
-  return bar;
 }

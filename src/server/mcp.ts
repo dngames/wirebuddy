@@ -245,7 +245,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
         lines.push(`Capture: ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
         const active = c.status === "starting" || c.status === "running" || c.status === "stopping";
-        const ring = c.ring ? ` (ring buffer of ${c.ring.files} files, ${c.files.length} written)` : "";
+        const ring = c.ring ? ` (${c.ring.files ? `ring buffer of ${c.ring.files} files` : "new files automatically"}, ${c.files.length} written)` : "";
         if (c.currentFile) lines.push(`  ${active ? "writing" : "last file:"} ${c.currentFile}${ring}`);
         if (active && c.currentFile && s.file !== c.currentFile) lines.push("  (the view shows a different file, not the live capture)");
       }

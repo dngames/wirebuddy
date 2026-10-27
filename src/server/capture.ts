@@ -72,6 +72,7 @@ export class Capture extends EventEmitter {
       filter: "",
       autostop: {},
       ring: null,
+      promiscuous: true,
       currentFile: null,
       files: [],
       dir,
@@ -139,7 +140,7 @@ export class Capture extends EventEmitter {
     this.starting = true;
     this.stopRequested = false;
     let args: string[];
-    let settings: Pick<CaptureState, "iface" | "filter" | "autostop" | "ring">;
+    let settings: Pick<CaptureState, "iface" | "filter" | "autostop" | "ring" | "promiscuous">;
     try {
       ({ args, settings } = await this.prepare(req));
     } finally {
@@ -223,18 +224,22 @@ export class Capture extends EventEmitter {
       durationSec: positiveInt(req.autostop?.durationSec, "auto-stop duration"),
       filesizeKB: positiveInt(req.autostop?.filesizeKB, "auto-stop file size"),
       packets: positiveInt(req.autostop?.packets, "auto-stop packets"),
+      files: positiveInt(req.autostop?.files, "auto-stop files"),
     };
     let ring: CaptureRequest["ring"] = null;
     if (req.ring) {
       ring = {
-        files: positiveInt(req.ring.files, "ring buffer files") ?? 2,
-        filesizeKB: positiveInt(req.ring.filesizeKB, "ring buffer file size"),
-        durationSec: positiveInt(req.ring.durationSec, "ring buffer duration"),
+        files: positiveInt(req.ring.files, "ring buffer files"),
+        filesizeKB: positiveInt(req.ring.filesizeKB, "new file size"),
+        durationSec: positiveInt(req.ring.durationSec, "new file duration"),
+        packets: positiveInt(req.ring.packets, "new file packets"),
+        intervalSec: positiveInt(req.ring.intervalSec, "new file interval"),
       };
-      if (!ring.filesizeKB && !ring.durationSec) throw new Error("ring buffer needs a file size or a duration per file");
-      // dumpcap reads -a filesize as the ring's switch size, so it would never stop
-      if (autostop.filesizeKB) throw new Error("auto-stop by file size cannot be combined with a ring buffer");
-    }
+      if (!ring.filesizeKB && !ring.durationSec && !ring.packets && !ring.intervalSec) throw new Error("a new file needs a size, a duration, a packet count or an interval");
+      if (ring.files !== undefined && ring.files < 2) throw new Error("a ring buffer needs at least 2 files");
+      // dumpcap reads -a filesize as the switch size of new files, so it would never stop
+      if (autostop.filesizeKB) throw new Error("stopping after a size cannot be combined with new files");
+    } else if (autostop.files) throw new Error("stopping after a number of files needs new files to be created automatically");
 
     // Captures can hold passwords and private traffic: only the user may read them
     mkdirSync(this.state.dir, { recursive: true, mode: 0o700 });
@@ -245,17 +250,22 @@ export class Capture extends EventEmitter {
     for (let i = 2; taken.has(base); i++) base = `wirebuddy_${safeIface}_${stamp}_${i}`;
     const target = join(this.state.dir, `${base}.pcapng`);
 
+    const promiscuous = req.promiscuous !== false;
     const args = ["-i", req.iface, "-w", target];
+    if (!promiscuous) args.push("-p");
     if (filter) args.push("-f", filter);
     if (autostop.durationSec) args.push("-a", `duration:${autostop.durationSec}`);
     if (autostop.filesizeKB) args.push("-a", `filesize:${autostop.filesizeKB}`);
     if (autostop.packets) args.push("-a", `packets:${autostop.packets}`);
+    if (autostop.files) args.push("-a", `files:${autostop.files}`);
     if (ring) {
-      args.push("-b", `files:${ring.files}`);
+      if (ring.files) args.push("-b", `files:${ring.files}`);
       if (ring.filesizeKB) args.push("-b", `filesize:${ring.filesizeKB}`);
       if (ring.durationSec) args.push("-b", `duration:${ring.durationSec}`);
+      if (ring.packets) args.push("-b", `packets:${ring.packets}`);
+      if (ring.intervalSec) args.push("-b", `interval:${ring.intervalSec}`);
     }
-    return { args, settings: { iface: req.iface, filter, autostop, ring } };
+    return { args, settings: { iface: req.iface, filter, autostop, ring, promiscuous } };
   }
 
   /**
