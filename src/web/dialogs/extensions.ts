@@ -105,13 +105,14 @@ export function openExtensionsDialog(): void {
   };
   const setEnabled = (name: string, on: boolean): Promise<void> => run(() => post<ExtensionList>("api/extensions/enable", { name, on }));
 
-  // A panel's Open/Close; "files changed" when it shows older files than the folder has
+  // A panel's Open/Close; "files changed" when it shows older files than the folder has, and a broken offer
   const panelCell = (e: ExtensionInfo): (HTMLElement | string)[] => {
     if (!e.panel) return [];
     const usable = e.enabled && e.status !== "invalid" && e.status !== "untrusted";
     const btn = h("button", { class: "btn ext-panel", disabled: !usable, title: e.panel.title }, e.panel.open ? "Close" : "Open");
     btn.addEventListener("click", () => void run(async () => (await (e.panel!.open ? closePanel(e.name) : openPanel(e.name)), null)));
-    return e.panel.stale ? [btn, h("span", { class: "ext-desc" }, " files changed")] : [btn];
+    const notes = [e.panel.stale ? " files changed" : "", e.panel.offerError ? " offer filter invalid" : ""].filter(Boolean);
+    return notes.length ? [btn, h("span", { class: "ext-desc", title: e.panel.offerError ?? "" }, notes.join(","))] : [btn];
   };
 
   const reloadBtn = d.button("Reload", () => void run(() => act.reloadExtensions()), { title: "Load the extensions again from disk (Ctrl+Shift+L)" });

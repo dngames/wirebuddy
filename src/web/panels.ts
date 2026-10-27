@@ -2,11 +2,12 @@
  * Panel windows: an extension's page in a sandboxed frame on a one-time origin
  * of its own. The page watches each frame: one that stops answering is
  * stopped, one that navigates or floods the page is closed, and the agent
- * hears about it through the server.
+ * hears about it through the server. A panel's wb.select and wb.setFilter go
+ * through here, only right after the user clicked or typed in it.
  */
 
 import type { ExtensionList, PanelState, ViewState } from "../shared/api.ts";
-import { errorText, get, post } from "./api.ts";
+import { errorText, get, HttpError, post } from "./api.ts";
 import { agentName, app, bus } from "./app.ts";
 import { Dialog } from "./dialog.ts";
 import type { MenuItem } from "./menu.ts";
@@ -82,6 +83,15 @@ export async function openPanel(name: string): Promise<void> {
     await post("api/panels/open", { name });
   } catch (e) {
     toast("error", `Opening the panel failed: ${errorText(e)}`);
+  }
+}
+
+/** Hides a panel's offer in the status bar for this capture. */
+export async function dismissOffer(name: string): Promise<void> {
+  try {
+    await post("api/panels/offers/dismiss", { name });
+  } catch (e) {
+    toast("error", errorText(e));
   }
 }
 
@@ -213,7 +223,7 @@ function onMessage(e: MessageEvent): void {
   const sec = Math.floor(Date.now() / 1000);
   if (sec !== w.second) [w.second, w.messages] = [sec, 0];
   if (++w.messages > MAX_MESSAGES_PER_SECOND) return kill(w, "flooding");
-  const m = e.data as { wb?: number; t?: string; key?: string } | null;
+  const m = e.data as { wb?: number; t?: string; key?: string; id?: unknown; m?: unknown; a?: unknown } | null;
   if (m?.wb !== 1) return;
   if (m.t === "hello") {
     w.lastPong = Date.now();
@@ -226,6 +236,27 @@ function onMessage(e: MessageEvent): void {
     }
   } else if (m.t === "probed") w.probing?.(true);
   else if (m.t === "key" && m.key === "Escape") w.dialog.close();
+  else if (m.t === "act") void act(w, m.id, m.m, m.a);
+}
+
+/**
+ * A panel's wb.select or wb.setFilter. A click or key press in the panel
+ * focuses its frame and gives this page transient activation (Chrome passes
+ * it up from the frame), so both together mean the user just used this panel.
+ * The server applies it, refuses setFilter without "control", and tells the
+ * agent about refusals.
+ */
+async function act(w: Win, id: unknown, m: unknown, a: unknown): Promise<void> {
+  const frame = w.frame;
+  const reply = (r: { ok: boolean; code?: string; error?: string }): void => frame?.contentWindow?.postMessage({ wb: 1, t: "actres", id, ...r }, w.origin);
+  if (m !== "select" && m !== "setFilter") return reply({ ok: false, code: "bad-args", error: "a panel can only select a frame or set the display filter" });
+  const clicked = !!frame && document.activeElement === frame && navigator.userActivation?.isActive === true;
+  try {
+    await post("api/panels/act", { name: w.name, label: w.label, m, a, clicked });
+    reply({ ok: true });
+  } catch (e) {
+    reply({ ok: false, code: e instanceof HttpError ? (e.code ?? "internal") : "internal", error: errorText(e) });
+  }
 }
 
 /**
@@ -258,4 +289,5 @@ function render(w: Win, p: PanelState): void {
   const parts = [state, p.statusText, p.errors ? `${p.errors} error${p.errors === 1 ? "" : "s"}${app.state?.agent.attached ? ` sent to ${agentName()}` : ""}` : "", p.isolated === false ? "not isolated: may slow WireBuddy down" : ""].filter(Boolean);
   setText(w.footer, parts.join(" · "));
   w.footer.className = `pn-status ${p.state}${p.errors ? " has-errors" : ""}`;
+  w.footer.title = p.control ? "This panel may set the display filter after you click in it" : "";
 }

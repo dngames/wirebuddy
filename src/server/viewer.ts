@@ -9,7 +9,7 @@ import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
-import { FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
+import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import { Panels } from "./panels.ts";
 import { printable } from "./text.ts";
 import { launchWireshark } from "./wireshark.ts";
@@ -32,6 +32,8 @@ import type {
   IoGraphSpec,
   Mark,
   PacketRow,
+  PanelAct,
+  PanelOffer,
   PanelView,
   PhsNode,
   RowsResponse,
@@ -115,6 +117,9 @@ const MAX_CRASH_RETRIES = 10;
 const RESTART_WAIT_MS = 10_000;
 /** Live reloads that fail in a row before they pause. */
 const MAX_LIVE_FAILURES = 3;
+/** Panel offers one sharkd iograph pass checks, and how often unmatched ones are checked during a live capture. */
+const OFFERS_PER_PASS = 10;
+const OFFER_LIVE_MS = 30_000;
 
 /**
  * Everything the UI and the agent share: the open capture, display filter,
@@ -136,6 +141,14 @@ export class Viewer extends EventEmitter {
   private readonly panelData: PanelData;
   /** Why the epoch changed last, for the panels' reset. */
   private epochWhy = "file";
+  /** Panel offers for the open file: matched ones (with their filter), invalid filters, dismissed ones. */
+  private offerFile: string | null = null;
+  private readonly offerMatched = new Map<string, { offer: PanelOffer; filter: string }>();
+  private readonly offerErrors = new Map<string, { filter: string; error: string }>();
+  private readonly offerDismissed = new Set<string>();
+  private offerSeq = 0;
+  private offerRun: Promise<void> = Promise.resolve();
+  private offerTimer: NodeJS.Timeout | null = null;
   /** Inode and first bytes of the file read last: another file at the same path, or other first bytes, is a rewritten capture. */
   private loadedIno = 0;
   private loadedHead: Buffer = Buffer.alloc(0);
@@ -180,7 +193,10 @@ export class Viewer extends EventEmitter {
     super();
     this.extensions = opts.extensions ?? new Extensions();
     this.panels = new Panels(this.extensions, this.events, opts.panelRuntime ?? "");
-    this.panels.on("change", () => this.set({ panels: this.panels.list() }));
+    this.panels.on("change", () => {
+      this.set({ panels: this.panels.list() });
+      this.showOffers();
+    });
     this.sharkdBin = opts.sharkd ?? "sharkd";
     const env = () => this.extensions.env();
     const generation = () => this.extensions.generation;
@@ -251,6 +267,7 @@ export class Viewer extends EventEmitter {
       tlsKeylog: null,
       extensions: { active: 0, failing: 0, revision: 0 },
       panels: [],
+      panelOffers: [],
       epoch: 1,
     };
     this.capture.on("change", (capture: CaptureState) => {
@@ -267,7 +284,7 @@ export class Viewer extends EventEmitter {
     this.capture.on("stopped", () => {
       if (this.reloadTimer) clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
-      if (this.followingCapture()) this.reload(true).catch(() => {});
+      if (this.followingCapture()) this.reload(true).then(() => this.checkOffers(false), () => {});
     });
   }
 
@@ -481,6 +498,7 @@ export class Viewer extends EventEmitter {
         this.state = { ...this.state, marks: [], selected: null, selectedBy: null };
         this.applyLoad(file, filter, result, false);
         this.remember(file);
+        void this.checkOffers(true);
       } catch (err) {
         const message = printable((err as Error).message);
         this.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
@@ -567,6 +585,7 @@ export class Viewer extends EventEmitter {
         rowsSince: this.state.generation + 1,
         epoch: this.newEpoch("closed"),
       });
+      void this.checkOffers(true);
     });
   }
 
@@ -1153,11 +1172,128 @@ export class Viewer extends EventEmitter {
   extensionList(): ExtensionList {
     const list = this.extensions.listing();
     for (const e of list.extensions) {
-      if (!e.panel || !this.panels.isOpen(e.name)) continue;
+      if (!e.panel) continue;
+      const bad = this.offerErrors.get(e.name);
+      if (bad) e.panel.offerError = `invalid offer filter "${bad.filter}": ${bad.error}`;
+      if (!this.panels.isOpen(e.name)) continue;
       e.panel.open = true;
       e.panel.stale = this.panels.report(e.name, false).stale;
     }
     return list;
+  }
+
+  /**
+   * Checks the offers of enabled panels against the open capture (`all`: also
+   * the ones matched already): each filter is checked, then one iograph pass
+   * counts the packets of up to 10 of them. Matches show as panelOffers.
+   */
+  private checkOffers(all: boolean): Promise<void> {
+    const seq = ++this.offerSeq;
+    if (this.offerTimer) clearTimeout(this.offerTimer);
+    this.offerTimer = null;
+    this.offerRun = this.offerPass(seq, all).catch((err) => {
+      if (seq === this.offerSeq) this.events.add("WARNING", `Checking the panels' offers failed: ${printable((err as Error).message)}`);
+    });
+    return this.offerRun;
+  }
+
+  private async offerPass(seq: number, all: boolean): Promise<void> {
+    const file = this.state.file;
+    if (file !== this.offerFile) {
+      this.offerFile = file;
+      this.offerMatched.clear();
+      this.offerDismissed.clear();
+    }
+    const offers = this.extensions.offers();
+    // Offers gone or changed since are no offers any more
+    for (const [name, m] of this.offerMatched) if (!offers.some((o) => o.name === name && o.filter === m.filter)) this.offerMatched.delete(name);
+    for (const [name, e] of this.offerErrors) if (!offers.some((o) => o.name === name && o.filter === e.filter)) this.offerErrors.delete(name);
+    const valid: typeof offers = [];
+    for (const o of offers.filter((x) => all || !this.offerMatched.has(x.name))) {
+      const check = await this.checkFilter(o.filter);
+      if (seq !== this.offerSeq) return;
+      if (check.ok) {
+        this.offerErrors.delete(o.name);
+        valid.push(o);
+        continue;
+      }
+      const error = check.error ?? "invalid";
+      if (this.offerErrors.get(o.name)?.error !== error) this.events.add("WARNING", `The offer filter "${o.filter}" of the panel "${o.name}" is invalid, so it is never offered: ${error}`);
+      this.offerErrors.set(o.name, { filter: o.filter, error });
+      this.offerMatched.delete(o.name);
+    }
+    if (file && this.state.totalFrames > 0) {
+      const interval = Math.min(Math.max(Math.round(this.state.duration * 1000), 1), MAX_IO_INTERVAL);
+      for (let i = 0; i < valid.length; i += OFFERS_PER_PASS) {
+        const batch = valid.slice(i, i + OFFERS_PER_PASS);
+        const params = Object.fromEntries(batch.flatMap((o, k) => [[`graph${k}`, "packets"], [`filter${k}`, o.filter]]));
+        const r = await this.engine.call<{ iograph: { items?: (number | string)[] }[] }>("iograph", { interval, ...params });
+        if (seq !== this.offerSeq || this.state.file !== file) return;
+        for (const [k, o] of batch.entries()) {
+          // Strings are bucket indices, numbers packet counts
+          const packets = (r.iograph[k]?.items ?? []).reduce<number>((a, v) => a + (typeof v === "number" ? v : 0), 0);
+          if (packets > 0) this.offerMatched.set(o.name, { offer: { name: o.name, label: o.label, text: o.text }, filter: o.filter });
+          else this.offerMatched.delete(o.name);
+        }
+      }
+    }
+    this.showOffers();
+    // A live capture may bring matching packets later
+    if (file && this.capture.running && this.followingCapture() && offers.some((o) => !this.offerMatched.has(o.name) && !this.offerErrors.has(o.name))) {
+      this.offerTimer = setTimeout(() => {
+        this.offerTimer = null;
+        if (this.capture.running && this.followingCapture()) void this.checkOffers(false);
+      }, OFFER_LIVE_MS);
+      this.offerTimer.unref();
+    }
+  }
+
+  /** The matched offers the user sees: not of open panels, not dismissed. */
+  private showOffers(): void {
+    const offers = [...this.offerMatched.values()].map((m) => m.offer).filter((o) => !this.panels.isOpen(o.name) && !this.offerDismissed.has(o.name));
+    offers.sort((a, b) => a.name.localeCompare(b.name));
+    if (JSON.stringify(offers) !== JSON.stringify(this.state.panelOffers)) this.set({ panelOffers: offers });
+  }
+
+  /** The user dismissed a panel's offer: not offered again for this file. */
+  dismissOffer(name: string): void {
+    this.offerDismissed.add(name);
+    this.showOffers();
+  }
+
+  /** Panels offered for the open capture, once a check that runs now is done (or after `ms`). */
+  async matchedOffers(ms = 5000): Promise<PanelOffer[]> {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([this.offerRun, new Promise<void>((done) => (timer = setTimeout(done, ms)))]);
+    clearTimeout(timer);
+    return [...this.offerMatched.values()].map((m) => m.offer);
+  }
+
+  /**
+   * A panel's change to the view (wb.select, wb.setFilter), sent by the page
+   * after a click in that panel: made as the user's, with a notice, and told
+   * to the agent. Refusals throw an ApiError with the code the panel gets.
+   */
+  async panelAct({ name, label, m, a, clicked }: PanelAct): Promise<{ ok: true }> {
+    if (m !== "select" && m !== "setFilter") throw new ApiError(400, "bad-args", "a panel can only select a frame or set the display filter");
+    const title = this.panels.allow(name, label, m, clicked === true);
+    if (m === "select") {
+      if (typeof a !== "number" || !Number.isInteger(a) || a < 1 || a > this.state.totalFrames) throw new ApiError(400, "bad-args", `wb.select: no frame ${printable(String(a)).slice(0, 40)} in this capture`);
+      this.select(a, "user");
+      // The packet list scrolls to it, as to the agent's selections
+      this.set({ selectSeq: this.state.selectSeq + 1 });
+      this.notice(`Panel "${title}" selected frame ${a}`);
+      this.panels.acted(name, `selected frame ${a}`);
+      return { ok: true };
+    }
+    if (typeof a !== "string" || a.length > 4096) throw new ApiError(400, "bad-args", "wb.setFilter takes a display filter of at most 4 KiB");
+    const filter = a.trim();
+    const check = await this.setFilter(filter, "user");
+    if (!check.ok) throw new ApiError(400, "filter", `invalid display filter "${printable(filter).slice(0, 200)}": ${check.error ?? "invalid"}`);
+    const did = filter ? `applied the display filter "${printable(filter).slice(0, 200)}"` : "cleared the display filter";
+    this.notice(`Panel "${title}" ${did}`);
+    this.panels.acted(name, did);
+    return { ok: true };
   }
 
   /** Re-counts active and failing extensions for the status bar. */
@@ -1204,6 +1340,7 @@ export class Viewer extends EventEmitter {
       } finally {
         this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
         this.refreshExtensions();
+        void this.checkOffers(true);
       }
       if (rolledBack) {
         // Going back without the one switched on fixed it: it stays off
@@ -1228,7 +1365,11 @@ export class Viewer extends EventEmitter {
     this.extensions.setEnabled(name, on);
     if (!on) this.panels.close(name);
     // A panel alone needs no sharkd restart
-    if (on && !this.extensions.list().find((e) => e.name === name)?.lua) return this.refreshExtensions();
+    if (on && !this.extensions.list().find((e) => e.name === name)?.lua) {
+      this.refreshExtensions();
+      void this.checkOffers(true);
+      return;
+    }
     await this.reloadExtensions({ name, on });
   }
 

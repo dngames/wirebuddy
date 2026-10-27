@@ -1,8 +1,9 @@
 /**
  * The `wb` global of a WireBuddy panel, loaded before the panel's main.js: its
  * link to WireBuddy (the view, the capture's data, readiness, status, errors
- * to the agent, the page's watchdog) and small helpers. Panels have no network
- * but their own origin.
+ * to the agent, the page's watchdog, changes to the view after a click,
+ * storage, snapshots) and small helpers. Panels have no network but their own
+ * origin.
  */
 
 import type { PanelView } from "../shared/api.ts";
@@ -87,6 +88,10 @@ const MAGIC = 0x4b504257;
 const BUSY_GIVE_UP_MS = 3 * 60_000;
 /** wb.all() gives up above this. */
 const MAX_ALL = 64 * 1024 * 1024;
+/** JSON wb.storage keeps per extension. */
+const MAX_STORAGE = 256 * 1024;
+/** WireBuddy's page answers wb.select and wb.setFilter within this. */
+const ACT_WAIT_MS = 10_000;
 
 (() => {
   const meta = (name: string): string => document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") ?? "";
@@ -144,13 +149,19 @@ const MAX_ALL = 64 * 1024 * 1024;
   // The page checks that the panel responds, and whether it runs in a process of its own
   addEventListener("message", (e) => {
     if (e.source !== parent || (parentOrigin !== "*" && e.origin !== parentOrigin)) return;
-    const m = e.data as { wb?: number; t?: string; seq?: number; ms?: number } | null;
+    const m = e.data as { wb?: number; t?: string; seq?: number; ms?: number; id?: number; ok?: boolean; code?: string; error?: string } | null;
     if (m?.wb !== 1) return;
     if (m.t === "ping") post({ t: "pong", seq: m.seq });
     else if (m.t === "probe") {
       const end = performance.now() + Math.min(m.ms ?? 0, 200);
       while (performance.now() < end);
       post({ t: "probed" });
+    } else if (m.t === "actres") {
+      const pending = acts.get(m.id ?? -1);
+      if (!pending) return;
+      acts.delete(m.id ?? -1);
+      if (m.ok) pending.done();
+      else pending.fail(new WbError(String(m.error ?? "refused"), String(m.code ?? "denied")));
     }
   });
   addEventListener("keydown", (e) => {
@@ -255,6 +266,10 @@ const MAX_ALL = 64 * 1024 * 1024;
     const r = dataOf(e) as { why: string; view: PanelView };
     setView(r.view, r.why);
   });
+  stream.addEventListener("request", (e) => {
+    const r = dataOf(e) as { id: string; kind: string; max?: number; bytes?: number };
+    if (r.kind === "snapshot") void snapshot(r.id, r.max ?? 1600, r.bytes ?? 1024 * 1024);
+  });
   stream.addEventListener("bye", (e) => {
     stream.close();
     if ((dataOf(e) as { why: string }).why === "replaced") shownElsewhere();
@@ -310,7 +325,8 @@ const MAX_ALL = 64 * 1024 * 1024;
       try {
         return await fn(...a);
       } catch (e) {
-        if (e instanceof WbError && !["stale", "replaced", "no-capture"].includes(e.code)) console.warn(`wb.${name} failed: ${e.message}${e.hint ? ` (${e.hint})` : ""}`);
+        // WireBuddy tells the agent about refusals itself
+        if (e instanceof WbError && !["stale", "replaced", "no-capture", "denied"].includes(e.code)) console.warn(`wb.${name} failed: ${e.message}${e.hint ? ` (${e.hint})` : ""}`);
         throw e;
       }
     };
@@ -556,6 +572,76 @@ const MAX_ALL = 64 * 1024 * 1024;
   const tap = async (name: string, opts: { filter?: string } = {}): Promise<unknown> => (await request("tap", { name, ...opts })).json();
   const check = async (filter: string): Promise<{ ok: boolean; error?: string; warning?: string }> => (await request("check", { filter })).json();
 
+  // --- changes to the user's view, made by WireBuddy's page right after a click in the panel
+
+  const acts = new Map<number, { done: () => void; fail: (e: Error) => void }>();
+  let actSeq = 0;
+  function act(m: "select" | "setFilter", a: unknown): Promise<void> {
+    return new Promise((done, fail) => {
+      const id = ++actSeq;
+      acts.set(id, { done, fail });
+      post({ t: "act", id, m, a });
+      setTimeout(() => acts.delete(id) && fail(new WbError("WireBuddy's page did not answer", "internal")), ACT_WAIT_MS);
+    });
+  }
+
+  // --- what the panel keeps, also across reloads and restarts
+
+  async function storageGet(): Promise<unknown> {
+    return ((await (await request("storage", { op: "get" })).json()) as { value: unknown }).value;
+  }
+
+  async function storageSet(value: unknown): Promise<void> {
+    const json = JSON.stringify(value ?? null);
+    if (json === undefined) throw new WbError("wb.storage.set takes JSON values", "bad-args");
+    if (new TextEncoder().encode(json).length > MAX_STORAGE) throw new WbError(`wb.storage keeps at most ${MAX_STORAGE / 1024} KiB of JSON`, "too-large");
+    await request("storage", { op: "set", value });
+  }
+
+  // --- snapshots for the agent
+
+  let snapshotFn: (() => unknown) | null = null;
+
+  /** Answers WireBuddy's request for an image: what wb.onSnapshot gives, else the largest canvas, as a PNG. */
+  async function snapshot(id: string, maxSide: number, maxBytes: number): Promise<void> {
+    const answer = (body: Record<string, unknown>): void => {
+      // Too large for keepalive, which a report uses
+      fetch("/_wb/report", { method: "POST", headers: { "content-type": "application/json", "x-wb-doc": doc }, body: JSON.stringify({ kind: "snapshot", id, ...body }) }).catch(() => {});
+    };
+    try {
+      const canvases = [...document.querySelectorAll("canvas")].filter((c) => c.width && c.height);
+      const src = snapshotFn ? await snapshotFn() : canvases.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+      if (!src) return answer({ none: snapshotFn ? "wb.onSnapshot's function returned nothing" : "the panel has no canvas to show (wb.onSnapshot(fn) can return one)" });
+      answer({ png: base64(await png(src, maxSide, maxBytes)) });
+    } catch (e) {
+      answer({ none: `the snapshot failed: ${e instanceof Error ? e.message : text(e)}` });
+    }
+  }
+
+  /** A canvas, OffscreenCanvas or image Blob as a PNG of at most `maxSide` pixels a side and `maxBytes`. */
+  async function png(src: unknown, maxSide: number, maxBytes: number): Promise<Uint8Array> {
+    let image: CanvasImageSource;
+    if (src instanceof Blob) image = await createImageBitmap(src);
+    else if (src instanceof HTMLCanvasElement || src instanceof OffscreenCanvas) image = src;
+    else throw new Error("wb.onSnapshot's function must return a canvas, an OffscreenCanvas or a Blob");
+    const { width: w, height: h } = image as { width: number; height: number };
+    if (!w || !h) throw new Error("the image is empty");
+    let scale = Math.min(1, maxSide / Math.max(w, h));
+    for (let i = 0; i < 8; i++, scale *= 0.7) {
+      const out = new OffscreenCanvas(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
+      out.getContext("2d")!.drawImage(image, 0, 0, out.width, out.height);
+      const blob = await out.convertToBlob({ type: "image/png" });
+      if (blob.size <= maxBytes) return new Uint8Array(await blob.arrayBuffer());
+    }
+    throw new Error("the image stays too large");
+  }
+
+  const base64 = (u8: Uint8Array): string => {
+    let bin = "";
+    for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
+
   const wb = {
     /** The panel's params from its extension.json. */
     params: JSON.parse(meta("wb-params") || "{}") as Record<string, unknown>,
@@ -576,6 +662,17 @@ const MAX_ALL = 64 * 1024 * 1024;
     objectURL: reported("objectURL", objectURL),
     tap: reported("tap", tap),
     check: reported("check", check),
+    /** Selects a frame in the user's view; only right after the user clicked or typed in the panel. */
+    select: reported("select", (frame: number) => act("select", frame)),
+    /** Applies a display filter in the user's view; needs "permissions": ["control"] and a click as for select. */
+    setFilter: reported("setFilter", (filter: string) => act("setFilter", filter)),
+    /** JSON (at most 256 KiB) WireBuddy keeps for this extension, also across reloads and restarts. */
+    storage: Object.freeze({ get: reported("storage.get", storageGet), set: reported("storage.set", storageSet) }),
+    /** What panel action "snapshot" shows the agent: `fn` returns a canvas, OffscreenCanvas or Blob. */
+    onSnapshot(fn: (() => unknown) | null): void {
+      if (fn !== null && typeof fn !== "function") throw new TypeError("wb.onSnapshot takes a function");
+      snapshotFn = fn;
+    },
     /** Call once the first view is drawn: the agent hears that it works, and what it shows. */
     ready(): void {
       report({ kind: "ready", digest: digest() });

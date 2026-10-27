@@ -54,6 +54,8 @@
  * | POST   | /api/panels/close             | { name }                             | { ok: true }           |
  * | POST   | /api/panels/reload            | { name }                             | { ok: true }           |
  * | POST   | /api/panels/health            | { name, label, state }               | { ok: true }           |
+ * | POST   | /api/panels/act               | PanelAct                             | { ok: true } (403 denied) |
+ * | POST   | /api/panels/offers/dismiss    | { name }                             | { ok: true }           |
  *
  * Panels are served on hosts of their own, `p<label>.localhost:<port>`
  * (src/server/panels.ts), never with the token.
@@ -154,6 +156,11 @@ export interface ViewState {
   /** Open panel windows (views of the capture that extensions bring). */
   panels: PanelState[];
   /**
+   * Panels whose offer filter matches the open capture, shown as status-bar
+   * chips; not while the panel is open or after the user dismissed it for this file.
+   */
+  panelOffers: PanelOffer[];
+  /**
    * Changes whenever packets already read may read differently: another file
    * or a rewritten one, a closed capture, re-read extensions or TLS keys. Not
    * when a live capture only grows.
@@ -180,6 +187,32 @@ export interface PanelState {
   errors: number;
   /** Whether it runs in a process of its own (null: not probed yet). */
   isolated: boolean | null;
+  /** Its manifest grants "control": it may set the display filter (after a click in it). */
+  control: boolean;
+}
+
+/** A panel offered for the open capture (its extension.json "offer"). */
+export interface PanelOffer {
+  /** Extension name. */
+  name: string;
+  /** Extension label. */
+  label: string;
+  /** The offer's text, e.g. "Show the point cloud". */
+  text: string;
+}
+
+/**
+ * A panel's change to the view, sent by the page that shows it: `select`
+ * takes a frame number, `setFilter` a display filter. `clicked`: the user
+ * clicked or typed in that panel just before; without it the server only
+ * records the refusal.
+ */
+export interface PanelAct {
+  name: string;
+  label: string;
+  m: "select" | "setFilter";
+  a: unknown;
+  clicked: boolean;
 }
 
 /** What a panel sees of the view: `wb.view`. */
@@ -499,8 +532,11 @@ export interface ExtensionInfo {
   protocols: string[];
   /** It has Lua files for sharkd. */
   lua: boolean;
-  /** Its panel, if it has one; `open` and `stale` (files changed since it opened) come from the viewer. */
-  panel: { title: string; open: boolean; stale: boolean } | null;
+  /**
+   * Its panel, if it has one; `open`, `stale` (files changed since it opened)
+   * and `offerError` (its offer filter is invalid) come from the viewer.
+   */
+  panel: { title: string; open: boolean; stale: boolean; offer: string | null; offerError?: string } | null;
 }
 
 export interface ExtensionList {

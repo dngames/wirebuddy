@@ -20,6 +20,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statfsSync,
   statSync,
@@ -435,6 +436,9 @@ export class Extensions {
   readonly dir: string;
   private readonly shared: string[];
   private readonly stateFile: string;
+  /** What panels keep with wb.storage, a file per extension. */
+  private readonly storageDir: string;
+  private storageWrites = 0;
   private readonly runDir: string;
   private state: State;
   /** What the last sharkd start said about each extension it loaded. */
@@ -457,6 +461,7 @@ export class Extensions {
     const data = process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
     this.dir = join(data, "wirebuddy/extensions");
     this.stateFile = join(data, "wirebuddy/extensions-state.json");
+    this.storageDir = join(data, "wirebuddy/panel-storage");
     this.runDir = join(data, "wirebuddy/run");
     this.shared = (process.env.WIREBUDDY_EXTENSIONS ?? "").split(delimiter).filter(Boolean).map((d) => resolve(d));
     this.state = readState(this.stateFile);
@@ -726,7 +731,7 @@ export class Extensions {
         return done({ status: "invalid", error: `${MANIFEST}: panel: ${printable((err as Error).message)}` });
       }
       if (tree?.invalid) return done({ status: "invalid", error: tree.invalid });
-      info.panel = { title: panel.title, open: false, stale: false };
+      info.panel = { title: panel.title, open: false, stale: false, offer: panel.offer?.text ?? null };
     }
     if (!info.lua && !panel) return done({ status: "invalid", error: "neither a .lua file nor a panel" });
     if (!info.enabled) return done({ status: "off", error: this.state.off[name] || undefined }, panel);
@@ -749,6 +754,39 @@ export class Extensions {
       else files.set(f.rel, { bytes, type: PANEL_TYPES[extname(f.rel).toLowerCase()] });
     }
     return { folder: e.folder, manifest: e.panel!, files, body, fingerprint: fingerprint(e.folder, tree) };
+  }
+
+  /** The offers of enabled panels that could open: theirs to check against the capture. */
+  offers(): { name: string; label: string; filter: string; text: string }[] {
+    return this.entries()
+      .filter((e) => e.panel?.offer && e.info.enabled && loadable(e.info))
+      .map((e) => ({ name: e.info.name, label: e.info.label, filter: e.panel!.offer!.filter, text: e.panel!.offer!.text }));
+  }
+
+  /** What an extension's panel kept with wb.storage.set, as JSON, or null. */
+  panelStorage(name: string): string | null {
+    if (!NAME.test(name)) throw new Error(`no extension "${name}"`);
+    try {
+      return readFileSync(join(this.storageDir, `${name}.json`), "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /** Keeps `json` for an extension's panel, replacing the file whole; null removes it. */
+  setPanelStorage(name: string, json: string | null): void {
+    if (!NAME.test(name)) throw new Error(`no extension "${name}"`);
+    const file = join(this.storageDir, `${name}.json`);
+    if (json === null) return rmSync(file, { force: true });
+    mkdirSync(this.storageDir, { recursive: true, mode: 0o700 });
+    // A new file renamed over the old one: never half written, never through a link
+    const tmp = join(this.storageDir, `.${name}.${process.pid}.${++this.storageWrites}.tmp`);
+    try {
+      writeFileSync(tmp, json, { mode: 0o600, flag: "wx" });
+      renameSync(tmp, file);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
   }
 
   /** Changes when the panel's files or extension.json change; null without a panel. */
@@ -886,6 +924,9 @@ of its own: no network, no access to WireBuddy's page or API, only \`wb\`.
 Folder: ${this.dir}/<name>/
   extension.json   {"label": "...", "version": "1", "description": "...",
                     "panel": {"title": "...", "size": [800, 560], "params": {...}}}   ("panel": true for defaults)
+                    "panel" may also have "offer": {"filter": "wbpc", "text": "Show the point cloud"}: a chip in the
+                    status bar offers the panel when the open capture has matching packets (text: 40 characters)
+                    and "permissions": ["control"], only needed for wb.setFilter
   panel/main.js    required: an ES module; \`wb\` is a global; top-level await works
   panel/body.html  optional HTML put into <body> (no scripts, no on*= attributes)
   panel/style.css  optional; panel/... more modules (import "./x.js"), workers, images, fonts, data
@@ -895,7 +936,7 @@ Loop:
 1. Write the files with your file tools.
 2. extensions action "test": manifest, file trust, JavaScript syntax (file:line) and lints.
 3. panel action "open": starts it in the user's view and reports whether it got ready, its errors
-   (file:line) and what it shows.
+   (file:line) and what it shows; panel action "snapshot" returns an image of it.
 4. Fix, then panel action "reload"; repeat. panel action "status" shows errors and console lines since
    your last look. If it needs your Lua protocol, extensions action "reload" first.
 5. Tell the user what the panel shows and that View › Panels opens it again.
@@ -943,8 +984,14 @@ API (global wb):
   wb.object(id)    {type, filename, bytes};  wb.objectURL(id): a blob: URL for <img> or <video>
   wb.tap(name, {filter})   "phs", "expert", "rtp-streams", "conv:eth|ipv4|ipv6|tcp|udp", "endpt:..."
   wb.check(filter) {ok, error?, warning?}
+  wb.select(frame) selects a packet in the user's view; only right after the user clicked or typed in the panel
+  wb.setFilter(filter)   applies a display filter in the user's view; needs "permissions": ["control"] and a click too
+  wb.storage.get() / wb.storage.set(value)   JSON of at most 256 KiB kept for this extension, also across restarts
+  wb.onSnapshot(fn)   what panel action "snapshot" shows: fn returns a canvas, OffscreenCanvas or Blob
+                   (default: the largest canvas; make WebGL canvases with wb.canvas so their pixels are kept)
   Failed calls reject with an Error whose .code is bad-args, filter, no-capture, stale, gone,
-  too-large, busy, too-slow or internal (some with .hint); they are reported to you as well.
+  too-large, busy, too-slow, denied (no click, no permission) or internal (some with .hint);
+  they are reported to you as well.
   wb.params        the panel's "params" from extension.json
   wb.ready()       it works: the agent hears it, with what it shows
   wb.status(text)  a short status line under the window;  wb.title(text): the window's title

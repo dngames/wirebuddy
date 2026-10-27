@@ -2,7 +2,7 @@
 // Usage: node test/panels-smoke.mjs   (after npm run build)
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 import * as g from "./capgen.mjs";
+import { writeAcmeCapture } from "./acme.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -145,7 +146,7 @@ try {
     const list = (await api("/api/extensions")).json;
     assert.equal(ext(list, "hello").status, "loaded");
     assert.equal(ext(list, "hello").lua, false);
-    assert.deepEqual(ext(list, "hello").panel, { title: "hello panel", open: false, stale: false });
+    assert.deepEqual(ext(list, "hello").panel, { title: "hello panel", open: false, stale: false, offer: null });
     assert.match(ext(list, "nomain").error, /panel\/main\.js is missing/);
     assert.match(ext(list, "badname").error, /panel\/-bad\.js: names may only use/);
     assert.match(ext(list, "reserved").error, /panel\/_wb: names may only use/);
@@ -558,6 +559,139 @@ try {
     assert.equal(warnings.length, 1);
     assert.match(warnings[0].text, /Panels read journal\.pcapng through sharkd only/);
     assert.equal((await pkts({ bytes: "frame" })).n, 3);
+  });
+
+  // Control: what a panel may change in the user's view (relayed by the page after a click), what it keeps, offers
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const events = async () => (await api("/api/events/take", {})).json.events.map((e) => `${e.level} ${e.text}`).join("\n");
+  const until = async (what, fn) => {
+    for (let i = 0; i < 100; i++, await sleep(100)) if (await fn()) return;
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  const docOf = async (h) => /<meta name="wb-doc" content="([a-z2-7]+)">/.exec((await panelReq(h, "/", { headers: frameHeaders })).body)[1];
+  addPanel("ctl", { "main.js": "wb.ready();\n" }, { label: "Ctl", version: "1", panel: { title: "Ctl" } });
+  addPanel("ctlfilter", { "main.js": "wb.ready();\n" }, { label: "Ctl filter", version: "1", panel: { title: "Filter", permissions: ["control"] } });
+  await api("/api/panels/open", { name: "ctl" });
+  await api("/api/panels/open", { name: "ctlfilter" });
+  const opened = (await api("/api/state")).json.panels;
+  const ctl = opened.find((x) => x.name === "ctl");
+  const ctlf = opened.find((x) => x.name === "ctlfilter");
+  const act = (p, m, a, clicked = true) => api("/api/panels/act", { name: p.name, label: p.label, m, a, clicked });
+
+  await check("control: a panel's select needs the token and a click in it", async () => {
+    assert.deepEqual([ctl.control, ctlf.control], [false, true]);
+    const body = JSON.stringify({ name: "ctl", label: ctl.label, m: "select", a: 3, clicked: true });
+    assert.equal((await fetch(`${base}/api/panels/act`, { method: "POST", headers: { "content-type": "application/json" }, body })).status, 401);
+    const h = new URL(ctl.src).host;
+    const fromPanel = await panelReq(h, "/api/panels/act", { method: "POST", body, headers: { ...sub("empty"), origin: `http://${h}`, "content-type": "application/json", "x-wirebuddy-token": token } });
+    assert.equal(fromPanel.status, 403);
+    await events();
+    const unclicked = await act(ctl, "select", 3, false);
+    assert.deepEqual([unclicked.status, unclicked.json.code], [403, "denied"]);
+    assert.notEqual((await api("/api/state")).json.selected, 3);
+    assert.equal((await act(ctl, "select", 3)).status, 200);
+    const s = (await api("/api/state")).json;
+    assert.deepEqual([s.selected, s.selectedBy], [3, "user"]);
+    assert.match(s.agentNotice.text, /^Panel "Ctl" selected frame 3$/);
+    const ev = await events();
+    assert.match(ev, /WARNING Panel "ctl" called wb\.select, which was refused: the user hadn't just clicked or typed in the panel/);
+    assert.match(ev, /INFO Panel "ctl" selected frame 3 \(the user clicked in it\)/);
+    assert.deepEqual([(await act(ctl, "select", 99)).status, (await act(ctl, "select", 99)).json.code], [400, "bad-args"]);
+    assert.equal((await act(ctl, "mark", 3)).status, 400);
+    assert.equal((await act({ ...ctl, label: "a".repeat(26) }, "select", 4)).json.code, "gone");
+    await sleep(1000);
+    const burst = await Promise.all(Array.from({ length: 8 }, () => act(ctl, "select", 5)));
+    assert.ok(burst.some((r) => r.status === 429 && r.json.code === "busy"), burst.map((r) => r.status).join());
+  });
+
+  await check("control: setFilter only with the control permission", async () => {
+    await events();
+    const refused = await act(ctl, "setFilter", "http");
+    assert.deepEqual([refused.status, refused.json.code], [403, "denied"]);
+    assert.match(refused.json.error, /"permissions": \["control"\]/);
+    assert.equal((await api("/api/state")).json.filter, "");
+    const bad = await act(ctlf, "setFilter", "http &&");
+    assert.deepEqual([bad.status, bad.json.code], [400, "filter"]);
+    await sleep(1000);
+    assert.equal((await act(ctlf, "setFilter", "http")).status, 200);
+    const s = (await api("/api/state")).json;
+    assert.deepEqual([s.filter, s.displayedFrames], ["http", 4]);
+    assert.match(s.agentNotice.text, /^Panel "Filter" applied the display filter "http"$/);
+    assert.equal((await act(ctlf, "setFilter", "tcp")).json.code, "busy");
+    await sleep(1000);
+    assert.equal((await act(ctlf, "setFilter", "")).status, 200);
+    assert.equal((await api("/api/state")).json.filter, "");
+    const ev = await events();
+    assert.match(ev, /WARNING Panel "ctl" called wb\.setFilter, which was refused: it needs "permissions": \["control"\]/);
+    assert.match(ev, /INFO Panel "ctlfilter" applied the display filter "http" \(the user clicked in it\)/);
+  });
+
+  await check("control: wb.storage keeps JSON per extension, at most 256 KiB, across panel reloads", async () => {
+    let h = new URL(ctl.src).host;
+    let d = await docOf(h);
+    const store = (body, headers = {}) =>
+      panelReq(h, "/_wb/api/storage", { method: "POST", body: JSON.stringify(body), headers: { origin: `http://${h}`, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-wb-doc": d, ...headers } });
+    assert.deepEqual(JSON.parse((await store({ op: "get" })).body), { value: null });
+    const kept = { zoom: 2, seen: [1, 2], note: "ü" };
+    assert.equal((await store({ op: "set", value: kept, epoch: 1 })).status, 200);
+    assert.deepEqual(JSON.parse((await store({ op: "get" })).body), { value: kept });
+    assert.equal(statSync(join(home, ".local/share/wirebuddy/panel-storage/ctl.json")).mode & 0o777, 0o600);
+    // Too large, from another origin, or an old page
+    const big = await store({ op: "set", value: "x".repeat(256 * 1024) });
+    assert.deepEqual([big.status, JSON.parse(big.body).code], [413, "too-large"]);
+    assert.equal((await store({ op: "get" }, { origin: base })).status, 403);
+    assert.equal((await store({ op: "get" }, { "x-wb-doc": "old" })).status, 409);
+    assert.equal(JSON.parse((await store({ op: "drop" })).body).code, "bad-args");
+    // A reloaded panel (a new origin) finds it; another extension has its own
+    await api("/api/panels/reload", { name: "ctl" });
+    h = new URL((await api("/api/state")).json.panels.find((x) => x.name === "ctl").src).host;
+    d = await docOf(h);
+    assert.deepEqual(JSON.parse((await store({ op: "get" })).body), { value: kept });
+    const fh = new URL(ctlf.src).host;
+    const other = await panelReq(fh, "/_wb/api/storage", { method: "POST", body: '{"op":"get"}', headers: { origin: `http://${fh}`, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-wb-doc": await docOf(fh) } });
+    assert.deepEqual(JSON.parse(other.body), { value: null });
+    assert.equal((await store({ op: "set", value: null })).status, 200);
+    assert.deepEqual(JSON.parse((await store({ op: "get" })).body), { value: null });
+  });
+
+  await check("control: offers appear for a matching capture; an invalid offer filter is reported, the others still count", async () => {
+    await api("/api/panels/close", { name: "ctl" });
+    await api("/api/panels/close", { name: "ctlfilter" });
+    const offer = (name, filter, text) => addPanel(name, { "main.js": "wb.ready();\n" }, { label: `Offer ${name}`, version: "1", panel: { offer: { filter, text } } });
+    offer("offerhttp", "http", "Show HTTP");
+    offer("offerdns", "dns", "Show DNS");
+    offer("offerudp", "udp", "Show UDP");
+    offer("offerbad", "nosuchproto.field == 1", "Never");
+    // More than one iograph pass: ten offers per pass
+    for (let i = 0; i < 11; i++) offer(`offerframe${String(i).padStart(2, "0")}`, `frame.number == ${i + 1}`, `Frame ${i + 1}`);
+    await events();
+    await api("/api/extensions/reload", {});
+    const offered = async () => (await api("/api/state")).json.panelOffers.map((o) => o.name);
+    await until("the offers", async () => (await offered()).includes("offerhttp"));
+    const names = await offered();
+    assert.deepEqual(names, ["offerframe00", "offerframe01", "offerframe02", "offerframe03", "offerframe04", "offerframe05", "offerframe06", "offerframe07", "offerframe08", "offerframe09", "offerframe10", "offerhttp"]);
+    assert.deepEqual((await api("/api/state")).json.panelOffers.find((o) => o.name === "offerhttp"), { name: "offerhttp", label: "Offer offerhttp", text: "Show HTTP" });
+    const list = (await api("/api/extensions")).json;
+    assert.match(ext(list, "offerbad").panel.offerError, /^invalid offer filter "nosuchproto\.field == 1": /);
+    assert.equal(ext(list, "offerhttp").panel.offer, "Show HTTP");
+    assert.equal(ext(list, "offerdns").panel.offerError, undefined);
+    assert.match(await events(), /WARNING The offer filter "nosuchproto\.field == 1" of the panel "offerbad" is invalid/);
+    // Not while it is open; a dismissed one stays away for this file only
+    await api("/api/panels/open", { name: "offerhttp" });
+    assert.ok(!(await offered()).includes("offerhttp"));
+    await api("/api/panels/close", { name: "offerhttp" });
+    assert.ok((await offered()).includes("offerhttp"));
+    assert.equal((await api("/api/panels/offers/dismiss", { name: "offerhttp" })).status, 200);
+    assert.ok(!(await offered()).includes("offerhttp"));
+    assert.match(await events(), /INFO The user dismissed the offer of the panel "offerhttp" for this capture/);
+    const acme = join(home, "acme.pcap");
+    writeAcmeCapture(acme);
+    await api("/api/open", { path: acme });
+    await until("the offers of another capture", async () => (await offered()).includes("offerudp"));
+    assert.ok(!(await offered()).includes("offerhttp"));
+    await api("/api/open", { path: fixture });
+    await until("the offer to come back", async () => (await offered()).includes("offerhttp"));
+    assert.ok(!(await offered()).includes("offerudp"));
   });
 } finally {
   server.kill();

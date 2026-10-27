@@ -134,16 +134,26 @@ and look at what it wrote. Extensions need Linux.
 ### Panels
 
 An extension can also bring a **panel**: a small web page of its own (`panel/main.js`, plus
-optional HTML, CSS and further modules) that WireBuddy shows in a window next to the packets.
-The agent writes one when a picture says more than packet rows, checks it
-(`extensions action "test"` finds syntax errors with file and line), opens it with the `panel`
-tool and gets told whether it started, what it shows and every error it throws. You open panels
-under **View › Panels** or in Analyze › Extensions.
+optional HTML, CSS and further modules) that WireBuddy shows in a window next to the packets and
+feeds with the open capture, also during a live capture: images or files in the traffic, video,
+point clouds, a field over time. The agent writes one when a picture says more than packet rows,
+checks it (`extensions action "test"` finds syntax errors with file and line), opens it with the
+`panel` tool and gets told whether it started, what it shows and every error it throws;
+`panel action "snapshot"` gives it an image of the panel.
+
+You open panels under **View › Panels** or in Analyze › Extensions. An extension can offer its
+panel for captures it fits (`"offer": {"filter": "rtp", "text": "Play the video"}`): the offer
+shows as a chip in the status bar that opens the panel, or with × goes away for that capture. A
+panel can select a packet in your view, and with the `"control"` permission apply a display
+filter, but only right after you clicked or typed in it. It can keep up to 256 KiB of JSON
+(`wb.storage`) across restarts. Examples to copy from are in
+[examples/extensions](examples/extensions).
 
 Each panel runs sandboxed on a one-time origin of its own (`p<random>.localhost`), in its own
-browser process: it can't reach WireBuddy's API, its token or the network, only its own files. A
-panel that stops responding is stopped after 20 seconds without slowing WireBuddy down; one that
-tries to navigate is closed.
+browser process, and gets only its own files and the capture, never WireBuddy's API, its token or
+(WebRTC aside) the network. A panel that stops responding is stopped after 20 seconds without
+slowing WireBuddy down, and one that tries to navigate is closed; [SECURITY.md](SECURITY.md) has
+the details.
 
 ## Dissector plugins and profiles
 
@@ -226,7 +236,7 @@ time, and lists the CDN and third parties (consent managers, trackers) the page 
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, capture status |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, capture status, open and offered panels |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -245,7 +255,7 @@ time, and lists the CDN and third parties (consent managers, trackers) the page 
 | `stop_capture` | Stop the running capture |
 | `open_in_wireshark` | Open the capture in the real Wireshark at the selected frame |
 | `extensions` | Lua dissector extensions and panels: a guide with templates, list, test one on the open capture, reload, enable, disable |
-| `panel` | Open, reload, check on or close an extension's panel in the user's view |
+| `panel` | Open, reload, check on, snapshot or close an extension's panel in the user's view |
 
 Every agent action that changes the view shows a notice in the UI. Every tool result also
 carries what happened in the viewer since the agent's last call: problems and what you did.
@@ -295,6 +305,7 @@ carries what happened in the viewer since the agent's last call: problems and wh
 ```bash
 npm run build
 npm test             # HTTP API and MCP tools against test/fixtures/http.pcapng
+node test/browser-control.mjs   # panels in headless Chrome: click gate, snapshot, offers (skipped without Chrome)
 npm run test:live    # live capture on loopback: pings 127.0.0.1, runs a local HTTPS server
 ```
 

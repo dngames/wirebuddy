@@ -55,10 +55,24 @@ Supported versions: the latest `main` and the latest release.
   host serves nothing but the files read (and checked like Lua) when the panel opened, and only to
   that page. The main page frames only panel hosts, so a panel can't navigate elsewhere either;
   one that tries is closed, and one that stops responding is stopped.
+- A panel reads the open capture only through a data API on its own origin (`/_wb/api/…`):
+  packets, bytes, fields, streams, exported objects, taps and filter checks of the capture the
+  user's view shows, from a `sharkd` of its own, within per-panel quotas. It can't name another
+  file, and there is no route to start a capture.
+- A panel changes the user's view only through the page that shows it: `wb.select` and, with the
+  `"control"` permission in its `extension.json`, `wb.setFilter`. The page passes either on only
+  right after the user clicked or typed in that panel (its frame has focus and the page holds the
+  user activation the browser passes up from it); the server checks the permission again, limits
+  how often, shows a notice and reports every change and refusal to the agent. Panels can't mark
+  packets, change columns or start captures.
+- `wb.storage` keeps at most 256 KiB of JSON per extension in WireBuddy's data folder
+  (`~/.local/share/wirebuddy/panel-storage`, files readable only by the user); a panel reads and
+  writes only its own extension's.
 - Residual risks of panels: code in a panel can still reach the network through WebRTC, which no
-  Content Security Policy blocks, so a panel has the same trust as the Lua the agent writes; and
-  the isolation needs a browser that puts each `*.localhost` site into a process of its own (the
-  page checks this and reports a panel that isn't).
+  Content Security Policy blocks, so a panel has the same trust as the Lua the agent writes; a
+  panel reads everything in the open capture, TLS-decrypted data included; and the isolation needs
+  a browser that puts each `*.localhost` site into a process of its own (the page checks this and
+  reports a panel that isn't).
 - Packet contents are untrusted and are always rendered as text, never as HTML.
 - Problems in the viewer and what the user does there are reported to the attached agent
   (`--watch` reads them through an instance file only the user can read).

@@ -2836,6 +2836,55 @@ button.sb-led:hover {
   color: var(--danger);
 }
 
+.sb-offers {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+.sb-offer {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0 2px 0 6px;
+}
+
+.sb-offer button {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sb-offer-open {
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-offer-open:hover {
+  text-decoration: underline;
+}
+
+.sb-offer .icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.sb-offer-x {
+  color: var(--text-dim) !important;
+}
+
 /* ------------------------------------------------------- capture options */
 
 .co-page {

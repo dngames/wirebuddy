@@ -1,6 +1,6 @@
-/** Status bar: expert LED, file, field info, packet counts, marks, capture, connection. */
+/** Status bar: expert LED, file, field info, panel offers, packet counts, marks, capture, connection. */
 
-import type { ExpertItem, ExpertSeverity, ViewState } from "../shared/api.ts";
+import type { ExpertItem, ExpertSeverity, PanelOffer, ViewState } from "../shared/api.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
 import { agentName, app, bus } from "./app.ts";
@@ -10,8 +10,12 @@ import { openExtensionsDialog } from "./dialogs/extensions.ts";
 import { openTlsDialog } from "./dialogs/tls.ts";
 import { maxSeverity, sevClass } from "./frame.ts";
 import { icon } from "./icons.ts";
+import { dismissOffer, openPanel } from "./panels.ts";
 import { baseName, fmtInt, fmtPct, fmtSize, h, setText, setTitle } from "./util.ts";
 import { reconnectNow } from "./ws.ts";
+
+/** Panel offers shown at once. */
+const MAX_OFFERS = 3;
 
 export function createStatusBar(): HTMLElement {
   const led = h("button", { class: "sb-led", attrs: { "aria-label": "Expert information" }, onclick: () => openExpertDialog() });
@@ -25,6 +29,8 @@ export function createStatusBar(): HTMLElement {
   const markSeg = h("span", { class: "sb-seg sb-marks" });
   const capSeg = h("span", { class: "sb-seg sb-cap" });
   const connSeg = h("button", { class: "sb-seg sb-conn", onclick: () => reconnectNow() });
+  const offersSeg = h("span", { class: "sb-offers", hidden: true });
+  let offersKey = "";
   const agentSeg = h(
     "span",
     {
@@ -113,6 +119,24 @@ export function createStatusBar(): HTMLElement {
       markSeg.hidden = true;
     }
 
+    // Panels whose offer matches the capture: a chip opens one, × hides it for this file
+    const offers: PanelOffer[] = s?.panelOffers.slice(0, MAX_OFFERS) ?? [];
+    const key = JSON.stringify(offers);
+    if (key !== offersKey) {
+      offersKey = key;
+      offersSeg.hidden = !offers.length;
+      offersSeg.replaceChildren(
+        ...offers.map((o) =>
+          h(
+            "span",
+            { class: "sb-seg sb-offer" },
+            h("button", { class: "sb-offer-open", title: `Open the panel of the extension ${o.label}`, onclick: () => void openPanel(o.name) }, icon("puzzle"), `${o.label}: ${o.text} ▸`),
+            h("button", { class: "sb-offer-x", title: "Don't offer it again for this capture", attrs: { "aria-label": `Dismiss ${o.label}` }, onclick: () => void dismissOffer(o.name) }, icon("x")),
+          ),
+        ),
+      );
+    }
+
     const agent = s?.agent;
     agentSeg.hidden = !agent?.attached || !agent.pending;
     const who = agentName();
@@ -160,5 +184,5 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   update();
-  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), agentSeg, tlsSeg, extSeg, pktSeg, markSeg, capSeg, connSeg);
+  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), offersSeg, agentSeg, tlsSeg, extSeg, pktSeg, markSeg, capSeg, connSeg);
 }

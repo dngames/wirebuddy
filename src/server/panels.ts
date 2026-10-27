@@ -38,6 +38,16 @@ const HEARTBEAT_MS = 15_000;
 /** A file panels read raw is looked at this often for new packets; "packets" events at most this often. */
 const TAIL_MS = 200;
 const PACKETS_EVERY_MS = 200;
+/** Changes a panel may make to the view, per second (after a click in it). */
+const MAX_SELECTS_PER_SECOND = 5;
+const MAX_FILTERS_PER_SECOND = 1;
+/** What wb.storage keeps per extension, and how often a panel may write it. */
+const MAX_STORAGE = 256 * 1024;
+const MAX_STORAGE_WRITES_PER_SECOND = 4;
+/** A snapshot's PNG at most, its longest side, and how long the page has to answer. */
+const MAX_SNAPSHOT = 1536 * 1024;
+const SNAPSHOT_SIDE = 1600;
+const SNAPSHOT_WAIT_MS = 5000;
 
 type Health = "not-responding" | "responding" | "stopped" | "navigated" | "isolated" | "not-isolated" | "flooding";
 
@@ -75,7 +85,15 @@ interface Instance {
   /** Bytes sent per answer, for the per-minute quota. */
   transfers: { at: number; bytes: number }[];
   frameCalls: number[];
+  /** Times of its changes to the view and of its storage writes, for their limits. */
+  acts: { select: number[]; setFilter: number[] };
+  storageWrites: number[];
+  /** Snapshots asked of its page, by request id. */
+  snapshots: Map<string, (s: Snapshot) => void>;
 }
+
+/** An image of a panel, or why there is none. */
+export type Snapshot = { png: Buffer; width: number; height: number } | { none: string };
 
 export interface PanelReport {
   name: string;
@@ -134,6 +152,7 @@ export class Panels extends EventEmitter {
       statusText: i.statusText,
       errors: i.errorCount,
       isolated: i.isolated,
+      control: i.files.manifest.permissions.includes("control"),
     }));
   }
 
@@ -174,6 +193,9 @@ export class Panels extends EventEmitter {
       inFlight: 0,
       transfers: [],
       frameCalls: [],
+      acts: { select: [], setFilter: [] },
+      storageWrites: [],
+      snapshots: new Map(),
     };
     this.open.set(name, inst);
     this.byLabel.set(inst.label, inst);
@@ -198,6 +220,7 @@ export class Panels extends EventEmitter {
     this.open.delete(name);
     this.byLabel.delete(inst.label);
     for (const wake of inst.waiters.splice(0)) wake();
+    for (const answer of [...inst.snapshots.values()]) answer({ none: "the panel was closed" });
     this.endStreams(inst, why);
     if (inst.packetsTimer) clearTimeout(inst.packetsTimer);
     this.data?.closed(inst.label);
@@ -313,6 +336,57 @@ export class Panels extends EventEmitter {
     return out;
   }
 
+  /**
+   * Whether a panel may change the view now (wb.select, wb.setFilter):
+   * setFilter needs the "control" permission, both need a click or key press
+   * in the panel just before (`clicked`, which the page checks), and both are
+   * rate limited. Refusals are told to the agent. Returns the manifest's
+   * title (not the one the panel set).
+   */
+  allow(name: string, label: string, m: "select" | "setFilter", clicked: boolean): string {
+    const inst = this.open.get(name);
+    if (!inst || inst.label !== label) throw new ApiError(404, "gone", "the panel was closed");
+    if (m === "setFilter" && !inst.files.manifest.permissions.includes("control")) {
+      this.tell(inst, "WARNING", 'called wb.setFilter, which was refused: it needs "permissions": ["control"] in its extension.json');
+      throw new ApiError(403, "denied", 'wb.setFilter needs "permissions": ["control"] in extension.json');
+    }
+    if (!clicked) {
+      this.tell(inst, "WARNING", `called wb.${m}, which was refused: the user hadn't just clicked or typed in the panel (it only works right after that)`);
+      throw new ApiError(403, "denied", `wb.${m} only works right after the user clicked or typed in the panel`);
+    }
+    const now = Date.now();
+    const times = inst.acts[m].filter((t) => now - t < 1000);
+    inst.acts[m] = times;
+    const max = m === "select" ? MAX_SELECTS_PER_SECOND : MAX_FILTERS_PER_SECOND;
+    if (times.length >= max) throw new ApiError(429, "busy", `wb.${m} at most ${max} times a second`, { retryMs: 1000 - (now - times[0]) });
+    times.push(now);
+    return inst.files.manifest.title;
+  }
+
+  /** What a panel did to the view, for the agent. */
+  acted(name: string, text: string): void {
+    const inst = this.open.get(name);
+    if (inst) this.tell(inst, "INFO", `${text} (the user clicked in it)`);
+  }
+
+  /** Asks the panel's page for an image of it: a PNG, or why there is none. */
+  snapshot(name: string, ms = SNAPSHOT_WAIT_MS): Promise<Snapshot> {
+    const inst = this.open.get(name);
+    if (!inst) throw new Error(`the panel "${name}" is not open`);
+    if (!inst.streams.size) throw new Error(inst.state === "stopped" || inst.state === "error" ? `the panel is ${inst.state}: panel action "reload"` : "the panel's page isn't running: is the viewer open?");
+    const id = base32(randomBytes(10));
+    return new Promise((done) => {
+      const timer = setTimeout(() => answer({ none: `the panel did not answer within ${ms / 1000} s` }), ms);
+      const answer = (s: Snapshot): void => {
+        clearTimeout(timer);
+        inst.snapshots.delete(id);
+        done(s);
+      };
+      inst.snapshots.set(id, answer);
+      for (const res of inst.streams) sse(res, "request", { id, kind: "snapshot", max: SNAPSHOT_SIDE, bytes: MAX_SNAPSHOT });
+    });
+  }
+
   /** The page's watchdog about a panel's frame. */
   health(name: string, label: string, health: Health): void {
     const inst = this.open.get(name);
@@ -392,6 +466,7 @@ export class Panels extends EventEmitter {
       if (req.method !== "POST" || req.headers.origin !== origin || fetchSite !== "same-origin") return send(403, "forbidden");
       if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) return send(415, "JSON only");
       if (req.headers["x-wb-doc"] !== inst.docNonce) return this.apiError(res, inst, new ApiError(409, "replaced", "a newer page of this panel is open"));
+      if (path === "/_wb/api/storage") return this.storage(req, res, inst);
       return this.api(req, res, inst, path.slice("/_wb/api/".length));
     }
     if (req.method === "GET" && path === "/_wb/events") {
@@ -403,7 +478,8 @@ export class Panels extends EventEmitter {
       if (req.headers.origin !== origin || fetchSite !== "same-origin") return send(403, "forbidden");
       if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) return send(415, "JSON only");
       if (req.headers["x-wb-doc"] !== inst.docNonce) return send(409, "replaced");
-      const body = await readBody(req, MAX_REPORT);
+      // A snapshot asked for is larger than any other report
+      const body = await readBody(req, inst.snapshots.size ? Math.ceil(MAX_SNAPSHOT / 3) * 4 + MAX_REPORT : MAX_REPORT);
       if (body === null) return send(413, "too large");
       try {
         this.onReport(inst, JSON.parse(body.toString("utf8")) as Record<string, unknown>, origin);
@@ -484,6 +560,48 @@ export class Panels extends EventEmitter {
     res.writeHead(200, headers);
     res.end(out);
     return true;
+  }
+
+  /** wb.storage: JSON kept per extension, {op: "get"} or {op: "set", value}. */
+  private async storage(req: IncomingMessage, res: ServerResponse, inst: Instance): Promise<true> {
+    const raw = await readBody(req, MAX_STORAGE + 1024);
+    if (raw === null) return this.apiError(res, inst, new ApiError(413, "too-large", `wb.storage keeps at most ${MAX_STORAGE / 1024} KiB`));
+    let body: { op?: unknown; value?: unknown };
+    try {
+      body = JSON.parse(raw.toString("utf8")) as typeof body;
+    } catch {
+      return this.apiError(res, inst, new ApiError(400, "bad-args", "the body is not JSON"));
+    }
+    const answer = (body: unknown): true => {
+      res.writeHead(200, { ...this.headers(inst), "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+      return true;
+    };
+    try {
+      if (body?.op === "get") {
+        const json = this.extensions.panelStorage(inst.name);
+        let value: unknown = null;
+        try {
+          value = json === null ? null : JSON.parse(json);
+        } catch {
+          // not ours any more: nothing kept
+        }
+        return answer({ value });
+      }
+      if (body?.op !== "set") return this.apiError(res, inst, new ApiError(400, "bad-args", 'op must be "get" or "set"'));
+      const json = body.value === undefined || body.value === null ? null : JSON.stringify(body.value);
+      if (json && Buffer.byteLength(json) > MAX_STORAGE) return this.apiError(res, inst, new ApiError(413, "too-large", `wb.storage keeps at most ${MAX_STORAGE / 1024} KiB of JSON`));
+      const now = Date.now();
+      inst.storageWrites = inst.storageWrites.filter((t) => now - t < 1000);
+      if (inst.storageWrites.length >= MAX_STORAGE_WRITES_PER_SECOND) {
+        return this.apiError(res, inst, new ApiError(429, "busy", `wb.storage.set at most ${MAX_STORAGE_WRITES_PER_SECOND} times a second`, { retryMs: 1000 - (now - inst.storageWrites[0]) }));
+      }
+      inst.storageWrites.push(now);
+      this.extensions.setPanelStorage(inst.name, json);
+      return answer({ ok: true });
+    } catch (err) {
+      return this.apiError(res, inst, new ApiError(500, "internal", `wb.storage failed: ${printable((err as Error).message)}`));
+    }
   }
 
   private apiError(res: ServerResponse, inst: Instance, err: ApiError): true {
@@ -596,6 +714,16 @@ export class Panels extends EventEmitter {
       case "digest":
         inst.digest = text(r.digest, 600);
         break;
+      case "snapshot": {
+        const answer = inst.snapshots.get(String(r.id ?? ""));
+        if (!answer) return;
+        const png = typeof r.png === "string" ? Buffer.from(r.png, "base64") : null;
+        if (!png) answer({ none: text(r.none, 300) || "the panel has nothing to show" });
+        else if (png.length < 24 || !png.subarray(0, 8).equals(PNG_SIGNATURE)) answer({ none: "the panel's snapshot is not a PNG" });
+        else if (png.length > MAX_SNAPSHOT) answer({ none: `the panel's snapshot is larger than ${MAX_SNAPSHOT / 1024 / 1024} MiB` });
+        else answer({ png, width: png.readUInt32BE(16), height: png.readUInt32BE(20) });
+        return;
+      }
       case "error": {
         // The first place in the panel's own files, as path:line:column on disk
         const at = new RegExp(`${origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/[^\\s):]+):(\\d+):(\\d+)`).exec(String(r.stack ?? ""));
@@ -632,6 +760,8 @@ function cut(s: string, max: number): string {
   const whole = s.slice(0, max * 2).replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
   return Array.from(whole).slice(0, max).join("");
 }
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);

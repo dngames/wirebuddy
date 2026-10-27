@@ -52,6 +52,7 @@ try {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name);
   assert.ok(names.includes("start_capture") && names.includes("stop_capture"), "the agent starts and stops captures");
+  assert.ok(tools.find((t) => t.name === "panel").inputSchema.properties.action.enum.includes("snapshot"), "panel action snapshot");
   console.log(`tools: ${names.join(", ")}`);
 
   const ui = new URL(await call("viewer_url", {}, (t) => assert.match(t, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[0-9a-f]{32}$/)));
@@ -271,7 +272,7 @@ try {
   // Panels: written by the agent, checked before they run
   await call("extensions", { action: "guide", topic: "panel" }, (t) => assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/));
   mkdirSync(join(extDir, "viewpanel", "panel"), { recursive: true });
-  writeFileSync(join(extDir, "viewpanel", "extension.json"), JSON.stringify({ label: "View", version: "1", panel: true }));
+  writeFileSync(join(extDir, "viewpanel", "extension.json"), JSON.stringify({ label: "View", version: "1", panel: { offer: { filter: "udp", text: "Show the view" } } }));
   writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "const x = 1;\nconst y = ;\n");
   await call("extensions", { action: "test", name: "viewpanel" }, (t) => assert.match(t, /viewpanel\/panel\/main\.js:2: SyntaxError/));
   await call("panel", { action: "open", name: "viewpanel" }, (t, r) => {
@@ -281,7 +282,20 @@ try {
   writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "wb.ready();\n");
   await call("panel", { action: "open", name: "viewpanel", wait_ms: 200 }, (t) => assert.match(t, /The panel starts once the viewer is open: open http/));
   await call("panel", { action: "status" }, (t) => assert.match(t, /^viewpanel: starting/m));
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /^Panels open: viewpanel \(starting, opened by agent\)$/m);
+    assert.doesNotMatch(t, /Panels offered/);
+  });
+  await call("panel", { action: "snapshot", name: "viewpanel" }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /only runs while the viewer is open: open http/);
+  });
   await call("panel", { action: "close", name: "viewpanel" }, (t) => assert.match(t, /Closed the panel "viewpanel"/));
+  await call("panel", { action: "snapshot", name: "viewpanel" }, (t, r) => assert.ok(r.isError && /is not open/.test(t)));
+  // Its offer matches the open ACME capture
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /^viewpanel \[loaded\] \[panel\] View v1; offers "Show the view"$/m));
+  await call("capture_summary", {}, (t) => assert.match(t, /^Panel available: viewpanel \("Show the view"\): panel action "open"/m));
+  await call("get_view_state", {}, (t) => assert.match(t, /^Panels offered to the user in the status bar: viewpanel \("Show the view"\)$/m));
 } finally {
   await client.close();
   rmSync(out, { recursive: true, force: true });

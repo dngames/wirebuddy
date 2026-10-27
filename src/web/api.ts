@@ -8,10 +8,13 @@ export const token: string = new URLSearchParams(location.search).get("token") ?
 
 export class HttpError extends Error {
   readonly status: number;
+  /** Why, for the routes that say (e.g. "denied" for a panel's refused change). */
+  readonly code: string | undefined;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
     this.name = "HttpError";
   }
 }
@@ -54,9 +57,9 @@ async function request<T>(method: "GET" | "POST", path: string, query?: Query, b
     }
   }
   if (!res.ok) {
-    const err = data as Partial<ApiError> | undefined;
+    const err = data as (Partial<ApiError> & { code?: unknown }) | undefined;
     const msg = typeof err?.error === "string" && err.error ? err.error : `${res.status} ${res.statusText}`.trim();
-    throw new HttpError(res.status, msg);
+    throw new HttpError(res.status, msg, typeof err?.code === "string" ? err.code : undefined);
   }
   return data as T;
 }

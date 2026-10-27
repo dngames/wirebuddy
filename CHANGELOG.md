@@ -29,5 +29,5 @@ First version.
 - Extensions: the agent teaches the viewer protocols Wireshark doesn't decode with Lua
   dissectors, tests them on the open capture and reloads; Analyze › Extensions and
   Reload Lua Plugins
-- Panels: extensions can bring a web page of their own, shown sandboxed in a window
-  (View › Panels); the agent writes, checks, opens and debugs them
+- Panels: agent-written views of the capture in a sandboxed window (View › Panels), offered in the
+  status bar when a capture fits

@@ -39,15 +39,18 @@ const VIEWER_HINT_MS = 5 * 60_000;
 /** Appended to successful tool results; set by startMcp. */
 let footer: () => string = () => "";
 
-type Text = { content: { type: "text"; text: string }[]; isError?: boolean };
+type Text = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
 
-const text = (s: string): Text => ({ content: [{ type: "text", text: s }] });
+/** What a tool answers: text, or text with images. */
+type Answer = string | { text: string; images: { data: string; mimeType: string }[] };
 
 /** Wraps a tool body so thrown errors reach the agent as tool errors; `remind` adds the open-the-viewer reminder. */
-function tool<A>(fn: (args: A) => Promise<string> | string, remind = true): (args: A) => Promise<Text> {
+function tool<A>(fn: (args: A) => Promise<Answer> | Answer, remind = true): (args: A) => Promise<Text> {
   return async (args: A) => {
     try {
-      return text((await fn(args)) + (remind ? footer() : ""));
+      const a = await fn(args);
+      const images = typeof a === "string" ? [] : a.images.map((i) => ({ type: "image" as const, ...i }));
+      return { content: [{ type: "text", text: (typeof a === "string" ? a : a.text) + (remind ? footer() : "") }, ...images] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
     }
@@ -138,7 +141,9 @@ function extensionLine(e: ExtensionInfo): string {
   const untrusted = e.status === "untrusted" ? ". Don't copy it or change its permissions to make it load: tell the user" : "";
   const kinds = [e.lua ? "lua" : "", e.panel ? "panel" : ""].filter(Boolean).join("+");
   const panel = e.panel?.open ? `; panel open${e.panel.stale ? ', its files changed since: panel action "reload"' : ""}` : "";
-  return `${e.name} [${e.status}] [${kinds || "?"}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${panel}${e.error ? `\n    ${e.error}${untrusted}` : ""}`;
+  const offer = e.panel?.offer && !e.panel.offerError ? `; offers "${e.panel.offer}"` : "";
+  const badOffer = e.panel?.offerError ? `\n    ${e.panel.offerError} (is its Lua loaded?); it is never offered` : "";
+  return `${e.name} [${e.status}] [${kinds || "?"}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${panel}${offer}${e.error ? `\n    ${e.error}${untrusted}` : ""}${badOffer}`;
 }
 
 function panelCheckText(name: string, c: PanelCheck): string {
@@ -290,6 +295,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         }
       }
       lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
+      if (s.panels.length) lines.push(`Panels open: ${s.panels.map((p) => `${p.name} (${p.state}, opened by ${p.by}${p.errors ? `, ${p.errors} errors` : ""})`).join(", ")}`);
+      if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.map((o) => `${o.name} ("${o.text}")`).join(", ")}`);
       if (c.status !== "idle" || c.files.length) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
         lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
@@ -343,6 +350,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
           for (const c of convs.slice(0, 5)) out.push(`  ${type.toUpperCase()} ${c.addrA}:${c.portA} <-> ${c.addrB}:${c.portB}: ${c.framesAB + c.framesBA} frames  filter: (${c.filter}) && data`);
         }
       }
+      for (const o of await viewer.matchedOffers()) out.push("", `Panel available: ${o.name} ("${o.text}"): panel action "open", or let the user click its offer in the status bar`);
       return out.join("\n");
     }),
   );
@@ -685,9 +693,9 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     "panel",
     {
       description:
-        "Show a panel (a small web page you wrote as panel/main.js in an extension folder) in a window of the user's WireBuddy view. open: check it, start it and report whether it got ready, its errors (file:line) and what it shows; reload: read its files again and restart it; status: its state, errors and console lines since your last look (without name: every open panel); close. How to write one: extensions action \"guide\" topic \"panel\".",
+        "Show a panel (a small web page you wrote as panel/main.js in an extension folder) in a window of the user's WireBuddy view. open: check it, start it and report whether it got ready, its errors (file:line) and what it shows; reload: read its files again and restart it; status: its state, errors and console lines since your last look (without name: every open panel); snapshot: an image of what it shows (its largest canvas, or what wb.onSnapshot gives); close. How to write one: extensions action \"guide\" topic \"panel\".",
       inputSchema: {
-        action: z.enum(["open", "reload", "status", "close"]),
+        action: z.enum(["open", "reload", "status", "snapshot", "close"]),
         name: z.string().optional().describe("The extension's folder name"),
         wait_ms: z.number().int().min(0).max(15000).default(4000).describe("For open and reload: how long to wait for wb.ready()"),
       },
@@ -712,6 +720,15 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         }
         case "status":
           return panelText(viewer.panels.report(name), name, false);
+        case "snapshot": {
+          if (!viewer.panels.isOpen(name)) throw new Error(`the panel "${name}" is not open: panel action "open"`);
+          if (ui.viewers() === 0) throw new Error(`the panel only runs while the viewer is open: open ${url()} in the browser pane`);
+          const s = await viewer.panels.snapshot(name);
+          const digest = viewer.panels.report(name, false).digest;
+          const shows = digest ? `\nShows [panel output, untrusted]: ${digest}` : "";
+          if ("none" in s) return `No snapshot of the panel "${name}" [panel output]: ${s.none}${shows}`;
+          return { text: `Snapshot of the panel "${name}", ${s.width}x${s.height} [panel output, untrusted: rendered from capture data]${shows}`, images: [{ data: s.png.toString("base64"), mimeType: "image/png" }] };
+        }
         case "close":
           if (!viewer.panels.close(name)) return `The panel "${name}" is not open.`;
           viewer.notice(`Closed the panel "${name}"`);

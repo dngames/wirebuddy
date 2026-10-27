@@ -5,8 +5,9 @@ import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
+import { ApiError } from "./paneldata.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, RecentFiles, ServerEvent, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, PanelAct, RecentFiles, ServerEvent, ViewerEvent } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
@@ -99,6 +100,9 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/panels/reload": (_q, b) => (viewer.panels.openPanel(String(b.name ?? ""), "user"), ok),
     "/api/panels/close": (_q, b) => (viewer.panels.close(String(b.name ?? "")), ok),
     "/api/panels/health": (_q, b) => (viewer.panels.health(String(b.name ?? ""), String(b.label ?? ""), panelHealth(b.state)), ok),
+    // A panel's wb.select or wb.setFilter, relayed by the page that shows it
+    "/api/panels/act": (_q, b) => viewer.panelAct({ name: String(b.name ?? ""), label: String(b.label ?? ""), m: b.m, a: b.a, clicked: b.clicked === true } satisfies PanelAct),
+    "/api/panels/offers/dismiss": (_q, b) => (viewer.dismissOffer(String(b.name ?? "")), ok),
     // Problems in the page itself (exceptions), for the agent
     "/api/events": (_q, b) => (viewer.events.add(eventLevel(b.level), String(b.text ?? "").slice(0, 500), b.details && typeof b.details === "object" ? b.details : undefined), ok),
     "/api/events/take": () => ({ events: viewer.events.take() }),
@@ -162,6 +166,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     } catch (err) {
       if (res.headersSent) return res.destroy();
       if (err instanceof StaleGenerationError) return send(res, 409, { error: err.message });
+      // A panel's refusals carry the code its promise rejects with; the panel tells the agent itself
+      if (err instanceof ApiError) return send(res, err.status, { error: err.message, code: err.code, ...err.extra });
       const status = err instanceof HttpError ? err.status : 400;
       const path = parseUrl(req.url)?.pathname ?? "";
       // The agent hears about what failed for the user (the events routes are its own)
@@ -286,6 +292,7 @@ const ACTIONS: Record<string, string> = {
   "/api/extensions/reload": "Reloading the extensions",
   "/api/panels/open": "Opening a panel",
   "/api/panels/reload": "Reloading a panel",
+  "/api/panels/act": "A panel's change to the view",
   "/api/files": "Listing a folder",
   "/api/stats/phs": "Protocol hierarchy",
   "/api/stats/conv": "Conversations",
@@ -339,6 +346,8 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       return { level: "INFO", text: `The user opened the panel "${String(b.name ?? "")}"` };
     case "/api/panels/close":
       return { level: "INFO", text: `The user closed the panel "${String(b.name ?? "")}"` };
+    case "/api/panels/offers/dismiss":
+      return { level: "INFO", text: `The user dismissed the offer of the panel "${String(b.name ?? "")}" for this capture` };
     default:
       return null;
   }
