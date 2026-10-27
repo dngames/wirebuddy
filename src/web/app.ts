@@ -1,6 +1,7 @@
 /** Shared client state and the event bus that connects the UI modules. */
 
 import type { FrameDetail, Mark, ViewState } from "../shared/api.ts";
+import type { Ranges } from "../shared/ranges.ts";
 import { Emitter, load } from "./util.ts";
 
 export type ConnState = "connecting" | "open" | "closed";
@@ -18,6 +19,8 @@ export type AppEvents = {
   /** Status bar text for the selected details item. */
   fieldInfo: [text: string];
   autoscroll: [on: boolean];
+  /** Colorize or zoom changed. */
+  view: [];
   /** One-second heartbeat while a capture is running. */
   tick: [];
 };
@@ -32,9 +35,14 @@ export const app = {
   selFrame: null as number | null,
   /** Row index of selFrame in the displayed list, -1 when unknown. */
   selIndex: -1,
+  /** Selected rows (Ctrl/Shift+click) as merged ranges of displayed-list indices. */
+  selRows: [] as Ranges,
   frame: null as FrameDetail | null,
   marks: new Map<number, Mark>(),
   autoScroll: load<boolean>("autoscroll", true),
+  colorize: load<boolean>("colorize", true),
+  /** Scale of the packet list, details and bytes, like Wireshark's View > Zoom. */
+  zoom: load<number>("zoom", 1),
 };
 
 /** Late-bound hooks so modules can call each other without import cycles. */
@@ -47,6 +55,10 @@ export const hooks = {
   setFilter: (_text: string, _apply: boolean): void => {},
   /** Start a capture with the capture bar options (user click only). */
   startCapture: (_iface?: string): void => {},
+  /** A Shift/Ctrl selection waits for its rows to load. */
+  selectionLoading: (): boolean => false,
+  /** Puts keyboard focus back in the packet list. */
+  focusMain: (): void => {},
 };
 
 export function captureActive(s: ViewState | null = app.state): boolean {

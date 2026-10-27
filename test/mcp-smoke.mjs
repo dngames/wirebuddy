@@ -40,7 +40,14 @@ try {
   assert.ok(!names.some((n) => /start_capture/.test(n)), "the agent must not be able to start a capture");
   console.log(`tools: ${names.join(", ")}`);
 
-  await call("viewer_url", {}, (t) => assert.match(t, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[0-9a-f]{32}$/));
+  const ui = new URL(await call("viewer_url", {}, (t) => assert.match(t, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[0-9a-f]{32}$/)));
+  // The user's side of the shared view
+  const post = (path, body) =>
+    fetch(new URL(path, ui.origin), {
+      method: "POST",
+      headers: { "X-WireBuddy-Token": ui.searchParams.get("token"), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   await call("get_view_state", {}, (t) => assert.match(t, /No capture is open/));
   await call("open_capture", { path: fixture }, (t) => assert.match(t, /29 frames/));
   await call("capture_summary", {}, (t) => {
@@ -59,6 +66,7 @@ try {
   await call("get_view_state", {}, (t) => {
     assert.match(t, /Selected frame \(by agent\): 25/);
     assert.match(t, /404 File not found/);
+    assert.doesNotMatch(t, /Selected packets/);
   });
   await call("inspect_frame", { protocols: ["http"] }, (t) => {
     assert.match(t, /Status Code: 404\s+\{http\.response\.code\}/);
@@ -99,6 +107,30 @@ try {
   await call("export_packets", { path: exportPath, filter: "tcp.stream eq 1" }, (t) => assert.match(t, /Wrote 12 packets/));
   await call("export_packets", { path: exportPath, filter: "http" }, (t, r) => assert.ok(r.isError && /already exists/.test(t)));
   rmSync(exportPath, { force: true });
+  await call("set_display_filter", { filter: "" }, (t) => assert.match(t, /29 of 29 frames/));
+  assert.equal((await post("/api/select", { frame: 5, rows: [[2, 4], [6, 8], [10, 10]] })).status, 200);
+  let selection;
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /Selected frame \(by user\): 5/);
+    selection = /^Selected packets \(7\): (frame\.number in \{3\.\.5, 7\.\.9, 11\})$/m.exec(t)?.[1];
+    assert.ok(selection, t);
+  });
+  await call("check_display_filter", { filter: selection }, (t) => assert.equal(t, "Valid"));
+  await call("query_packets", { filter: selection, fields: ["frame.number"] }, (t) => {
+    assert.match(t, /^7 frames match/);
+    assert.deepEqual(t.split("\n").slice(2).map((l) => Number(l.split(" | ")[0])), [3, 4, 5, 7, 8, 9, 11]);
+  });
+  await call("set_display_filter", { filter: "http" }, (t) => assert.match(t, /4 of 29 frames/));
+  assert.equal((await post("/api/select", { frame: 12, rows: [[1, 3]] })).status, 200);
+  await call("get_view_state", {}, (t) => assert.match(t, /^Selected packets \(3\): frame\.number in \{12, 21, 25\}$/m));
+  const selectedPath = join(dirname(fixture), `.mcp-selected-${process.pid}.pcapng`);
+  await call("export_packets", { path: selectedPath, which: "selected" }, (t) => assert.match(t, /Wrote 3 packets/));
+  rmSync(selectedPath, { force: true });
+  // One selected row that is not the current packet is still news to the agent
+  assert.equal((await post("/api/select", { frame: 4, rows: [[2, 2]] })).status, 200);
+  await call("get_view_state", {}, (t) => assert.match(t, /^Selected packets \(1\): frame\.number in \{21\}$/m));
+  await call("goto_frame", { frame: 4 }, (t) => assert.match(t, /row 1 of 4/));
+  await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /Selected packets/));
   await call("clear_marks", {}, (t) => assert.match(t, /0 marks left/));
   await call("list_interfaces", {}, (t) => assert.match(t, /^lo \(Loopback\) \[loopback\]: 127\.0\.0\.1, ::1 — \d+ pkt\/s now/m));
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));

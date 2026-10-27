@@ -34,12 +34,19 @@ interface OpenMenu {
 
 const stack: OpenMenu[] = [];
 let owner: HTMLElement | null = null;
+/** Left/Right past the edge of a menu bar menu. */
+let onSide: ((dir: 1 | -1) => void) | null = null;
 let lastClosedOwner: HTMLElement | null = null;
 let lastClosedAt = 0;
 let subTimer = 0;
 
 export function menuOpen(): boolean {
   return stack.length > 0;
+}
+
+/** Button or menu bar title the open menu belongs to. */
+export function menuOwner(): HTMLElement | null {
+  return owner;
 }
 
 export function closeMenus(): void {
@@ -52,6 +59,7 @@ export function closeMenus(): void {
     lastClosedAt = performance.now();
   }
   owner = null;
+  onSide = null;
   document.removeEventListener("pointerdown", onOutside, true);
   document.removeEventListener("keydown", onKey, true);
   window.removeEventListener("blur", closeMenus);
@@ -150,9 +158,11 @@ function onKey(e: KeyboardEvent): void {
       break;
     case "ArrowRight":
       if (m.active >= 0 && m.rows[m.active].item.sub) openSub(level, m.active, true);
+      else onSide?.(1);
       break;
     case "ArrowLeft":
       if (level > 0) closeAbove(level - 1);
+      else onSide?.(-1);
       break;
     case "Enter":
     case " ":
@@ -166,7 +176,8 @@ function onKey(e: KeyboardEvent): void {
       closeMenus();
       break;
     default:
-      handled = false;
+      // Alt+letter and F10 switch or close menus in the menu bar; other keys go nowhere
+      handled = !e.altKey && e.key !== "F10" && !["Shift", "Control", "Alt", "Meta"].includes(e.key);
   }
   if (handled) {
     e.preventDefault();
@@ -231,6 +242,8 @@ function build(items: MenuItem[], parentRow: HTMLElement | null): OpenMenu {
   }
   if (!m.rows.length) el.appendChild(h("div", { class: "menu-header" }, "(empty)"));
   el.addEventListener("contextmenu", (e) => e.preventDefault());
+  // Choosing an item leaves focus where it was, not on <body>
+  el.addEventListener("mousedown", (e) => e.preventDefault());
   return m;
 }
 
@@ -240,6 +253,8 @@ export interface MenuOptions {
   minWidth?: number;
   /** Highlight the first item (keyboard-opened menus). */
   focusFirst?: boolean;
+  /** Left/Right at the menu's edge: the menu bar opens the neighbouring menu. */
+  onSide?: (dir: 1 | -1) => void;
 }
 
 export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOptions = {}): void {
@@ -257,6 +272,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
   m.el.style.top = `${py}px`;
   owner = opts.owner ?? null;
   owner?.classList.add("menu-owner-open");
+  onSide = opts.onSide ?? null;
   if (opts.focusFirst) setActive(m, firstEnabled(m, 0, 1));
   document.addEventListener("pointerdown", onOutside, true);
   document.addEventListener("keydown", onKey, true);

@@ -1,6 +1,7 @@
 /** File > Export Specified Packets. */
 
 import type { ExportRequest } from "../../shared/api.ts";
+import { countRanges, inRanges } from "../../shared/ranges.ts";
 import { errorText } from "../api.ts";
 import * as act from "../actions.ts";
 import { app } from "../app.ts";
@@ -19,7 +20,8 @@ function defaultPath(file: string, which: Which): string {
   return `${dir ? `${dir}/` : ""}${stem}_${which}.pcapng`;
 }
 
-export function openExportDialog(): void {
+/** Opens the dialog with `initial` chosen (File > Save As: "all"). */
+export function openExportDialog(initial: Which = "displayed"): void {
   if (current?.isOpen) return;
   const s = app.state;
   if (!s?.file || s.loading) return;
@@ -29,7 +31,8 @@ export function openExportDialog(): void {
 
   const marked = app.marks.size;
   const sel = app.selFrame;
-  let which: Which = "displayed";
+  const nSel = countRanges(app.selRows);
+  let which: Which = initial === "selected" && !nSel && sel === null ? "displayed" : initial;
   let pathEdited = false;
 
   const radios = new Map<Which, HTMLInputElement>();
@@ -89,7 +92,10 @@ export function openExportDialog(): void {
       option("all", `All captured (${fmtInt(s.totalFrames)})`),
       option("displayed", `Displayed (${fmtInt(s.displayedFrames)})${s.filter ? "" : " — no display filter applied"}`),
       option("marked", `Marked packets (${fmtInt(marked)})`, marked === 0),
-      option("selected", sel !== null ? `Selected packet only (#${sel})` : "Selected packet only", sel === null),
+      // The server exports the selected rows, which need not include the current packet
+      nSel > 1 || (nSel === 1 && !inRanges(app.selRows, app.selIndex))
+        ? option("selected", `Selected packets only (${fmtInt(nSel)})`)
+        : option("selected", sel !== null ? `Selected packet only (#${sel})` : "Selected packet only", sel === null),
       option("range", "Range:", false, rangeIn),
     ),
     h("div", { class: "dlg-field ex-pathrow" }, h("label", null, "Save as:", pathIn), browse),
@@ -109,6 +115,11 @@ export function openExportDialog(): void {
     showErr(null);
     exportBtn.disabled = true;
     try {
+      // The server exports the selection it knows: send a pending one first
+      if (which === "selected" && !(await act.flushSelection())) {
+        showErr("The packet list changed; select the packets again");
+        return;
+      }
       const req: ExportRequest = { path, which };
       if (which === "range") req.range = range;
       if (overwrite) req.overwrite = true;
@@ -138,7 +149,7 @@ export function openExportDialog(): void {
   d.onClose = () => {
     current = null;
   };
-  d.show(radios.get("displayed"));
+  d.show(radios.get(which));
   // Long paths: keep the file name in view.
   pathIn.scrollLeft = pathIn.scrollWidth;
 }

@@ -6,7 +6,7 @@ import * as act from "./actions.ts";
 import { bus, hooks } from "./app.ts";
 import { icon } from "./icons.ts";
 import { SEP, toggleMenuAt, type MenuItem } from "./menu.ts";
-import { debounce, fontOf, h, load, measureText, save } from "./util.ts";
+import { debounce, fontOf, h, keyLabel, load, measureText, save } from "./util.ts";
 
 type Status = "none" | "ok" | "error" | "warn";
 
@@ -372,12 +372,13 @@ export function createFilterBar(): HTMLElement {
   input = h("input", {
     class: "fb-input",
     type: "text",
-    placeholder: "Apply a display filter … <Ctrl-/>",
+    placeholder: `Apply a display filter … <${keyLabel("Ctrl+/").replace("+", "-")}>`,
     spellcheck: false,
     autocomplete: "off",
     attrs: { "aria-label": "Display filter", autocapitalize: "off", autocorrect: "off" },
   });
   const bookmark = h("button", { class: "fb-btn fb-bookmark", title: "Recent display filters", attrs: { "aria-label": "Recent display filters" } }, icon("bookmark"));
+  bookmark.addEventListener("mousedown", (e) => e.preventDefault());
   bookmark.addEventListener("click", () => toggleMenuAt(bookmark, historyMenu, { minWidth: 320 }));
   clearBtn = h("button", { class: "fb-btn fb-clear", title: "Clear display filter", hidden: true, attrs: { "aria-label": "Clear display filter" } }, icon("clear"));
   clearBtn.addEventListener("click", () => {

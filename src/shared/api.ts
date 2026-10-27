@@ -9,6 +9,12 @@
  * The WebSocket at `/ws?token=...` only pushes {@link ServerEvent}s; the UI
  * sends nothing over it.
  *
+ * `POST /api/select` rows are indices into the displayed list of `view`
+ * ({ file, filter, generation }); when that list has since been replaced or
+ * changed in place (`generation` older than `rowsSince`), or a `view` sent
+ * with a plain frame names another file or filter, the server answers 409
+ * and keeps its selection.
+ *
  * Endpoints:
  *
  * | Method | Path                          | Body / query                         | Response               |
@@ -19,9 +25,10 @@
  * | GET    | /api/filter/check             | ?filter=                             | FilterCheck            |
  * | GET    | /api/filter/complete          | ?field=                              | CompleteResponse       |
  * | POST   | /api/filter                   | { filter }                           | FilterCheck            |
- * | POST   | /api/select                   | { frame: number \| null }            | { ok: true }           |
+ * | POST   | /api/select                   | { frame: number \| null, rows?: Ranges, view? } (409 if view is stale) | { ok: true } |
  * | POST   | /api/open                     | { path }                             | { ok: true }           |
  * | POST   | /api/close                    |                                      | { ok: true }           |
+ * | POST   | /api/reload                   | (re-reads the file, keeps marks)     | { ok: true }           |
  * | GET    | /api/files                    | ?dir=&kind=capture\|any              | DirListing             |
  * | GET    | /api/recent                   |                                      | RecentFiles            |
  * | GET    | /api/stats/phs                | ?filter= (optional)                  | PhsNode[]              |
@@ -36,6 +43,9 @@
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
  * | POST   | /api/marks                    | { frames, note }                     | { ok: true }           |
  * | POST   | /api/marks/clear              | { frames? } (omit: clear all)        | { ok: true }           |
+ * | POST   | /api/marks/toggle             |                                      | { ok: true }           |
+ * | POST   | /api/marks/displayed          | { on: boolean }                      | { ok: true }           |
+ * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
  * | GET    | /api/capture/interfaces       |                                      | CaptureInterface[]     |
  * | GET    | /api/capture/check            | ?iface=&filter=                      | FilterCheck            |
@@ -43,6 +53,8 @@
  * | POST   | /api/capture/start            | CaptureRequest                       | { ok: true }           |
  * | POST   | /api/capture/stop             |                                      | { ok: true }           |
  */
+
+import type { Ranges } from "./ranges.ts";
 
 export interface ApiError {
   error: string;
@@ -74,7 +86,7 @@ export interface ViewState {
   duration: number;
   /** Display filter currently applied ("" for none). */
   filter: string;
-  /** Selected frame number, or null. */
+  /** Selected frame number, or null: the current packet, whose details are shown. */
   selected: number | null;
   /** Row index of the selected frame in the displayed list, or -1. */
   selectedIndex: number;
@@ -85,6 +97,21 @@ export interface ViewState {
    * selected row into view when this changes.
    */
   selectSeq: number;
+  /**
+   * Rows the user selected in the packet list (Ctrl/Shift+click), as merged
+   * row-index ranges of the displayed list. Usually just the selected frame's
+   * row; empty when nothing is selected or it is hidden by the filter. Reset to
+   * that row when the file or display filter changes, or the agent selects.
+   */
+  selectedRows: Ranges;
+  /** Number of rows in {@link selectedRows}. */
+  selectedCount: number;
+  /**
+   * Generation since which row indices show the same frames. It changes when
+   * the displayed list is rebuilt (file, filter, a re-read that is not just a
+   * live capture growing), not when it only grows.
+   */
+  rowsSince: number;
   /** Frames the agent (or the user) marked, keyed by frame number. */
   marks: Mark[];
   capture: CaptureState;
@@ -335,11 +362,21 @@ export interface IoGraphResult {
 export interface ExportRequest {
   /** Absolute path ending in .pcapng or .pcap. */
   path: string;
-  /** Which packets: the displayed ones, the marked ones, the selected one, or a range like "1-10,25". */
+  /** Which packets: the displayed ones, the marked ones, the selected ones (see {@link ViewState.selectedRows}), or a range like "1-10,25". */
   which: "displayed" | "marked" | "selected" | "range" | "all";
   range?: string;
   /** Replace an existing file. */
   overwrite?: boolean;
+}
+
+/** Find Packet: the next displayed frame matching a filter, wrapping around the end once. */
+export interface FindResult {
+  /** null when no displayed frame matches. */
+  frame: number | null;
+  /** Row index of `frame` in the displayed list, or -1. */
+  index: number;
+  /** The search passed the end (or start) of the list and continued from the other side. */
+  wrapped: boolean;
 }
 
 export interface ExportResult {

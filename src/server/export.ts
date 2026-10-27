@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, isAbsolute, join } from "node:path";
+import { mergeRanges, type Ranges } from "../shared/ranges.ts";
 
 /** editcap refuses more than 512 selections per run. */
 const SELECTIONS_PER_RUN = 500;
@@ -19,8 +20,8 @@ function run(bin: string, args: string[]): Promise<void> {
 }
 
 /** Parses "1-10,25,30-" into sorted, merged [from, to] ranges within 1..total. */
-export function parseRange(spec: string, total: number): [number, number][] {
-  const ranges: [number, number][] = [];
+export function parseRange(spec: string, total: number): Ranges {
+  const ranges: Ranges = [];
   // Spaces may sit anywhere, e.g. "20 - 30, 40"
   for (const part of spec.split(",").map((p) => p.replace(/\s+/g, "")).filter(Boolean)) {
     const m = /^(\d+)?(?:(-)(\d+)?)?$/.exec(part);
@@ -35,23 +36,8 @@ export function parseRange(spec: string, total: number): [number, number][] {
 }
 
 /** Collapses sorted or unsorted frame numbers into merged [from, to] ranges. */
-export function toRanges(frames: Iterable<number>): [number, number][] {
+export function toRanges(frames: Iterable<number>): Ranges {
   return mergeRanges([...frames].map((f) => [f, f] as [number, number]));
-}
-
-function mergeRanges(ranges: [number, number][]): [number, number][] {
-  ranges.sort((a, b) => a[0] - b[0]);
-  const out: [number, number][] = [];
-  for (const [a, b] of ranges) {
-    const last = out[out.length - 1];
-    if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b);
-    else out.push([a, b]);
-  }
-  return out;
-}
-
-export function countFrames(ranges: [number, number][]): number {
-  return ranges.reduce((n, [a, b]) => n + b - a + 1, 0);
 }
 
 /**
@@ -86,7 +72,7 @@ export async function exportFrames(opts: {
   input: string;
   output: string;
   format: "pcapng" | "pcap";
-  ranges: [number, number][];
+  ranges: Ranges;
 }): Promise<number> {
   const { editcap, mergecap, input, output, format, ranges } = opts;
   const partial = `${output}.partial-${randomBytes(6).toString("hex")}`;

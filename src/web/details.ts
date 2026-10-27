@@ -4,8 +4,9 @@ import type { FrameDetail, TreeNode } from "../shared/api.ts";
 import * as act from "./actions.ts";
 import { bus, hooks } from "./app.ts";
 import { fieldInfoText, fieldName, fieldValue, frameInfo, nodeLabel, sevClass, srcIndex, walk } from "./frame.ts";
+import { followItems } from "./dialogs/follow.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
-import { bytesToHex, copyText, h, isMod } from "./util.ts";
+import { bytesToHex, copyText, h, isMod, keyLabel } from "./util.ts";
 import { VList } from "./vlist.ts";
 
 const RH = 20;
@@ -173,61 +174,89 @@ function applyAsColumn(n: TreeNode): void {
   if (n.fn) act.addCustomColumn(n.fn, columnTitle(n));
 }
 
-function nodeMenu(n: TreeNode, x: number, y: number): void {
-  const f = n.f;
-  const kids = hasKids(n);
-  const combos = (apply: boolean): MenuItem[] => {
-    if (!f) return [];
-    const cur = hooks.filterText().trim();
-    const c = needsParens(cur) ? `(${cur})` : cur;
-    const ff = needsParens(f) ? `(${f})` : f;
-    const set = (t: string) => () => hooks.setFilter(t, apply);
-    return [
-      { label: "Selected", action: set(f) },
-      { label: "Not Selected", action: set(`!(${f})`) },
-      { label: "…and Selected", action: set(cur ? `${c} && ${ff}` : f) },
-      { label: "…or Selected", action: set(cur ? `${c} || ${ff}` : f) },
-      { label: "…and not Selected", action: set(cur ? `${c} && !(${f})` : `!(${f})`) },
-      { label: "…or not Selected", action: set(cur ? `${c} || !(${f})` : `!(${f})`) },
-    ];
-  };
+/** Apply/Prepare as Filter: the field's filter, alone or combined with the current one. */
+function filterCombos(f: string, apply: boolean): MenuItem[] {
+  const cur = hooks.filterText().trim();
+  const c = needsParens(cur) ? `(${cur})` : cur;
+  const ff = needsParens(f) ? `(${f})` : f;
+  const set = (t: string) => () => hooks.setFilter(t, apply);
+  return [
+    { label: "Selected", action: set(f) },
+    { label: "Not Selected", action: set(`!(${f})`) },
+    { label: "…and Selected", action: set(cur ? `${c} && ${ff}` : f) },
+    { label: "…or Selected", action: set(cur ? `${c} || ${ff}` : f) },
+    { label: "…and not Selected", action: set(cur ? `${c} && !(${f})` : `!(${f})`) },
+    { label: "…or not Selected", action: set(cur ? `${c} || !(${f})` : `!(${f})`) },
+  ];
+}
+
+function copyItems(n: TreeNode | null): MenuItem[] {
+  const f = n?.f;
   const bytes = (): Uint8Array | null => {
-    if (!fd || !n.h || n.h[1] <= 0) return null;
+    if (!fd || !n?.h || n.h[1] <= 0) return null;
     const src = frameInfo(fd).sources[srcIndex(fd, n)];
     return src ? src.bytes.subarray(n.h[0], n.h[0] + n.h[1]) : null;
   };
   const visibleText = (): string =>
     vis.map((v) => `${"    ".repeat(depthOf(v))}${nodeLabel(v)}`).join("\n");
-  const items: MenuItem[] = [
-    { label: "Expand Subtrees", shortcut: "Shift+Right", disabled: !kids, action: () => setSubtree(n, true) },
-    { label: "Collapse Subtrees", shortcut: "Shift+Left", disabled: !kids, action: () => setSubtree(n, false) },
-    { label: "Expand All", shortcut: "Ctrl+Right", action: expandAll },
-    { label: "Collapse All", shortcut: "Ctrl+Left", action: collapseAll },
+  return [
+    { label: "All Visible Items", disabled: !vis.length, action: () => void copyText(visibleText()) },
     SEP,
-    { label: "Apply as Column", disabled: !n.fn, title: n.fn ? `Add a packet list column showing ${n.fn}` : undefined, action: () => applyAsColumn(n) },
-    SEP,
-    { label: "Apply as Filter", disabled: !f, sub: combos(true) },
-    { label: "Prepare as Filter", disabled: !f, sub: combos(false) },
-    SEP,
+    { label: "Description", disabled: !n, action: () => void copyText(n ? nodeLabel(n) : "") },
+    { label: "Field Name", disabled: !n?.fn, action: () => void copyText(n?.fn ?? "") },
+    { label: "Value", disabled: !n, action: () => void copyText(n ? fieldValue(n) : "") },
+    { label: "As Filter", disabled: !f, action: () => void copyText(f ?? "") },
     {
-      label: "Copy",
-      sub: [
-        { label: "All Visible Items", action: () => void copyText(visibleText()) },
-        SEP,
-        { label: "Description", action: () => void copyText(nodeLabel(n)) },
-        { label: "Field Name", disabled: !n.fn, action: () => void copyText(n.fn ?? "") },
-        { label: "Value", action: () => void copyText(fieldValue(n)) },
-        { label: "As Filter", disabled: !f, action: () => void copyText(f ?? "") },
-        {
-          label: "Bytes as Hex Stream",
-          disabled: !n.h || n.h[1] <= 0,
-          action: () => {
-            const b = bytes();
-            if (b) void copyText(bytesToHex(b));
-          },
-        },
-      ],
+      label: "Bytes as Hex Stream",
+      disabled: !n?.h || n.h[1] <= 0,
+      action: () => {
+        const b = bytes();
+        if (b) void copyText(bytesToHex(b));
+      },
     },
+  ];
+}
+
+/** The selected details item, for the menu bar. */
+export function selectedField(): TreeNode | null {
+  return sel;
+}
+
+export function expandSubtrees(on: boolean): void {
+  if (sel) setSubtree(sel, on);
+}
+
+export function applySelectedAsColumn(): void {
+  if (sel) applyAsColumn(sel);
+}
+
+/** Analyze > Apply as Filter / Prepare as Filter for the selected item. */
+export function fieldFilterItems(apply: boolean): MenuItem[] {
+  return sel?.f ? filterCombos(sel.f, apply) : [];
+}
+
+/** Edit > Copy items for the selected details item. */
+export function fieldCopyItems(): MenuItem[] {
+  return copyItems(sel);
+}
+
+function nodeMenu(n: TreeNode, x: number, y: number): void {
+  const f = n.f;
+  const kids = hasKids(n);
+  const items: MenuItem[] = [
+    { label: "Expand Subtrees", shortcut: keyLabel("Shift+Right"), disabled: !kids, action: () => setSubtree(n, true) },
+    { label: "Collapse Subtrees", shortcut: keyLabel("Shift+Left"), disabled: !kids, action: () => setSubtree(n, false) },
+    { label: "Expand All", shortcut: keyLabel("Ctrl+Right"), action: expandAll },
+    { label: "Collapse All", shortcut: keyLabel("Ctrl+Left"), action: collapseAll },
+    SEP,
+    { label: "Apply as Column", shortcut: keyLabel("Ctrl+Shift+I"), disabled: !n.fn, title: n.fn ? `Add a packet list column showing ${n.fn}` : undefined, action: () => applyAsColumn(n) },
+    SEP,
+    { label: "Apply as Filter", disabled: !f, sub: f ? filterCombos(f, true) : [] },
+    { label: "Prepare as Filter", disabled: !f, sub: f ? filterCombos(f, false) : [] },
+    SEP,
+    { label: "Follow", disabled: !fd, sub: followItems(fd) },
+    SEP,
+    { label: "Copy", sub: copyItems(n) },
   ];
   if (n.t === "framenum" && n.fnum) items.push(SEP, { label: `Go to Packet ${n.fnum}`, action: () => activateLink(n) });
   if (n.t === "url" && n.url && /^https?:\/\//i.test(n.url)) items.push(SEP, { label: "Open Link in New Tab", action: () => activateLink(n) });
@@ -235,7 +264,8 @@ function nodeMenu(n: TreeNode, x: number, y: number): void {
 }
 
 function onKey(e: KeyboardEvent): void {
-  if (!vis.length) return;
+  // Alt+Left/Right are Back/Forward; Ctrl+Up/Down/Home/End go to other packets
+  if (!vis.length || e.altKey || (isMod(e) && e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
   const i = sel ? vis.indexOf(sel) : -1;
   const go = (k: number): void => selectNode(vis[Math.max(0, Math.min(vis.length - 1, k))]);
   switch (e.key) {

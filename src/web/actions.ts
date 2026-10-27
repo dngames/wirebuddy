@@ -1,6 +1,7 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
-import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, FilterCheck, FrameDetail, ViewState } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
+import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks } from "./app.ts";
 import { toast, toastError } from "./toast.ts";
@@ -56,6 +57,7 @@ export function applyState(s: ViewState): void {
   resync = false;
   const prevSel = app.selFrame;
   const prevIdx = app.selIndex;
+  const prevRows = app.selRows;
   app.state = s;
   app.marks = new Map(s.marks.map((m) => [m.frame, m]));
 
@@ -63,6 +65,8 @@ export function applyState(s: ViewState): void {
   if (fresh || !prev) {
     app.selFrame = s.selected;
     app.selIndex = s.selectedIndex;
+    app.selRows = s.selectedRows;
+    selRefused = false;
     if (s.selectedIndex >= 0) reveal = { index: s.selectedIndex, flash: false };
   } else if (s.selectSeq !== prev.selectSeq) {
     // The agent selected a frame: it wins over anything the user has pending.
@@ -70,16 +74,23 @@ export function applyState(s: ViewState): void {
     pendingReveal = null;
     app.selFrame = s.selected;
     app.selIndex = s.selectedIndex;
+    app.selRows = s.selectedRows;
+    selRefused = false;
     if (s.selectedIndex >= 0) reveal = { index: s.selectedIndex, flash: true };
   } else if (pendingReveal !== null && s.selected === pendingReveal) {
     app.selFrame = s.selected;
     app.selIndex = s.selectedIndex;
+    app.selRows = s.selectedRows;
+    selRefused = false;
     if (s.selectedIndex >= 0) reveal = { index: s.selectedIndex, flash: false };
     else toast("info", `Packet ${pendingReveal} is hidden by the display filter`);
     pendingReveal = null;
-  } else if (!selectBusy()) {
+  } else if (!selectBusy() || s.file !== prev.file || s.filter !== prev.filter) {
+    // Row indices of another file or filter mean nothing, even with a selection pending
     app.selFrame = s.selected;
     app.selIndex = s.selected === null ? -1 : s.selectedIndex;
+    app.selRows = s.selectedRows;
+    selRefused = false;
   } else if (s.generation !== prev.generation && s.selected === app.selFrame) {
     app.selIndex = s.selectedIndex;
   }
@@ -95,19 +106,28 @@ export function applyState(s: ViewState): void {
   if (!s.file) {
     app.selFrame = null;
     app.selIndex = -1;
+    app.selRows = [];
+    selRefused = false;
   }
 
   bus.emit("state", s, prev);
-  if (app.selFrame !== prevSel || app.selIndex !== prevIdx) bus.emit("selection");
+  if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
   if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
   if (reveal) bus.emit("reveal", reveal.index, reveal.flash);
 }
 
 // ----------------------------------------------------------------- selection
 
-let selPending: { frame: number | null } | null = null;
+let selPending: { frame: number | null; rows?: Ranges; view?: { file: string; filter: string; generation: number } } | null = null;
 let selTimer = 0;
 let selInflight = 0;
+let selPost: Promise<void> = Promise.resolve();
+/** The server refused the last selection and the UI has not taken the server's since. */
+let selRefused = false;
+
+function sameRanges(a: Ranges, b: Ranges): boolean {
+  return a.length === b.length && a.every((r, i) => r[0] === b[i][0] && r[1] === b[i][1]);
+}
 
 function selectBusy(): boolean {
   return selPending !== null || selInflight > 0;
@@ -118,21 +138,44 @@ function cancelPendingSelect(): void {
   window.clearTimeout(selTimer);
 }
 
-function postSelect(frame: number | null, delay: number): void {
-  selPending = { frame };
+/** `checked`: the server refuses the selection if the view changed since (rows always are). */
+function postSelect(frame: number | null, delay: number, rows?: Ranges, checked = false): void {
+  // Rows are indices into the list shown now
+  const s = app.state;
+  selPending = { frame, rows, view: (rows || checked) && s?.file ? { file: s.file, filter: s.filter, generation: s.generation } : undefined };
   window.clearTimeout(selTimer);
   selTimer = window.setTimeout(() => void flushSelect(), delay);
 }
 
-async function flushSelect(): Promise<void> {
+function flushSelect(): Promise<void> {
+  window.clearTimeout(selTimer);
+  selPost = sendSelect();
+  return selPost;
+}
+
+/**
+ * Sends a pending selection now. False while the server holds another
+ * selection than the one shown: refused, or rows still loading.
+ */
+export async function flushSelection(): Promise<boolean> {
+  await (selPending ? flushSelect() : selPost);
+  return !selRefused && !hooks.selectionLoading();
+}
+
+async function sendSelect(): Promise<void> {
   if (!selPending) return;
-  const { frame } = selPending;
+  const { frame, rows, view } = selPending;
   selPending = null;
   selInflight++;
   try {
-    await post("api/select", { frame });
+    await post("api/select", view ? { frame, rows, view } : { frame });
+    selRefused = false;
   } catch (e) {
-    toastError(e, "Selecting the packet failed");
+    // 409: the list changed under the click
+    if (!(e instanceof HttpError && e.status === 409)) toastError(e, "Selecting the packet failed");
+    selRefused = true;
+    void refreshState();
+    return;
   } finally {
     selInflight--;
   }
@@ -140,19 +183,27 @@ async function flushSelect(): Promise<void> {
   if (pendingReveal !== null && pendingReveal === frame) void refreshState();
 }
 
-/** User selected the row at `index` showing `frame`. */
-export function selectRow(index: number, frame: number): void {
+/**
+ * User selected the row at `index` showing `frame`; `rows` are all selected
+ * rows after a Ctrl/Shift+click, else just this one.
+ */
+export function selectRow(index: number, frame: number, rows?: Ranges): void {
   pendingReveal = null;
-  if (app.selFrame === frame && app.selIndex === index) return;
+  const sel: Ranges = rows ?? [[index, index]];
+  if (app.selFrame === frame && app.selIndex === index && sameRanges(app.selRows, sel)) return;
   app.selFrame = frame;
   app.selIndex = index;
+  app.selRows = sel;
   bus.emit("selection");
-  postSelect(frame, 60);
+  postSelect(frame, 60, rows);
   loadFrame(frame);
 }
 
-/** Select a frame by number (Go to packet, frame links, marks menu). */
-export function jumpToFrame(n: number): void {
+/**
+ * Select a frame by number (Go to packet, frame links, marks menu). `checked`:
+ * the server refuses it once the file or filter changed (a Find result).
+ */
+export function jumpToFrame(n: number, checked = false): void {
   const s = app.state;
   if (!s || !s.file) return;
   if (!Number.isInteger(n) || n < 1 || (s.totalFrames > 0 && n > s.totalFrames)) {
@@ -162,6 +213,7 @@ export function jumpToFrame(n: number): void {
   const idx = hooks.indexOfFrame(n);
   app.selFrame = n;
   app.selIndex = idx;
+  app.selRows = idx >= 0 ? [[idx, idx]] : [];
   bus.emit("selection");
   if (idx >= 0) {
     pendingReveal = null;
@@ -169,7 +221,7 @@ export function jumpToFrame(n: number): void {
   } else {
     pendingReveal = n;
   }
-  postSelect(n, 0);
+  postSelect(n, 0, undefined, checked);
   loadFrame(n);
 }
 
@@ -281,10 +333,28 @@ export async function clearMarks(frames?: number[]): Promise<void> {
   }
 }
 
-export function toggleMark(frame: number | null): void {
-  if (frame === null) return;
-  if (app.marks.has(frame)) void clearMarks([frame]);
-  else void markFrames([frame], "");
+/** Mark/Unmark Packet(s): flips the mark of each selected packet. */
+export async function toggleMarkSelected(): Promise<void> {
+  if (!(await flushSelection())) {
+    toast("error", "The selection isn't settled yet; select the packets again");
+    return;
+  }
+  try {
+    await post("api/marks/toggle", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Marking failed");
+  }
+}
+
+/** Mark All Displayed / Unmark All Displayed. */
+export async function markDisplayed(on: boolean): Promise<void> {
+  try {
+    await post("api/marks/displayed", { on });
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, on ? "Marking failed" : "Unmarking failed");
+  }
 }
 
 /** Next/previous marked frame relative to the selection. */
@@ -338,12 +408,14 @@ export async function startCapture(req: CaptureRequest): Promise<boolean> {
   }
 }
 
-export async function stopCapture(): Promise<void> {
+export async function stopCapture(): Promise<boolean> {
   try {
     await post("api/capture/stop", {});
     if (app.conn !== "open") void refreshState();
+    return true;
   } catch (e) {
     toastError(e, "Stopping the capture failed");
+    return false;
   }
 }
 
@@ -388,6 +460,42 @@ export async function setTlsKeylog(keylog: string | null): Promise<string | null
 
 export function exportPackets(req: ExportRequest): Promise<ExportResult> {
   return post<ExportResult>("api/export", req);
+}
+
+/** Selects the next (or previous) displayed packet matching `filter`; throws on a bad filter. */
+export async function findPacket(filter: string, dir: 1 | -1): Promise<FindResult> {
+  const view = (s = app.state) => `${s?.instance}\u0001${s?.file}\u0001${s?.filter}`;
+  const before = view();
+  const r = await get<FindResult>("api/find", { filter, from: app.selFrame ?? 0, dir });
+  // A live capture may have found a packet the pushed state doesn't count yet
+  for (let k = 0; k < 3 && r.frame !== null && r.frame > (app.state?.totalFrames ?? 0); k++) await refreshState();
+  if (view() !== before) throw new Error("the packet list changed, find again");
+  if (r.frame !== null) jumpToFrame(r.frame, true);
+  return r;
+}
+
+/** View > Reload: re-reads the file, keeping marks and selection. */
+export async function reloadFile(): Promise<void> {
+  try {
+    await post("api/reload", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Reloading failed");
+  }
+}
+
+export function setColorize(on: boolean): void {
+  if (app.colorize === on) return;
+  app.colorize = on;
+  save("colorize", on);
+  bus.emit("view");
+}
+
+export function setZoom(zoom: number): void {
+  if (app.zoom === zoom) return;
+  app.zoom = zoom;
+  save("zoom", zoom);
+  bus.emit("view");
 }
 
 export function setAutoScroll(on: boolean): void {

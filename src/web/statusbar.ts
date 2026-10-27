@@ -1,6 +1,7 @@
 /** Status bar: expert LED, file, field info, packet counts, marks, capture, connection. */
 
 import type { ExpertItem, ExpertSeverity, ViewState } from "../shared/api.ts";
+import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
 import { app, bus } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
@@ -83,7 +84,11 @@ export function createStatusBar(): HTMLElement {
 
     if (s?.file) {
       pktSeg.hidden = false;
-      setText(pktSeg, `Packets: ${fmtInt(s.totalFrames)} · Displayed: ${fmtInt(s.displayedFrames)} (${fmtPct(s.displayedFrames, s.totalFrames || 1)})`);
+      const nSel = countRanges(app.selRows);
+      setText(
+        pktSeg,
+        `Packets: ${fmtInt(s.totalFrames)} · Displayed: ${fmtInt(s.displayedFrames)} (${fmtPct(s.displayedFrames, s.totalFrames || 1)})${nSel > 1 ? ` · Selected: ${fmtInt(nSel)}` : ""}`,
+      );
       const agent = s.marks.filter((m) => m.by === "agent").length;
       markSeg.hidden = false;
       setText(markSeg, `Marked: ${fmtInt(s.marks.length)}${agent ? ` (${agent} by Claude)` : ""}`);
@@ -122,6 +127,7 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   bus.on("frame", update);
+  bus.on("selection", update);
   bus.on("conn", update);
   bus.on("tick", update);
   bus.on("fieldInfo", (t) => {

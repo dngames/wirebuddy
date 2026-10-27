@@ -1,5 +1,6 @@
 /** Draggable, resizable dialog windows (closable with Esc), modal or modeless. */
 
+import { hooks } from "./app.ts";
 import { icon } from "./icons.ts";
 import { clamp, h, isTextInput } from "./util.ts";
 
@@ -36,6 +37,8 @@ export class Dialog {
   onClose: (() => void) | null = null;
   readonly modal: boolean;
   private closed = false;
+  /** Focused element when the dialog opened. */
+  private returnFocus: HTMLElement | null = null;
 
   constructor(title: string, opts: DialogOptions = {}) {
     this.titleEl = h("span", { class: "dlg-title-text" }, title);
@@ -84,6 +87,8 @@ export class Dialog {
   }
 
   show(focus?: HTMLElement | null): void {
+    const active = document.activeElement;
+    this.returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     document.body.appendChild(this.overlay);
     open.push(this);
     restack();
@@ -106,6 +111,11 @@ export class Dialog {
     if (i >= 0) open.splice(i, 1);
     restack();
     this.onClose?.();
+    // Keys work again where they did before, unless another dialog has the focus
+    if (!open.some((d) => d.win.contains(document.activeElement))) {
+      if (this.returnFocus?.isConnected) this.returnFocus.focus();
+      else hooks.focusMain();
+    }
   }
 
   get isOpen(): boolean {

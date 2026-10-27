@@ -1,11 +1,12 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { Sharkd, SharkdError } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
-import { checkTarget, countFrames, exportFrames, parseRange, toRanges } from "./export.ts";
+import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
+import { launchWireshark } from "./wireshark.ts";
+import { countRanges, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   ConvRow,
   CustomColumn,
@@ -15,6 +16,7 @@ import type {
   ExportRequest,
   ExportResult,
   FilterCheck,
+  FindResult,
   FollowResult,
   FrameDetail,
   IoGraphResult,
@@ -60,6 +62,8 @@ export const CONV_TYPES = Object.keys(CONV_TAPS) as ConvType[];
 const FOLLOW_LIMIT = 4 * 1024 * 1024;
 const LIVE_RELOAD_MS = 1000;
 const MAX_MARKS = 10000;
+/** Row ranges a selection may consist of. */
+const MAX_ROW_RANGES = 10000;
 const MAX_NOTE = 200;
 const MAX_CUSTOM_COLUMNS = 10;
 /** Longer custom column values (e.g. whole payloads) are cut to this. */
@@ -131,6 +135,9 @@ export class Viewer extends EventEmitter {
       selectedIndex: -1,
       selectedBy: null,
       selectSeq: 0,
+      selectedRows: [],
+      selectedCount: 0,
+      rowsSince: 0,
       marks: [],
       capture: this.capture.state,
       agentNotice: null,
@@ -210,6 +217,8 @@ export class Viewer extends EventEmitter {
     { status, displayed }: { status: SharkdStatus; displayed: Int32Array | null },
     keepSelection: boolean,
   ): void {
+    // A shorter file is a rewritten one, filtered or not
+    const keepRows = keepSelection && status.frames >= this.state.totalFrames && appendedOnly(this.displayed, displayed);
     this.displayed = displayed;
     this.baseColumns = status.columns;
     const totalFrames = status.frames;
@@ -223,13 +232,16 @@ export class Viewer extends EventEmitter {
       columns: [...status.columns, ...this.state.customColumns.map((c) => c.title)],
       totalFrames,
       displayedFrames: displayed ? displayed.length : totalFrames,
+      marks: this.state.marks.filter((m) => m.frame <= totalFrames),
       duration: status.duration ?? 0,
       filter,
       selected,
       selectedBy: selected === null ? null : this.state.selectedBy,
       generation: this.state.generation + 1,
     };
-    this.set({ selectedIndex: this.indexOf(selected) });
+    const selectedIndex = this.indexOf(selected);
+    const rows = keepRows ? clipRanges(this.state.selectedRows, this.state.displayedFrames) : rowOf(selectedIndex);
+    this.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
   }
 
   /**
@@ -312,8 +324,10 @@ export class Viewer extends EventEmitter {
         selected: null,
         selectedIndex: -1,
         selectedBy: null,
+        ...rowSelection([]),
         marks: [],
         generation: this.state.generation + 1,
+        rowsSince: this.state.generation + 1,
       });
     });
   }
@@ -343,7 +357,8 @@ export class Viewer extends EventEmitter {
           displayedFrames: displayed ? displayed.length : this.state.totalFrames,
           generation: this.state.generation + 1,
         };
-        this.set({ selectedIndex: this.indexOf(this.state.selected) });
+        const selectedIndex = this.indexOf(this.state.selected);
+        this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)), rowsSince: this.state.generation });
       } else {
         this.set({ filter });
       }
@@ -497,20 +512,66 @@ export class Viewer extends EventEmitter {
     return total;
   }
 
-  select(frame: number | null, by: "user" | "agent"): void {
+  /**
+   * Makes `frame` the current packet. `rows` are the rows the user selected in
+   * the displayed list (they need not include the frame's row); without them
+   * only the frame's row is selected.
+   */
+  select(frame: number | null, by: "user" | "agent", rows?: Ranges, view?: { file: string; filter: string; generation?: number }): void {
+    // Rows clicked, or a frame found, in a list the view has replaced or changed in place since
+    if (view && (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince)) {
+      throw new StaleGenerationError("the selection belongs to another view");
+    }
     if (frame !== null && (!Number.isInteger(frame) || frame < 1 || frame > this.state.totalFrames)) {
       throw new Error(`no frame ${frame}`);
     }
+    const selectedIndex = this.indexOf(frame);
+    const selectedRows = rows ? this.checkRows(rows) : rowOf(selectedIndex);
     this.set({
       selected: frame,
-      selectedIndex: this.indexOf(frame),
+      selectedIndex,
       selectedBy: frame === null ? null : by,
       selectSeq: by === "agent" ? this.state.selectSeq + 1 : this.state.selectSeq,
+      ...rowSelection(selectedRows),
     });
     if (by === "agent" && frame !== null) {
       const hidden = this.state.selectedIndex < 0 ? " (hidden by the current display filter)" : "";
       this.notice(`Selected frame ${frame}${hidden}`);
     }
+  }
+
+  /** Checks row ranges against the displayed list and merges them. */
+  private checkRows(rows: Ranges): Ranges {
+    if (rows.length > MAX_ROW_RANGES) throw new Error(`at most ${MAX_ROW_RANGES} row ranges can be selected`);
+    const n = this.state.displayedFrames;
+    for (const [a, b] of rows) {
+      if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || a > b || b >= n) throw new Error(`invalid row range [${a}, ${b}] (${n} rows are displayed)`);
+    }
+    return mergeRanges(rows);
+  }
+
+  /** Frame ranges of the user's selected rows. */
+  selectedFrames(): Ranges {
+    const rows = clipRanges(this.state.selectedRows, this.state.displayedFrames);
+    const displayed = this.displayed;
+    if (!displayed) return rows.map(([a, b]) => [a + 1, b + 1]);
+    const out: Ranges = [];
+    for (const [a, b] of rows) {
+      for (let i = a; i <= b; i++) {
+        const frame = displayed[i];
+        const last = out[out.length - 1];
+        if (last && frame === last[1] + 1) last[1] = frame;
+        else out.push([frame, frame]);
+      }
+    }
+    return out;
+  }
+
+  /** Frames of the selected rows, else the selected frame. */
+  private selectedOrCurrent(): Ranges {
+    if (this.state.selectedCount) return this.selectedFrames();
+    const frame = this.state.selected;
+    return frame === null ? [] : [[frame, frame]];
   }
 
   /** Marks frames and returns the frame numbers that exist. */
@@ -532,6 +593,39 @@ export class Viewer extends EventEmitter {
   clearMarks(frames?: number[]): void {
     const drop = frames && new Set(frames);
     this.set({ marks: drop ? this.state.marks.filter((m) => !drop.has(m.frame)) : [] });
+  }
+
+  /** Wireshark's Mark/Unmark Packet(s): flips the mark of each selected frame. */
+  toggleMarks(by: "user" | "agent"): void {
+    const frames = this.selectedOrCurrent();
+    if (!frames.length) return;
+    const marks = this.state.marks;
+    const removed = marks.filter((m) => inRanges(frames, m.frame)).length;
+    if (marks.length - removed + countRanges(frames) - removed > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
+    const had = new Set(marks.map((m) => m.frame));
+    const added: Mark[] = [];
+    for (const [a, b] of frames) for (let f = a; f <= b; f++) if (!had.has(f)) added.push({ frame: f, note: "", by });
+    this.set({ marks: [...marks.filter((m) => !inRanges(frames, m.frame)), ...added].sort((a, b) => a.frame - b.frame) });
+  }
+
+  /** Wireshark's Mark All Displayed (`on`) / Unmark All Displayed; existing marks keep their notes. */
+  markDisplayed(on: boolean, by: "user" | "agent"): void {
+    this.requireFile();
+    const marks = this.state.marks;
+    const shown = (m: Mark) => this.indexOf(m.frame) >= 0;
+    if (!on) {
+      this.set({ marks: marks.filter((m) => !shown(m)) });
+      return;
+    }
+    const n = this.state.displayedFrames;
+    if (marks.length + n - marks.filter(shown).length > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
+    const had = new Set(marks.map((m) => m.frame));
+    const added: Mark[] = [];
+    for (let i = 0; i < n; i++) {
+      const frame = this.displayed ? this.displayed[i] : i + 1;
+      if (!had.has(frame)) added.push({ frame, note: "", by });
+    }
+    this.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
   }
 
   notice(text: string): void {
@@ -633,9 +727,48 @@ export class Viewer extends EventEmitter {
     this.requireFile();
     if (!Number.isFinite(seconds) || seconds < 0) throw new Error("time must be a non-negative number of seconds");
     const at = `frame.time_relative >= ${seconds.toFixed(9)}`;
-    const filter = this.state.filter ? `(${this.state.filter}) && ${at}` : at;
-    const rows = await this.engine.call<{ num: number }[]>("frames", { filter, limit: 1, column0: "frame.number:0" });
+    return this.firstMatching(this.engine, this.state.filter ? `(${this.state.filter}) && ${at}` : at);
+  }
+
+  private async firstMatching(engine: Sharkd, filter: string): Promise<number | null> {
+    const rows = await engine.call<{ num: number }[]>("frames", { filter, ...page(0, 1), column0: "frame.number:0" });
     return rows[0]?.num ?? null;
+  }
+
+  /**
+   * Find Packet: the first displayed frame after `from` (dir 1) or the last
+   * one before it (dir -1) matching `filter`, else the first (last) one
+   * overall. `from` 0 searches the whole list without wrapping.
+   */
+  async find(filter: string, from: number, dir: number): Promise<FindResult> {
+    this.requireFile();
+    if (dir !== 1 && dir !== -1) throw new Error("dir must be 1 or -1");
+    if (!Number.isInteger(from) || from < 0) throw new Error("from must be a frame number, or 0 for none");
+    filter = filter.trim();
+    if (!filter) throw new Error("no display filter to find");
+    const check = await this.checkFilter(filter);
+    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
+    const engine = this.engine;
+    const { file, filter: view } = this.state;
+    const match = view ? `(${view}) && (${filter})` : `(${filter})`;
+    let frame: number | null;
+    let wrapped = false;
+    if (dir === 1) {
+      frame = await this.firstMatching(engine, from ? `${match} && frame.number > ${from}` : match);
+      if (frame === null && from) {
+        frame = await this.firstMatching(engine, match);
+        wrapped = frame !== null;
+      }
+    } else {
+      const frames = await this.matchingFrames(engine, match);
+      const last = frames.length ? frames[frames.length - 1] : null;
+      const before = from ? (frames.findLast((f) => f < from) ?? null) : last;
+      frame = before ?? last;
+      wrapped = before === null && last !== null;
+    }
+    // Live reloads keep frame numbers; another file or filter does not
+    if (this.state.file !== file || this.state.filter !== view) throw new StaleGenerationError("the view changed during the search");
+    return { frame, index: this.indexOf(frame), wrapped };
   }
 
   /** Reads the keylog file Wireshark's own preferences may already set. */
@@ -666,8 +799,8 @@ export class Viewer extends EventEmitter {
     const input = this.state.file!;
     const format = checkTarget(String(req.path ?? ""), [input, ...this.capture.state.files], !!req.overwrite);
     // Always explicit frames: a live capture may have written more than the view knows
-    const everything: [number, number][] = this.state.totalFrames ? [[1, this.state.totalFrames]] : [];
-    let ranges: [number, number][];
+    const everything: Ranges = this.state.totalFrames ? [[1, this.state.totalFrames]] : [];
+    let ranges: Ranges;
     if (req.filter !== undefined) {
       const check = await this.checkFilter(req.filter);
       if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
@@ -675,11 +808,11 @@ export class Viewer extends EventEmitter {
     } else if (req.which === "all") ranges = everything;
     else if (req.which === "displayed") ranges = this.displayed ? toRanges(this.displayed) : everything;
     else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
-    else if (req.which === "selected") ranges = this.state.selected ? [[this.state.selected, this.state.selected]] : [];
+    else if (req.which === "selected") ranges = this.selectedOrCurrent();
     else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), this.state.totalFrames);
     else throw new Error(`unknown selection "${req.which}"`);
     if (!ranges.length) throw new Error("no packets to export");
-    const frames = countFrames(ranges);
+    const frames = countRanges(ranges);
     const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges });
     if (by === "agent") this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
     return { path: req.path, frames, size };
@@ -694,6 +827,7 @@ export class Viewer extends EventEmitter {
       cport: string;
       payloads?: { n: number; d: string; s?: number }[];
     }>("follow", { follow: proto, filter });
+    if (r.shost === "NONE" && r.chost === "NONE" && !r.payloads?.length) throw new Error(`no ${proto} stream matches ${filter}`);
     const payloads: FollowResult["payloads"] = [];
     let total = 0;
     let omittedBytes = 0;
@@ -724,7 +858,7 @@ export class Viewer extends EventEmitter {
     };
   }
 
-  openInWireshark(frame?: number | null): void {
+  async openInWireshark(frame?: number | null): Promise<void> {
     this.requireFile();
     if (!this.wiresharkBin) throw new Error("wireshark was not found on PATH");
     const args = ["-r", this.state.file!];
@@ -733,7 +867,7 @@ export class Viewer extends EventEmitter {
     if (this.state.filter) args.push("-Y", this.state.filter);
     const target = frame ?? this.state.selected;
     if (target) args.push("-g", String(target));
-    spawn(this.wiresharkBin, args, { detached: true, stdio: "ignore" }).unref();
+    await launchWireshark(this.wiresharkBin, args);
   }
 
   private remember(file: string): void {
@@ -789,6 +923,28 @@ function denseItems(items: (number | string)[], buckets: number): number[] {
 /** sharkd rejects skip: 0, so leave it out. */
 function page(skip: number, limit: number): Record<string, unknown> {
   return skip > 0 ? { skip, limit } : { limit };
+}
+
+/** The row at `index` alone, or no rows for -1. */
+function rowOf(index: number): Ranges {
+  return index >= 0 ? [[index, index]] : [];
+}
+
+function rowSelection(rows: Ranges): Pick<ViewState, "selectedRows" | "selectedCount"> {
+  return { selectedRows: rows, selectedCount: countRanges(rows) };
+}
+
+/** Cuts merged `ranges` to 0..n-1. */
+function clipRanges(ranges: Ranges, n: number): Ranges {
+  return ranges.filter(([a]) => a < n).map(([a, b]) => [a, Math.min(b, n - 1)]);
+}
+
+/** Whether every row of `before` shows the same frame in `after` (a growing live capture). */
+function appendedOnly(before: Int32Array | null, after: Int32Array | null): boolean {
+  if (!before || !after) return !before && !after;
+  if (after.length < before.length) return false;
+  for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) return false;
+  return true;
 }
 
 export const CAPTURE_FILE = /\.(pcapng|pcap|cap|ntar|erf|snoop|trc|dmp)(\.(gz|zst|lz4))?$/i;

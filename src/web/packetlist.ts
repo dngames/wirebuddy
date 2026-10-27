@@ -9,15 +9,17 @@
  */
 
 import type { PacketRow, RowsResponse, ViewState } from "../shared/api.ts";
+import { countRanges, inRanges, mergeRanges, toggleInRanges, type Ranges } from "../shared/ranges.ts";
 import { get, HttpError } from "./api.ts";
 import * as act from "./actions.ts";
 import { app, bus, captureActive, hooks } from "./app.ts";
 import { promptDialog } from "./dialog.ts";
-import { openFollowDialog } from "./dialogs/follow.ts";
+import { openExportDialog } from "./dialogs/export.ts";
+import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
 import { toastError } from "./toast.ts";
-import { clamp, copyText, csvField, fontOf, h, load, measureText, save } from "./util.ts";
+import { clamp, copyText, csvField, fontOf, h, IS_MAC, isMod, keyLabel, keyLetter, load, measureText, save } from "./util.ts";
 
 const RH = 20;
 const PAGE = 200;
@@ -27,6 +29,8 @@ const MAX_SCROLL = 8_000_000;
 const MAX_INFLIGHT = 4;
 const MAX_PAGES = 300;
 const MAX_VIEW = 4000;
+/** Copying more rows than this asks for a smaller selection. */
+const MAX_COPY = 10000;
 
 const DEFAULT_WIDTHS: Record<string, number> = {
   "No.": 72,
@@ -70,7 +74,10 @@ let pool: RowEl[] = [];
 let flashIdx = -1;
 let flashUntil = 0;
 let flashTimer = 0;
-let pendingSelIdx = -1;
+/** Row to select once its page arrives, with the rows selected along with it. */
+let pendingSel: { i: number; rows?: Ranges } | null = null;
+/** Row Shift+click and Shift+arrows extend the selection from. */
+let anchor = -1;
 let userInputAt = 0;
 let rafQueued = false;
 
@@ -236,7 +243,8 @@ function startResize(e: PointerEvent, j: number): void {
   const startW = widths[j];
   root.classList.add("resizing");
   const move = (ev: PointerEvent): void => {
-    colW[columns[j]] = Math.max(28, Math.round(startW + ev.clientX - startX));
+    // Pointer moves are in screen pixels; widths are in the zoomed panes' own
+    colW[columns[j]] = Math.max(28, Math.round(startW + (ev.clientX - startX) / app.zoom));
     computeWidths();
   };
   const up = (): void => {
@@ -309,11 +317,11 @@ async function fetchPage(p: number): Promise<void> {
     stale.delete(p);
     failed.delete(p);
     evict(p);
-    if (pendingSelIdx >= start && pendingSelIdx < start + rows.length) {
-      const i = pendingSelIdx;
-      pendingSelIdx = -1;
+    if (pendingSel && pendingSel.i >= start && pendingSel.i < start + rows.length) {
+      const { i, rows: sel } = pendingSel;
+      pendingSel = null;
       const row = rows[i - start];
-      if (row) act.selectRow(i, row.num);
+      if (row) act.selectRow(i, row.num, sel);
     }
   } catch (e) {
     if (g !== gen) return;
@@ -390,16 +398,21 @@ function makeRow(): RowEl {
   return { el, cells };
 }
 
-function isSelected(i: number, row: PacketRow | undefined): boolean {
-  if (pendingSelIdx >= 0) return i === pendingSelIdx;
-  if (row) return row.num === app.selFrame;
-  return i === app.selIndex && app.selIndex >= 0;
+function isSelected(i: number): boolean {
+  if (pendingSel) return pendingSel.rows ? inRanges(pendingSel.rows, i) : i === pendingSel.i;
+  return inRanges(app.selRows, i);
+}
+
+function currentIndex(): number {
+  return pendingSel ? pendingSel.i : app.selIndex;
 }
 
 function fillRow(r: RowEl, i: number, row: PacketRow | undefined, now: number): void {
   let cls = "pl-row";
-  const sel = isSelected(i, row);
+  const sel = isSelected(i);
   if (sel) cls += " sel";
+  // Focus frame on the current row when several are selected, or it was Ctrl+clicked off
+  if (i === currentIndex() && (!sel || countRanges(pendingSel?.rows ?? app.selRows) > 1)) cls += " cur";
   if (i === flashIdx && now < flashUntil) cls += " flash";
   if (!row) {
     cls += " pending";
@@ -415,7 +428,7 @@ function fillRow(r: RowEl, i: number, row: PacketRow | undefined, now: number): 
     const mark = app.marks.get(row.num);
     if (mark) cls += mark.by === "agent" ? " mark-agent" : " mark-user";
     if (sel && app.state?.selectedBy === "agent" && row.num === app.state.selected) cls += " agent-sel";
-    const useColors = !sel && mark?.by !== "user";
+    const useColors = app.colorize && !sel && mark?.by !== "user";
     r.el.style.backgroundColor = useColors && row.bg ? `#${row.bg}` : "";
     r.el.style.color = useColors && row.fg ? `#${row.fg}` : "";
     const title = mark ? `${mark.by === "agent" ? "Marked by Claude" : "Marked"}${mark.note ? `: ${mark.note}` : ""}` : "";
@@ -460,18 +473,43 @@ function updateOverlay(s: ViewState): void {
 
 // ------------------------------------------------------------------ selection
 
-function selectIndex(i: number): void {
+/** Makes row `i` current; `rows` are the selected rows, default just `i`. */
+function selectIndex(i: number, rows?: Ranges): void {
   if (total === 0) return;
   i = clamp(i, 0, total - 1);
+  if (!rows) anchor = i;
   ensureVisible(i, "nearest");
-  const row = freshRowAt(i) ?? rowAt(i);
+  // Not a stale row: after a re-read it may show another frame
+  const row = freshRowAt(i);
   if (row) {
-    pendingSelIdx = -1;
-    act.selectRow(i, row.num);
+    pendingSel = null;
+    act.selectRow(i, row.num, rows);
   } else {
-    pendingSelIdx = i;
+    pendingSel = { i, rows };
     render();
   }
+}
+
+/** Shift+click: the rows from the anchor to `i`, added to the selection with Ctrl. */
+function extendTo(i: number, add: boolean): void {
+  if (total === 0) return;
+  i = clamp(i, 0, total - 1);
+  const cur = currentIndex();
+  const a = anchor >= 0 && anchor < total ? anchor : cur >= 0 ? cur : i;
+  const span: [number, number] = [Math.min(a, i), Math.max(a, i)];
+  selectIndex(i, add ? mergeRanges([...app.selRows, span]) : [span]);
+}
+
+/** Ctrl+click: toggles row `i` and makes it current. */
+function toggleRow(i: number): void {
+  anchor = i;
+  selectIndex(i, toggleInRanges(app.selRows, i));
+}
+
+export function selectAllRows(): void {
+  if (total === 0) return;
+  const cur = currentIndex();
+  selectIndex(cur >= 0 ? cur : 0, [[0, total - 1]]);
 }
 
 function firstVisibleIndex(): number {
@@ -481,7 +519,12 @@ function firstVisibleIndex(): number {
 function onKey(e: KeyboardEvent): void {
   if (e.altKey || total === 0) return;
   const page = Math.max(1, Math.floor(scroller.clientHeight / RH) - 1);
-  const cur = pendingSelIdx >= 0 ? pendingSelIdx : app.selIndex;
+  const cur = currentIndex();
+  if (isMod(e) && !e.shiftKey && keyLetter(e) === "A") {
+    e.preventDefault();
+    selectAllRows();
+    return;
+  }
   let i: number;
   switch (e.key) {
     case "ArrowDown":
@@ -504,7 +547,7 @@ function onKey(e: KeyboardEvent): void {
       break;
     case "ArrowLeft":
     case "ArrowRight":
-      if (e.ctrlKey || e.metaKey) return;
+      if (isMod(e)) return;
       scroller.scrollLeft += e.key === "ArrowLeft" ? -40 : 40;
       e.preventDefault();
       return;
@@ -513,7 +556,8 @@ function onKey(e: KeyboardEvent): void {
   }
   e.preventDefault();
   userInputAt = performance.now();
-  selectIndex(i);
+  if (e.shiftKey) extendTo(i, false);
+  else selectIndex(i);
 }
 
 function rowIndexFromEvent(e: MouseEvent): number {
@@ -522,37 +566,95 @@ function rowIndexFromEvent(e: MouseEvent): number {
   return Number(el.dataset.i);
 }
 
+/** Changes when row indices stop meaning the same frames. */
+function viewKey(): string {
+  const s = app.state;
+  return `${s?.instance}\u0001${s?.file}\u0001${s?.filter}\u0001${s?.rowsSince}`;
+}
+
+/** Summary rows of the selected packets, from the cache or the server. */
+async function selectedRowData(): Promise<PacketRow[]> {
+  const sel = app.selRows;
+  const n = countRanges(sel);
+  if (n > MAX_COPY) throw new Error(`select at most ${MAX_COPY} packets to copy (${n} are selected)`);
+  const view = viewKey();
+  const out: PacketRow[] = [];
+  let retries = 0;
+  for (const [a, b] of sel) {
+    for (let i = a; i <= b; ) {
+      // Live reloads keep the rows; another file or filter does not
+      if (viewKey() !== view) throw new Error("the packet list changed, copy again");
+      const cached = freshRowAt(i);
+      if (cached) {
+        out.push(cached);
+        i++;
+        continue;
+      }
+      let r: RowsResponse;
+      try {
+        r = await get<RowsResponse>("api/rows", { gen, start: i, count: Math.min(500, b - i + 1) });
+      } catch (e) {
+        // A live reload replaced the generation: same rows, ask again
+        if (!(e instanceof HttpError && e.status === 409) || ++retries > 5) throw e;
+        await act.refreshState();
+        continue;
+      }
+      if (r.start !== i || !r.rows.length) throw new Error("the packet list changed, copy again");
+      out.push(...r.rows);
+      i += r.rows.length;
+    }
+  }
+  return out;
+}
+
+async function copyRows(format: (r: PacketRow) => string): Promise<void> {
+  try {
+    await copyText((await selectedRowData()).map(format).join("\n"));
+  } catch (e) {
+    toastError(e, "Copying failed");
+  }
+}
+
+/** Edit > Copy items for the selected packets. */
+export function packetCopyItems(): MenuItem[] {
+  const n = countRanges(app.selRows);
+  return [
+    { label: "Summary as Text", disabled: !n, action: () => void copyRows((r) => r.c.join("\t")) },
+    { label: "…as CSV", disabled: !n, action: () => void copyRows((r) => r.c.map(csvField).join(",")) },
+    { label: n > 1 ? "Packet Numbers" : "Packet Number", disabled: !n, action: () => void copyRows((r) => String(r.num)) },
+  ];
+}
+
 async function openRowMenu(i: number, x: number, y: number): Promise<void> {
   const row = rowAt(i);
   if (!row) return;
-  act.selectRow(i, row.num);
+  // Right-click inside the selection keeps it, like Wireshark
+  if (inRanges(app.selRows, i)) act.selectRow(i, row.num, app.selRows);
+  else {
+    anchor = i;
+    act.selectRow(i, row.num);
+  }
+  const n = countRanges(app.selRows);
   const fd = await act.frameDetail(row.num);
   const s = app.state;
   const marked = app.marks.has(row.num);
   const conv = fd ? conversationFilters(fd) : [];
-  const followers = fd?.followers ?? [];
   const filterItems = (apply: boolean): MenuItem[] =>
     conv.map((c) => ({ label: `${c.label} Conversation`, action: () => hooks.setFilter(c.filter, apply) }));
   const items: MenuItem[] = [
-    { label: marked ? "Unmark Packet" : "Mark Packet", shortcut: "Ctrl+M", action: () => act.toggleMark(row.num) },
+    {
+      label: n > 1 ? `Mark/Unmark ${n} Packets` : marked ? "Unmark Packet" : "Mark Packet",
+      shortcut: keyLabel("Ctrl+M"),
+      action: () => void act.toggleMarkSelected(),
+    },
     SEP,
     { label: "Apply as Filter", sub: filterItems(true), disabled: !conv.length },
     { label: "Prepare as Filter", sub: filterItems(false), disabled: !conv.length },
     SEP,
-    {
-      label: "Follow",
-      disabled: !followers.length,
-      sub: followers.map(([proto, filter]) => ({ label: `${proto} Stream`, action: () => openFollowDialog(proto, filter) })),
-    },
+    { label: "Follow", disabled: !fd, sub: followItems(fd) },
     SEP,
-    {
-      label: "Copy",
-      sub: [
-        { label: "Summary as Text", action: () => void copyText(row.c.join("\t")) },
-        { label: "…as CSV", action: () => void copyText(row.c.map(csvField).join(",")) },
-        { label: "Packet Number", action: () => void copyText(String(row.num)) },
-      ],
-    },
+    { label: "Copy", sub: packetCopyItems() },
+    { label: n > 1 ? `Export ${n} Selected Packets…` : "Export Selected Packet…", action: () => openExportDialog("selected") },
     SEP,
     {
       label: "Open in Wireshark at This Packet",
@@ -569,8 +671,18 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
 /** Ctrl+Up / Ctrl+Down: previous / next packet from anywhere. */
 export function stepPacket(d: 1 | -1): void {
   if (total === 0) return;
-  const cur = pendingSelIdx >= 0 ? pendingSelIdx : app.selIndex;
+  const cur = currentIndex();
   selectIndex(cur < 0 ? firstVisibleIndex() : cur + d);
+}
+
+/** Go > First Packet / Last Packet. */
+export function selectEdge(d: 1 | -1): void {
+  selectIndex(d < 0 ? 0 : total - 1);
+}
+
+/** View > Resize Columns: every column fits the visible rows. */
+export function resizeColumns(): void {
+  columns.forEach((_, j) => autosize(j));
 }
 
 export function focusPacketList(): void {
@@ -608,7 +720,15 @@ export function createPacketList(): HTMLElement {
   layer.addEventListener("mousedown", (e: MouseEvent) => {
     if (e.button !== 0) return;
     const i = rowIndexFromEvent(e);
-    if (i >= 0) selectIndex(i);
+    // Control+click is the context click on macOS
+    if (i < 0 || (IS_MAC && e.ctrlKey)) return;
+    if (e.shiftKey) {
+      // No text selection; focus as a plain click would
+      e.preventDefault();
+      scroller.focus();
+      extendTo(i, isMod(e));
+    } else if (isMod(e)) toggleRow(i);
+    else selectIndex(i);
   });
   layer.addEventListener("contextmenu", (e: MouseEvent) => {
     e.preventDefault();
@@ -631,6 +751,8 @@ export function createPacketList(): HTMLElement {
   }).observe(scroller);
 
   hooks.indexOfFrame = indexOfFrame;
+  hooks.selectionLoading = () => !!pendingSel?.rows;
+  hooks.focusMain = focusPacketList;
 
   bus.on("state", (s, prev) => {
     const cols = s.columns ?? [];
@@ -659,13 +781,16 @@ export function createPacketList(): HTMLElement {
       inflight = new Set();
       failed.clear();
       trimStale();
-      if (pendingSelIdx >= total) pendingSelIdx = -1;
+      // A pending selection's rows belong to the old list
+      if (!sameView || (pendingSel && pendingSel.i >= total)) pendingSel = null;
+      if (!sameView) anchor = -1;
     }
     updateHeights();
     if (fileChanged) {
       virtTop = 0;
       scroller.scrollLeft = 0;
-      pendingSelIdx = -1;
+      pendingSel = null;
+      anchor = -1;
       syncScrollFromVirt();
       // New capture or ring-buffer file switch: follow the live end.
       if (prev && app.autoScroll && captureActive(s)) setVirtTop(metrics().maxVirt);
@@ -679,9 +804,13 @@ export function createPacketList(): HTMLElement {
   });
 
   bus.on("selection", () => {
-    if (app.selIndex >= 0 && pendingSelIdx >= 0 && app.selIndex !== pendingSelIdx) pendingSelIdx = -1;
+    if (app.selIndex >= 0 && pendingSel && app.selIndex !== pendingSel.i) pendingSel = null;
+    // After a jump or an agent selection Shift extends from the new row
+    if (!pendingSel && countRanges(app.selRows) <= 1) anchor = app.selIndex;
     render();
   });
+
+  bus.on("view", render);
 
   bus.on("reveal", (i, flash) => {
     ensureVisible(i, flash ? "centerIfHidden" : "center");

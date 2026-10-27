@@ -12,9 +12,15 @@ A lightweight, Wireshark-style packet viewer that runs in a browser tab — buil
 an AI chat (e.g. the Claude Code desktop app's browser pane) so you and the agent look at the
 same capture, filter, selected packet and marks.
 
-- **Packet list / details / bytes** like Wireshark: coloring rules, display filter bar with live
-  validation and field autocompletion, linked tree ↔ hex highlighting, custom columns
-  ("Apply as Column"), follow stream.
+- **Packet list / details / bytes** like Wireshark, with its menu bar, main toolbar and keyboard
+  shortcuts: coloring rules, display filter bar with live validation and field autocompletion,
+  linked tree ↔ hex highlighting, custom columns ("Apply as Column"), Find Packet (display
+  filter, string or hex), packet history, zoom.
+- **Follow Stream** like Wireshark's window: TCP, UDP, TLS, HTTP and more; the packet list
+  shows the stream while it is open; step through streams, show data as ASCII, C Arrays, Hex
+  Dump, UTF-8 or Raw, find text, filter the stream out, save it.
+- **Select several packets** with Ctrl+click and Shift+click to mark, copy or export them — the
+  agent sees the selection too, so you can ask "what's wrong with these packets?".
 - **Statistics:** Expert Information, I/O Graph, protocol hierarchy, conversations and
   endpoints, optionally limited to the display filter.
 - **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
@@ -22,7 +28,8 @@ same capture, filter, selected packet and marks.
 - **Live capture** with `dumpcap`: interface picker with live traffic sparklines (like
   Wireshark's start page), capture-filter check, auto-stop (duration / size / packets), ring
   buffer. The view updates about once a second.
-- **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
+- **Open in Wireshark** jumps to the real GUI with the same file, filter and packet. Wireshark
+  skips its interface scan when it opens a file; Capture → Refresh Interfaces (F5) lists them.
 - **MCP server** so an agent can read the capture, apply filters, select and mark packets, and
   follow streams. The agent **cannot start a capture** — only you can, with a click in the UI.
 
@@ -107,7 +114,7 @@ the browser pane next to the chat. Example prompts:
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame, marks, capture status |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, capture status |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -115,7 +122,7 @@ the browser pane next to the chat. Example prompts:
 | `follow_stream` | Reassembled stream payload as text |
 | `expert_info` | Expert Information grouped by severity and message, with example frames |
 | `io_graph` | Packets/bytes/bits over time for up to 4 filters: peaks, empty stretches, a downsampled series |
-| `export_packets` | Write matching, displayed, marked or ranged packets to a new capture file |
+| `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file |
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
