@@ -1,7 +1,7 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
 // Generates its own ICMP traffic with ping. Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -145,6 +145,39 @@ try {
       api("/api/capture/start", { iface: "lo", filter: "", autostop: { filesizeKB: 100 }, ring: { files: 2, durationSec: 2 } }),
       /cannot be combined/,
     );
+  });
+  await check("new files without a ring keep every file, stop after N files", async () => {
+    const before = new Set(readdirSync(captureDir));
+    const pinger = ping(8);
+    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { files: 3, durationSec: 20 }, ring: { durationSec: 1 } });
+    const s = await waitIdle(15000);
+    pinger.kill();
+    assert.equal(s.capture.files.length, 3, JSON.stringify(s.capture.files));
+    const written = readdirSync(captureDir).filter((f) => !before.has(f));
+    assert.equal(written.length, 3, `all 3 files stay on disk: ${written}`);
+  });
+  await check("promiscuous mode off passes -p to dumpcap", async () => {
+    await api("/api/capture/start", { iface: "lo", filter: ECHO, promiscuous: false, autostop: { durationSec: 3 }, ring: null });
+    try {
+      const s = await state();
+      assert.equal(s.capture.promiscuous, false);
+      const pid = await new Promise((resolve) => {
+        const ps = spawn("pgrep", ["-P", String(server.pid), "dumpcap"]);
+        let out = "";
+        ps.stdout.on("data", (d) => (out += d));
+        ps.on("exit", () => resolve(out.trim().split("\n")[0]));
+      });
+      assert.ok(pid, "dumpcap runs");
+      assert.ok(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").includes("-p"));
+    } finally {
+      await api("/api/capture/stop", {});
+      await waitIdle(6000);
+    }
+  });
+  await check("capture options that don't fit together are refused", async () => {
+    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: { files: 2 }, ring: null }), /needs new files/);
+    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: { files: 1, durationSec: 2 } }), /at least 2 files/);
+    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: { files: 2 } }), /a new file needs/);
   });
 
   await check("export with more selections than one editcap run allows", async () => {

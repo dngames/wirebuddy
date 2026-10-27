@@ -25,9 +25,10 @@ same capture, filter, selected packet and marks.
   endpoints, optionally limited to the display filter.
 - **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
   (displayed, marked, selected or a range) to a new pcapng/pcap.
-- **Live capture** with `dumpcap`: interface picker with live traffic sparklines (like
-  Wireshark's start page), capture-filter check, auto-stop (duration / size / packets), ring
-  buffer. The view updates about once a second.
+- **Live capture** with `dumpcap` and Wireshark's Capture Options dialog: interfaces with live
+  traffic sparklines (also on the start page), promiscuous mode, a capture filter checked as you
+  type, new files automatically, a ring buffer and stop conditions. The view updates about once a
+  second.
 - **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
 - **MCP server** so an agent can read the capture, apply filters, select and mark packets, and
   follow streams. The MCP tools have no way to start a capture; that stays your click in the UI.

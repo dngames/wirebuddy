@@ -18,7 +18,8 @@ First version.
 - Custom columns ("Apply as Column"), Expert Information and I/O Graph
 - TLS decryption with a key log file
 - Export Specified Packets to pcapng or pcap
-- Live capture with `dumpcap`: interface picker, capture-filter check, auto-stop, ring buffer
+- Live capture with `dumpcap` and Wireshark's Capture Options dialog: interfaces with traffic,
+  promiscuous mode, capture-filter check, new files automatically, ring buffer, stop conditions
 - Traffic sparklines for capture interfaces on the start page and in the capture bar
 - "Open in Wireshark" at the same file, filter and packet
 - MCP server with tools to read, filter, select and mark packets and follow streams; it reminds

@@ -320,10 +320,15 @@ export interface CaptureRequest {
   iface: string;
   /** Capture (BPF) filter, "" for none. */
   filter: string;
-  /** Any combination; omitted values mean no limit. */
-  autostop: { durationSec?: number; filesizeKB?: number; packets?: number };
-  /** Ring buffer; null for a single file. */
-  ring: { filesizeKB?: number; durationSec?: number; files: number } | null;
+  /** Promiscuous mode (dumpcap's default); false captures only traffic to and from this host. */
+  promiscuous?: boolean;
+  /** Any combination; omitted values mean no limit. `files` needs `ring`. */
+  autostop: { durationSec?: number; filesizeKB?: number; packets?: number; files?: number };
+  /**
+   * A new file automatically after any of these (at least one); `files` keeps
+   * only that many, like a ring buffer, else all are kept. null: a single file.
+   */
+  ring: { filesizeKB?: number; durationSec?: number; packets?: number; intervalSec?: number; files?: number } | null;
 }
 
 export type CaptureStatus = "idle" | "starting" | "running" | "stopping" | "error";
@@ -334,6 +339,7 @@ export interface CaptureState {
   filter: string;
   autostop: CaptureRequest["autostop"];
   ring: CaptureRequest["ring"];
+  promiscuous: boolean;
   /** File being written now (the live view shows this file). */
   currentFile: string | null;
   /** All files written by the current or last capture, oldest first. */

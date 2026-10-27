@@ -177,44 +177,36 @@ await sleep(2000);
 await stage(`caption("Live capture: you press Start, then analyse it with your agent")`);
 await click(byLabel("Clear display filter"));
 await sleep(600);
-// Recording pauses while the bar opens, so no frame shows another interface's addresses
+// The options dialog lists every interface with its addresses: set them with the recording paused
 await send("Page.stopScreencast");
 if (frames.length) frames[frames.length - 1].pausedAfter = true;
-// The bar remembers being open in the browser profile: open it only when it is closed
-const barShown = () => js(`!!${APP}.contentDocument.querySelector(".capturebar")?.offsetParent`);
-if (!(await barShown())) await click(byLabel("Options…"));
-await sleep(500);
-const picked = await js(`(() => {
-  const s = ${APP}.contentDocument.querySelector("select.cb-iface");
-  s.value = "lo";
-  s.dispatchEvent(new Event("change", { bubbles: true }));
-  return s.value;
-})()`);
-if (picked !== "lo") throw new Error("could not select lo");
-await sleep(500);
-if (!(await barShown())) throw new Error("capture bar did not open");
-await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
-await sleep(400);
-await click(`(doc) => doc.querySelector(".capturebar .cb-filter")`);
+await click(byLabel("Options…"));
+await sleep(800);
+await click(`(doc) => doc.querySelector('.dlg-capopts tr[data-iface="lo"]')`);
+await click(`(doc) => doc.querySelector(".dlg-capopts .co-filter")`);
 // Options persist in the browser profile: replace what an earlier run left
 await selectAll();
 // Pings only: other loopback ICMP (resolver port-unreachables) has no place in the video
-await type("icmp and icmp[0] != 3", 70);
-await sleep(900);
-const ping = spawn("ping", ["-i", "0.1", "-c", "140", "127.0.0.1"], { stdio: "ignore" });
+await type("icmp and icmp[0] != 3", 0);
 // The capture filter is checked as it is typed: wait for the verdict
 const ready = await js(`new Promise((done) => {
   const t0 = Date.now();
   const tick = () => {
-    const b = ${APP}.contentDocument.querySelector(".cb-start");
-    if (b && !b.disabled) return done("ready");
+    const doc = ${APP}.contentDocument;
+    const b = [...doc.querySelectorAll(".dlg-capopts .dlg-footer button")].find((e) => e.textContent === "Start");
+    if (b && !b.disabled && doc.querySelector('.dlg-capopts tr.sel[data-iface="lo"]')) return done("ready");
     if (Date.now() - t0 > 6000) return done(b ? b.title : "missing");
     setTimeout(tick, 100);
   };
   tick();
 })`);
 if (ready !== "ready") throw new Error(`capture can't start: ${ready}`);
-await click(`(doc) => doc.querySelector(".cb-start")`);
+await click(`(doc) => [...doc.querySelectorAll(".dlg-capopts .dlg-footer button")].find((e) => e.textContent === "Close")`);
+await sleep(400);
+await send("Page.startScreencast", { format: "jpeg", quality: 88, maxWidth: 1600, maxHeight: 900, everyNthFrame: 1 });
+await sleep(600);
+const ping = spawn("ping", ["-i", "0.1", "-c", "140", "127.0.0.1"], { stdio: "ignore" });
+await click(byLabel("Start"));
 await sleep(3500);
 await stage(`user("Anything unusual in the live traffic?")`);
 await tool("get_view_state", {});
@@ -226,7 +218,7 @@ await stage(`tool("get_view_state", "capturing on lo")`);
 await stage(`tool("query_packets icmp.type == 8 / == 0", "${nReq} / ${nRep}")`);
 await stage(`agent(${JSON.stringify(`Just pings on loopback so far: ${nReq} echo requests and ${nRep} replies, ${Math.abs(nReq - nRep) <= 1 ? "every request answered" : `${Math.abs(nReq - nRep)} unanswered`}. Nothing unusual.`)})`);
 await sleep(2500);
-await click(byLabel("Stop the running capture"));
+await click(byLabel("Stop"));
 ping.kill();
 await sleep(1500);
 

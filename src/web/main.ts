@@ -5,7 +5,7 @@ import * as act from "./actions.ts";
 import { app, bus } from "./app.ts";
 import { createBanner } from "./banner.ts";
 import { clearBytesHighlight, createBytesPane, highlightBytes, setBytesFrame } from "./bytes.ts";
-import { createCaptureBar } from "./capture.ts";
+import { initCapture } from "./capture.ts";
 import { claimOwnedKey, handleCommandKey } from "./commands.ts";
 import { createDetailsPane, selectByOffset, setDetailsFrame } from "./details.ts";
 import { closeTopDialog, dialogOpen } from "./dialog.ts";
@@ -40,7 +40,7 @@ function init(): void {
 
   const menuBar = createMenuBar();
   const toolbar = createToolbar();
-  const captureBar = createCaptureBar();
+  initCapture();
   const filterBar = createFilterBar();
   const findBar = createFindBar();
   const banner = createBanner();
@@ -77,7 +77,7 @@ function init(): void {
   panes.hidden = true;
   main.appendChild(panes);
 
-  root.replaceChildren(menuBar, toolbar, captureBar, filterBar, findBar, banner, main, createStatusBar());
+  root.replaceChildren(menuBar, toolbar, filterBar, findBar, banner, main, createStatusBar());
 
   // View > Zoom scales the three panes, not the menus and bars
   const applyZoom = (): void => {

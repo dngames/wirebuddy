@@ -53,8 +53,10 @@ export const hooks = {
   filterText: (): string => app.state?.filter ?? "",
   /** Put a filter into the bar, optionally applying it. */
   setFilter: (_text: string, _apply: boolean): void => {},
-  /** Start a capture with the capture bar options (user click only). */
+  /** Start a capture with the capture options (user click only). */
   startCapture: (_iface?: string): void => {},
+  /** Opens Capture › Options…, on a tab. */
+  captureOptions: (_tab?: "input" | "output" | "options"): void => {},
   /** A Shift/Ctrl selection waits for its rows to load. */
   selectionLoading: (): boolean => false,
   /** Puts keyboard focus back in the packet list. */

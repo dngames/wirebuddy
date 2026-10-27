@@ -2,7 +2,6 @@
 
 import * as act from "./actions.ts";
 import { app, bus } from "./app.ts";
-import { capBus } from "./capture.ts";
 import { commands, isEnabled, tooltip, type Command, type CommandId } from "./commands.ts";
 import { icon, type IconName } from "./icons.ts";
 import { h } from "./util.ts";
@@ -101,7 +100,6 @@ export function createToolbar(): HTMLElement {
   bus.on("autoscroll", update);
   bus.on("view", update);
   bus.on("frame", update);
-  capBus.on("bar", update);
   update();
   return bar;
 }
