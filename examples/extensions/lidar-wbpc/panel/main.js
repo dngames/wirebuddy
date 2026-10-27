@@ -12,8 +12,10 @@ const MAX_SCANS = 1000;
 
 // --- The panel's query, in one place
 
-/** The sensor's packets: their UDP payload. */
-const query = { filter: `udp.dstport == ${PORT}`, bytes: "payload" };
+/** The sensor's packets: their UDP payload, matched by WireBuddy in the file itself (fast)... */
+const query = { match: { proto: "udp", dstport: PORT }, bytes: "payload" };
+/** ...or, in a file it can't read itself (a compressed one), by a display filter. */
+const slowQuery = { filter: `udp.dstport == ${PORT}`, bytes: "payload" };
 
 // --- Page
 
@@ -339,7 +341,7 @@ function start() {
     info.textContent = `No wbpc scans yet (UDP port ${PORT}).`;
     ready();
   }, 3000);
-  sub = wb.subscribe(query, {
+  const handlers = {
     batch(page) {
       if (g !== generation) return;
       for (let i = 0; i < page.n; i++) addPacket(page.bytes(i), page.frames[i], page.times[i]);
@@ -351,7 +353,11 @@ function start() {
         showScan(i);
       } else showScan(Math.max(index, 0));
     },
-  });
+    error(e) {
+      if (g === generation && e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery, handlers);
+    },
+  };
+  sub = wb.subscribe(query, handlers);
 }
 
 // --- Controls
@@ -382,6 +388,7 @@ const go = (i) => {
 };
 $(".prev").addEventListener("click", () => go(index - 1));
 $(".next").addEventListener("click", () => go(index + 1));
+$(".goto").addEventListener("click", () => scans[index] && wb.select(scans[index].first).catch(() => {}));
 playButton.addEventListener("click", () => setPlaying(!playing));
 scrub.addEventListener("input", () => go(Number(scrub.value)));
 colorBy.addEventListener("change", render);

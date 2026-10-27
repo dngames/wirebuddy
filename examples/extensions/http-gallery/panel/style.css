@@ -182,3 +182,7 @@ dd {
   font-family: var(--wb-mono);
   word-break: break-all;
 }
+
+.goto {
+  margin-top: 8px;
+}

@@ -16,8 +16,13 @@ async function listStreams() {
   return (tap?.streams ?? []).map((s) => ({ ...s, ssrc: Number(s.ssrc) }));
 }
 
-/** One stream's packets: the UDP payload, so RTP's own header too. */
+/** One stream's packets: the UDP payload, so RTP's own header too, matched by WireBuddy in the file itself (fast)... */
 function streamQuery(s) {
+  return { match: { proto: "udp", src: s.saddr, srcport: Number(s.sport), dst: s.daddr, dstport: Number(s.dport) }, bytes: "payload" };
+}
+
+/** ...or, in a file it can't read itself (a compressed one), by a display filter. */
+function slowQuery(s) {
   const ip = s.ipver === 6 ? "ipv6" : "ip";
   return { filter: `${ip}.src == ${s.saddr} && udp.srcport == ${s.sport} && ${ip}.dst == ${s.daddr} && udp.dstport == ${s.dport}`, bytes: "payload" };
 }
@@ -331,7 +336,7 @@ function play(s) {
   let unsupported = false;
   let read = 0;
   show("Reading the stream…");
-  sub = wb.subscribe(streamQuery(s), {
+  const handlers = {
     async batch(page) {
       if (g !== generation) return;
       for (let i = 0; i < page.n; i++) {
@@ -363,7 +368,11 @@ function play(s) {
       }
       status();
     },
-  });
+    error(e) {
+      if (g === generation && e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery(s), handlers);
+    },
+  };
+  sub = wb.subscribe(streamQuery(s), handlers);
 }
 
 async function start() {
@@ -397,6 +406,10 @@ async function start() {
 
 picker.addEventListener("change", () => play(streams[Number(picker.value)]));
 playButton.addEventListener("click", () => setPlaying(!playing));
+$(".goto").addEventListener("click", () => {
+  const u = units[Number(seek.value)];
+  if (u) wb.select(u.first).catch(() => {});
+});
 seek.addEventListener("input", () => {
   const i = Number(seek.value);
   restartAt(i);

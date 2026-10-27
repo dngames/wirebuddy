@@ -956,7 +956,7 @@ Rules:
 API (global wb):
   wb.view          what the user's view shows: {file, epoch, frames, displayed, filter, selected,
                    selection (frame ranges or null), marked, live (a capture runs), capture}
-  wb.on(event, fn) "view", "select" (frame or null), "packets" (a live capture grew), "reset",
+  wb.on(event, fn) "view", "select" (frame or null), "packets" (the file grew), "reset",
                    "visible" (true/false), "theme" ("light"/"dark"); returns a function that stops it
   wb.packets(q)    one page of packets, q:
      filter        a display filter
@@ -971,6 +971,7 @@ API (global wb):
      limit         packets a page: 1000; at most 50000 without fields, 5000 with fields, 2000 with a
                    field's bytes (or any bytes of a compressed file)
      maxBytes      bytes a page: 4 MiB, at most 16 MiB (a page has at least one packet)
+     epoch         when paging by hand: the first page's page.epoch, so a page of another capture rejects "stale"
    page: {n, frames, times (epoch seconds), lens, bytes(i), fields: {name: [values]}, clipped, next, done,
           live, total, dropped (packets without that layer), packets: [{frame, time, len, bytes, fields}]}
   wb.all(q)        every page joined (at most 64 MiB)
@@ -978,8 +979,8 @@ API (global wb):
                    capture adds; batch is awaited before the next page; q.from "end": new packets only;
                    waits for a capture if none is open; returns {close()}
   wb.frame(n, {tree, bytes})   {frame, tree, bytes, sources: [{name, bytes}] (reassembled data), followers}
-  wb.follow({frame} | {protocol: "TCP", stream: 0} | {protocol, filter}, {offset, maxBytes})
-                   {protocol, filter, client, server, truncated, next, chunks: a page with dirs (1: from the server)}
+  wb.follow({frame} | {protocol: "TCP", stream: 0} | {protocol, filter}, {offset, maxBytes, epoch})
+                   {protocol, filter, client, server, truncated, next, epoch, chunks: a page with dirs (1: from the server)}
   wb.objects(kind) files in the traffic, kind "http" | "imf" | "smb" | "tftp" | "dicom" | "ftp-data":
                    [{id, frame, host, type, filename, size, sha1}]
   wb.object(id)    {type, filename, bytes};  wb.objectURL(id): a blob: URL for <img> or <video>

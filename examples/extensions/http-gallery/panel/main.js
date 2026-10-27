@@ -136,6 +136,8 @@ function display(o, content, extra = []) {
       wb.h("button", { class: "close", title: "Close (Esc)", onclick: close }, "×"),
       wb.h("div", { class: "content" }, content),
       wb.h("dl", null, meta.flatMap(([k, v]) => [wb.h("dt", null, k), wb.h("dd", null, v)])),
+      // Right after the click: WireBuddy lets a panel select a packet only then
+      wb.h("button", { class: "goto", onclick: () => wb.select(o.frame).catch(() => {}) }, "Show packet"),
     ),
   );
   viewer.hidden = false;
