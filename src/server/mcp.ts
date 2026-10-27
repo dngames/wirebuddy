@@ -114,7 +114,8 @@ function dataFrames(nodes: PhsNode[]): number {
 
 function extensionLine(e: ExtensionInfo): string {
   const protocols = e.protocols.length ? `; protocols: ${e.protocols.join(", ")}` : "";
-  return `${e.name} [${e.status}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${e.error ? `\n    ${e.error}` : ""}`;
+  const untrusted = e.status === "untrusted" ? ". Don't copy it or change its permissions to make it load: tell the user" : "";
+  return `${e.name} [${e.status}] ${e.label}${e.version ? ` v${e.version}` : ""}${e.description ? ` — ${e.description}` : ""}${protocols}${e.error ? `\n    ${e.error}${untrusted}` : ""}`;
 }
 
 function testText(t: ExtensionTest): string {
@@ -345,8 +346,9 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const d = await viewer.frame(num);
       const out = [`Frame ${num}${d.row ? `: ${rowLine(viewer.state.columns, d.row)}` : ""}`];
       out.push(treeText(d.tree, { protocols, maxLines: max_lines, showBytes: show_bytes }));
-      if (d.followers.length) out.push(`Streams: ${d.followers.map(([p, f]) => `${p} (${f})`).join(", ")}`);
-      if (d.ds.length) out.push(`Extra data sources: ${d.ds.map((x, i) => `ds${i + 1}=${x.name}`).join(", ")}`);
+      if (d.followers.length) out.push(`Streams: ${d.followers.map(([p, f]) => `${oneLine(p)} (${oneLine(f ?? "")})`).join(", ")}`);
+      // Extensions can name data sources after packet content
+      if (d.ds.length) out.push(`Extra data sources: ${d.ds.map((x, i) => `ds${i + 1}=${oneLine(x.name)}`).join(", ")}`);
       if (hex) {
         const bytes = Buffer.from(d.bytes, "base64").subarray(0, 512);
         const lines: string[] = [];

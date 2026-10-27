@@ -807,7 +807,7 @@ DissectorTable.get("udp.port"):add(50000, acme)
     chmodSync(join(team, "teamproto", "teamproto.lua"), 0o666);
     let list = (await api("/api/extensions/reload", {})).json;
     assert.equal(status(list, "teamproto").status, "untrusted");
-    assert.match(status(list, "teamproto").error, /teamproto\.lua can be written by others.*Don't copy it/);
+    assert.match(status(list, "teamproto").error, /teamproto\.lua can be written by others; WireBuddy doesn't load it/);
     assert.equal(status(list, "teamproto").description, "");
     assert.equal((await api("/api/filter/check?filter=team_proto")).json.ok, false);
     // Group-writable counts only for the user's own private group
@@ -1012,7 +1012,7 @@ DissectorTable.get("udp.port"):add(50000, acme)
     assert.equal(r.status, 200, JSON.stringify(r.json));
     assert.equal((await api("/api/state")).json.totalFrames, 20);
     const events = await eventsUntil(/sharkd crashed reading live\.pcap/);
-    assert.match(events, /ERROR sharkd crashed reading live\.pcap with the extensions .*the view uses the extensions it had before their last change/);
+    assert.match(events, /ERROR sharkd crashed reading live\.pcap with the extensions .*so it reads it without the last change to the extensions/);
     assert.doesNotMatch(events, /WIREBUDDY-/);
     assert.notEqual(status((await api("/api/extensions")).json, "latebomb").status, "loaded");
     rmSync(join(extDir, "latebomb"), { recursive: true });
@@ -1029,6 +1029,54 @@ DissectorTable.get("udp.port"):add(50000, acme)
     assert.equal(status(list, "bomb").status, "off");
     assert.equal((await api("/api/frame?num=1")).status, 200);
     rmSync(join(extDir, "bomb"), { recursive: true });
+  });
+  await check("extensions: a live view filtered on a protocol whose extension crashes sharkd keeps updating", async () => {
+    const live = join(home, "live2.pcap");
+    const all = readFileSync(acmeFile);
+    let end = 24;
+    for (let i = 0; i < 19; i++) end += 16 + all.readUInt32LE(end + 8);
+    writeFileSync(live, all.subarray(0, end));
+    assert.equal((await api("/api/open", { path: live })).status, 200);
+    addExtension("lateacme", `local p = Proto("lateacme", "Late ACME")\nfunction p.dissector(tvb, pinfo, tree)\n  if pinfo.number == 20 then os.exit(3) end\n  tree:add(p, tvb())\nend\nregister_postdissector(p)\n`);
+    assert.equal((await api("/api/extensions/reload", {})).status, 200);
+    assert.equal((await api("/api/filter", { filter: "lateacme" })).json.ok, true);
+    await api("/api/events/take", {});
+    writeFileSync(live, all);
+    const r = await within(30000, api("/api/reload", {}));
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    const state = (await api("/api/state")).json;
+    assert.equal(state.totalFrames, 20);
+    assert.equal(state.filter, "");
+    assert.match(await eventsUntil(/sharkd crashed reading live2/), /the display filter "lateacme" was cleared/);
+    rmSync(join(extDir, "lateacme"), { recursive: true });
+    assert.equal((await api("/api/open", { path: acmeFile })).status, 200);
+    await api("/api/extensions/reload", {});
+  });
+  await check("extensions: a crash that isn't theirs leaves the extensions as they were", async () => {
+    // A Lua plugin of the user's, not an extension, crashes on one capture
+    const plugins = join(home, ".local/lib/wireshark/plugins");
+    mkdirSync(plugins, { recursive: true });
+    const bad = join(home, "bad.pcap");
+    writeAcmeCapture(bad, { start: 1700123456 });
+    writeFileSync(join(plugins, "crashy.lua"), `local p = Proto("crashy", "Crashy")\nfunction p.dissector(tvb, pinfo, tree) if pinfo.abs_ts >= 1700123456 and pinfo.abs_ts < 1700123500 then os.exit(3) end end\nregister_postdissector(p)\n`);
+    await api("/api/extensions/reload", {});
+    const r = await within(60000, api("/api/open", { path: bad }));
+    assert.equal(r.status, 400);
+    rmSync(join(plugins, "crashy.lua"));
+    assert.equal(status((await api("/api/extensions")).json, "acme").status, "loaded");
+    assert.equal((await api("/api/open", { path: acmeFile })).status, 200);
+    assert.equal((await api("/api/filter/check?filter=acme.seq")).json.ok, true);
+    await api("/api/extensions/reload", {});
+  });
+  await check("extensions: a folder that can be listed but not entered doesn't stop anything", async () => {
+    chmodSync(extDir, 0o600);
+    try {
+      const r = await api("/api/extensions");
+      assert.equal(r.status, 200);
+      assert.ok(r.json.ignored.some((w) => /can't be entered/.test(w)), JSON.stringify(r.json.ignored));
+    } finally {
+      chmodSync(extDir, 0o700);
+    }
   });
   await check("extensions: hard-linked files and folders that can't be entered aren't loaded", async () => {
     addExtension("linked", `Proto("linkedp", "Linked")\n`);

@@ -68,11 +68,11 @@ local running
 local self = debug.getinfo(1, "S").source
 local function hook()
   local r = running
-  -- Not inside these wrappers: the error has to come from the extension's code
-  if r and os.clock() - r.at > 1 and debug.getinfo(2, "S").source ~= self then
-    r.tripped = true
-    error("ran for more than 1 s without returning (an endless loop?)", 2)
-  end
+  if not r or os.clock() - r.at <= 1 then return end
+  -- Not inside these wrappers: the error has to come from the extension's code, at its next instruction
+  if debug.getinfo(2, "S").source == self then return debug.sethook(hook, "", 1) end
+  r.tripped = true
+  error("ran for more than 1 s without returning (an endless loop?)", 2)
 end
 -- Catching that error would leave the loop running unguarded: it goes on up
 local realpcall, realxpcall, coresume, cocreate, cowrap = pcall, xpcall, coroutine.resume, coroutine.create, coroutine.wrap
@@ -363,6 +363,12 @@ interface Last {
   protocols: string[];
 }
 
+interface Saved {
+  loaded: Map<string, string>;
+  last: Map<string, Last>;
+  previous: { loaded: Map<string, string>; last: Map<string, Last> } | null;
+}
+
 /** An extension as found on disk, with what its files are checked against again when copied. */
 interface Entry {
   info: ExtensionInfo;
@@ -404,9 +410,9 @@ export class Extensions {
 
   /** Finds the real global plugin folder and builds WireBuddy's plugin folder next to it. */
   async init(sharkd: string): Promise<void> {
-    // The checks that keep others' Lua out need POSIX owners and modes
-    if (process.platform === "win32") {
-      this.unavailable = "not supported on Windows";
+    // The checks that keep others' Lua out rely on Linux owners, modes, ACLs and filesystem types
+    if (process.platform !== "linux") {
+      this.unavailable = "only supported on Linux";
       return;
     }
     try {
@@ -491,13 +497,16 @@ export class Extensions {
     this.prune();
   }
 
-  /** Back to the set before the last change, which crashed sharkd; false if there is none. */
+  /** Back to the set before the last change, which crashed sharkd, but never to one switched off since; false if there is none. */
   revert(): boolean {
     if (!this.previous) return false;
     this.generation++;
     ({ loaded: this.loaded, last: this.last } = this.previous);
+    for (const name of Object.keys(this.state.off)) {
+      this.loaded.delete(name);
+      this.last.delete(name);
+    }
     this.previous = null;
-    this.prune();
     return true;
   }
 
@@ -507,7 +516,17 @@ export class Extensions {
     this.previous = null;
     this.loaded = new Map();
     this.last = new Map();
-    this.prune();
+  }
+
+  /** The loaded set as it is now, for restore(). */
+  saved(): Saved {
+    return { loaded: this.loaded, last: this.last, previous: this.previous };
+  }
+
+  /** Puts back a saved set: sharkd crashed without the extensions too, so they weren't the cause. */
+  restore(s: Saved): void {
+    this.generation++;
+    ({ loaded: this.loaded, last: this.last, previous: this.previous } = s);
   }
 
   /** Removes copies neither the loaded set nor the one to go back to uses. */
@@ -584,7 +603,14 @@ export class Extensions {
       for (const name of names) {
         if (name.startsWith(".") || seen.has(name)) continue;
         const folder = join(trust.real, name);
-        const st = lstatSync(folder, { throwIfNoEntry: false });
+        let st: Stats | undefined;
+        try {
+          st = lstatSync(folder, { throwIfNoEntry: false });
+        } catch {
+          // a folder that can be listed but not entered
+          ignored.push(`${printable(root)}: it can't be entered`);
+          break;
+        }
         if (!st || (!st.isDirectory() && !st.isSymbolicLink())) continue;
         seen.add(name);
         let info: ExtensionInfo;
@@ -612,7 +638,7 @@ export class Extensions {
       problem = `${printable(folder)} can't be read`;
     }
     problem ??= entryProblem(join(folder, MANIFEST), "file", trust, true) ?? lua.map((f) => entryProblem(join(folder, f), "file", trust)).find(Boolean) ?? null;
-    if (problem) return { ...info, status: "untrusted", error: `${problem}; WireBuddy doesn't load it. Don't copy it or change its permissions to make it load: tell the user` };
+    if (problem) return { ...info, status: "untrusted", error: `${problem}; WireBuddy doesn't load it` };
     try {
       const m = JSON.parse(readChecked(join(folder, MANIFEST), trust, MAX_MANIFEST).toString("utf8")) as Record<string, unknown>;
       info.label = typeof m.label === "string" && m.label ? printable(m.label).slice(0, 60) : shown;
@@ -835,7 +861,8 @@ function othersCanWrite(st: Stats, path: string): boolean {
 
 /** Network and FUSE filesystems: the owners and modes they show don't say who can write. */
 const UNCHECKABLE_FS = new Set([
-  0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x65735546, 0x01021997, 0x00c36400, 0x5346414f, 0x73757245, 0x564c, 0x6b414653, 0x0bd00bd0, 0x47504653, 0x786f4256,
+  0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x65735546, 0x01021997, 0x00c36400, 0x5346414f, 0x73757245, 0x564c, 0x6b414653, 0x0bd00bd0, 0x47504653, 0x786f4256, 0x20030528,
+  0x19830326,
 ]);
 
 /**
@@ -859,10 +886,16 @@ function rootTrust(root: string): RootTrust {
   let privateDev: number | null = null;
   let dev = -1;
   try {
-    for (const part of ["", ...real.split(sep).filter(Boolean)]) {
+    const parts = ["", ...real.split(sep).filter(Boolean)];
+    for (const [i, part] of parts.entries()) {
       path = join(path, part);
       const st = statSync(path);
       dev = st.dev;
+      // The folder itself counts even below a private one: it may be a bind mount of a shared folder
+      if (i === parts.length - 1) {
+        if (st.uid !== uid && st.uid !== 0) return fail("another user owns it");
+        if (othersCanWrite(st, path)) return fail("others can write to it");
+      }
       if (privateDev !== null && st.dev === privateDev) continue;
       // Another filesystem mounted below the private folder: check it from here
       privateDev = null;
@@ -888,10 +921,11 @@ function statProblem(st: Stats, path: string, kind: "folder" | "file", trust: Ro
   if (st.isSymbolicLink()) return "is a symbolic link";
   if (kind === "folder" ? !st.isDirectory() : !st.isFile()) return kind === "file" ? "is not a regular file" : "is not a folder";
   if (st.dev !== trust.dev) return "is on another filesystem";
-  if (st.uid !== process.getuid!()) return "belongs to another user";
+  // Root could change anything anyway
+  if (st.uid !== process.getuid!() && st.uid !== 0) return "belongs to another user";
   // Another link to the file could be in a folder others can reach
   if (kind === "file" && st.nlink > 1) return "has other hard links";
-  if (trust.privateDev !== st.dev && othersCanWrite(st, path)) return "can be written by others";
+  if (othersCanWrite(st, path)) return "can be written by others";
   return null;
 }
 
