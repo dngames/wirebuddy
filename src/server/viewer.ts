@@ -2,14 +2,23 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { Sharkd, SharkdError } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
+import { checkTarget, countFrames, exportFrames, parseRange, toRanges } from "./export.ts";
 import type {
   ConvRow,
+  CustomColumn,
   EndpointRow,
+  ExpertItem,
+  ExpertSeverity,
+  ExportRequest,
+  ExportResult,
   FilterCheck,
   FollowResult,
   FrameDetail,
+  IoGraphResult,
+  IoGraphSpec,
   Mark,
   PacketRow,
   PhsNode,
@@ -52,6 +61,15 @@ const FOLLOW_LIMIT = 4 * 1024 * 1024;
 const LIVE_RELOAD_MS = 1000;
 const MAX_MARKS = 10000;
 const MAX_NOTE = 200;
+const MAX_CUSTOM_COLUMNS = 10;
+/** Longer custom column values (e.g. whole payloads) are cut to this. */
+const MAX_COLUMN_VALUE = 500;
+const MAX_IO_BUCKETS = 4000;
+/** sharkd computes the interval in 32-bit microseconds; larger intervals overflow. */
+const MAX_IO_INTERVAL = 2_000_000;
+const MAX_IO_BUCKETS_HARD = 100_000;
+const MAX_IO_GRAPHS = 4;
+const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
 /**
  * Everything the UI and the agent share: the open capture, display filter,
@@ -71,15 +89,29 @@ export class Viewer extends EventEmitter {
   private noticeId = 0;
   private readonly wiresharkBin: string | null;
   private readonly profile: string | undefined;
+  private readonly editcap: string;
+  private readonly mergecap: string;
+  /** Columns sharkd reports for the open file, before custom ones. */
+  private baseColumns: string[] = [];
   readonly capture: Capture;
   readonly recent: string[] = [];
 
   state: ViewState;
 
-  constructor(opts: { captureDir: string; sharkd?: string; dumpcap?: string; wireshark?: string | null; profile?: string }) {
+  constructor(opts: {
+    captureDir: string;
+    sharkd?: string;
+    dumpcap?: string;
+    wireshark?: string | null;
+    profile?: string;
+    editcap?: string;
+    mergecap?: string;
+  }) {
     super();
     this.engines = [new Sharkd(opts.sharkd, opts.profile), new Sharkd(opts.sharkd, opts.profile)];
     this.profile = opts.profile;
+    this.editcap = opts.editcap ?? "editcap";
+    this.mergecap = opts.mergecap ?? "mergecap";
     this.wiresharkBin = opts.wireshark ?? null;
     this.capture = new Capture(opts.captureDir, opts.dumpcap);
     this.state = {
@@ -103,6 +135,8 @@ export class Viewer extends EventEmitter {
       capture: this.capture.state,
       agentNotice: null,
       wiresharkAvailable: !!this.wiresharkBin,
+      customColumns: [],
+      tlsKeylog: null,
     };
     this.capture.on("change", (capture) => this.set({ capture }));
     this.capture.on("file", (file: string) => {
@@ -177,6 +211,7 @@ export class Viewer extends EventEmitter {
     keepSelection: boolean,
   ): void {
     this.displayed = displayed;
+    this.baseColumns = status.columns;
     const totalFrames = status.frames;
     const selected = keepSelection && this.state.selected !== null && this.state.selected <= totalFrames ? this.state.selected : null;
     this.state = {
@@ -185,7 +220,7 @@ export class Viewer extends EventEmitter {
       fileSize: status.filesize ?? safeSize(file),
       loading: false,
       loadError: null,
-      columns: status.columns,
+      columns: [...status.columns, ...this.state.customColumns.map((c) => c.title)],
       totalFrames,
       displayedFrames: displayed ? displayed.length : totalFrames,
       duration: status.duration ?? 0,
@@ -202,6 +237,7 @@ export class Viewer extends EventEmitter {
    * current view stays as it was.
    */
   open(file: string): Promise<void> {
+    file = resolve(file);
     return this.exclusive(async () => {
       this.set({ loading: true, loadError: null });
       const standby = 1 - this.active;
@@ -330,17 +366,90 @@ export class Viewer extends EventEmitter {
     if (count === 0 || start < 0) return { generation, start, rows: [] };
     const params = page(start, count);
     if (filter) params.filter = filter;
-    const rows = await engine.call<PacketRow[]>("frames", params);
+    const rows = await this.framesWithColumns(engine, params);
     if (generation !== this.state.generation) throw new StaleGenerationError("stale generation");
-    return { generation, start, rows: rows.map(({ num, c, bg, fg }) => ({ num, c, bg, fg })) };
+    return { generation, start, rows };
   }
 
   /** Summary row of one frame, regardless of the display filter. */
   async row(num: number): Promise<PacketRow | null> {
     if (num < 1 || num > this.state.totalFrames) return null;
-    const rows = await this.engine.call<PacketRow[]>("frames", page(num - 1, 1));
+    const rows = await this.framesWithColumns(this.engine, page(num - 1, 1));
     const r = rows[0];
-    return r && r.num === num ? { num: r.num, c: r.c, bg: r.bg, fg: r.fg } : null;
+    return r && r.num === num ? r : null;
+  }
+
+  /** sharkd "frames" rows with the custom columns appended. */
+  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>): Promise<PacketRow[]> {
+    const custom = this.state.customColumns;
+    const [rows, extra] = await Promise.all([
+      engine.call<PacketRow[]>("frames", params),
+      // Custom column params replace sharkd's default columns, so they come in a second request
+      custom.length ? engine.call<PacketRow[]>("frames", { ...params, ...columnParams(custom.map((c) => c.field)) }) : null,
+    ]);
+    return rows.map((r, i) => {
+      const values = extra?.[i]?.num === r.num ? extra[i].c.map(clip) : custom.map(() => "");
+      return { num: r.num, c: [...r.c, ...values], bg: r.bg, fg: r.fg };
+    });
+  }
+
+  /**
+   * Field values per frame for `filter`, like `tshark -T fields`; each value
+   * holds all occurrences, comma-separated.
+   */
+  async extract(filter: string, fields: string[], offset: number, limit: number): Promise<{ total: number; rows: { num: number; values: string[] }[] }> {
+    this.requireFile();
+    await this.checkFields(fields);
+    const check = await this.checkFilter(filter);
+    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
+    const total = await this.countMatching(filter);
+    const params: Record<string, unknown> = { ...page(offset, limit), ...columnParams(fields) };
+    if (filter) params.filter = filter;
+    const rows = await this.engine.call<PacketRow[]>("frames", params);
+    return { total, rows: rows.map((r) => ({ num: r.num, values: r.c.map(clip) })) };
+  }
+
+  private async checkFields(fields: string[]): Promise<void> {
+    if (!fields.length) throw new Error("no fields given");
+    for (const f of fields) {
+      if (!FIELD_NAME.test(f)) throw new Error(`"${f}" is not a field name`);
+      const r = await this.checkFilter(f);
+      if (!r.ok) throw new Error(`unknown field "${f}": ${r.error}`);
+    }
+  }
+
+  /** Sets the packet list's custom columns (an empty list removes them). */
+  setColumns(columns: CustomColumn[], by: "user" | "agent"): Promise<FilterCheck> {
+    return this.exclusive(async () => {
+      if (columns.length > MAX_CUSTOM_COLUMNS) return { ok: false, error: `at most ${MAX_CUSTOM_COLUMNS} custom columns` };
+      try {
+        if (columns.length) await this.checkFields(columns.map((c) => c.field));
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+      const customColumns: CustomColumn[] = [];
+      for (const c of columns) {
+        const title = String(c.title ?? "").trim().slice(0, 60) || (await this.fieldName(c.field));
+        customColumns.push({ field: c.field, title });
+      }
+      this.set({
+        customColumns,
+        columns: this.state.file ? [...this.baseColumns, ...customColumns.map((c) => c.title)] : [],
+        generation: this.state.generation + 1,
+      });
+      if (by === "agent") this.notice(customColumns.length ? `Columns: ${customColumns.map((c) => c.title).join(", ")}` : "Removed the custom columns");
+      return { ok: true };
+    });
+  }
+
+  /** The field's display name, e.g. "Status Code" for http.response.code. */
+  private async fieldName(field: string): Promise<string> {
+    try {
+      const r = await this.engine.call<{ field?: { f: string; n?: string }[] }>("complete", { field });
+      return r.field?.find((x) => x.f === field)?.n ?? field;
+    } catch {
+      return field;
+    }
   }
 
   async frame(num: number): Promise<FrameDetail> {
@@ -370,7 +479,7 @@ export class Viewer extends EventEmitter {
     const total = await this.countMatching(filter);
     const params = page(offset, limit);
     if (filter) params.filter = filter;
-    const rows = await this.engine.call<PacketRow[]>("frames", params);
+    const rows = await this.framesWithColumns(this.engine, params);
     return { total, rows };
   }
 
@@ -429,9 +538,17 @@ export class Viewer extends EventEmitter {
     this.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
   }
 
-  async phs(): Promise<PhsNode[]> {
+  /** sharkd tap parameters, limited to `filter` when given. */
+  private async tapParams(tap: string, filter?: string): Promise<Record<string, unknown>> {
     this.requireFile();
-    const r = await this.engine.call<{ taps: { protos: SharkdPhs[] }[] }>("tap", { tap0: "phs" });
+    if (!filter?.trim()) return { tap0: tap };
+    const check = await this.checkFilter(filter);
+    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
+    return { tap0: tap, filter: filter.trim() };
+  }
+
+  async phs(filter?: string): Promise<PhsNode[]> {
+    const r = await this.engine.call<{ taps: { protos: SharkdPhs[] }[] }>("tap", await this.tapParams("phs", filter));
     const map = (p: SharkdPhs): PhsNode => ({
       proto: p.proto,
       frames: p.frames,
@@ -441,11 +558,8 @@ export class Viewer extends EventEmitter {
     return (r.taps[0]?.protos ?? []).map(map);
   }
 
-  async conversations(type: ConvType): Promise<ConvRow[]> {
-    this.requireFile();
-    const r = await this.engine.call<{ taps: { convs?: Record<string, never>[] }[] }>("tap", {
-      tap0: `conv:${CONV_TAPS[type]}`,
-    });
+  async conversations(type: ConvType, filter?: string): Promise<ConvRow[]> {
+    const r = await this.engine.call<{ taps: { convs?: Record<string, never>[] }[] }>("tap", await this.tapParams(`conv:${CONV_TAPS[type]}`, filter));
     return (r.taps[0]?.convs ?? []).map((c: Record<string, any>) => ({
       addrA: c.saddr,
       portA: c.sport,
@@ -461,11 +575,8 @@ export class Viewer extends EventEmitter {
     }));
   }
 
-  async endpoints(type: ConvType): Promise<EndpointRow[]> {
-    this.requireFile();
-    const r = await this.engine.call<{ taps: { hosts?: Record<string, never>[] }[] }>("tap", {
-      tap0: `endpt:${CONV_TAPS[type]}`,
-    });
+  async endpoints(type: ConvType, filter?: string): Promise<EndpointRow[]> {
+    const r = await this.engine.call<{ taps: { hosts?: Record<string, never>[] }[] }>("tap", await this.tapParams(`endpt:${CONV_TAPS[type]}`, filter));
     return (r.taps[0]?.hosts ?? []).map((h: Record<string, any>) => ({
       addr: h.host,
       port: h.port,
@@ -477,13 +588,101 @@ export class Viewer extends EventEmitter {
     }));
   }
 
-  async expert(): Promise<{ frame: number; severity: string; group: string; protocol: string; message: string }[]> {
-    this.requireFile();
+  async expert(filter?: string): Promise<ExpertItem[]> {
     const r = await this.engine.call<{ taps: { details?: { f: number; s: string; g: string; p: string; m: string }[] }[] }>(
       "tap",
-      { tap0: "expert" },
+      await this.tapParams("expert", filter),
     );
-    return (r.taps[0]?.details ?? []).map((d) => ({ frame: d.f, severity: d.s, group: d.g, protocol: d.p, message: d.m }));
+    return (r.taps[0]?.details ?? [])
+      .map((d) => ({ frame: d.f, severity: d.s as ExpertSeverity, group: d.g, protocol: d.p, message: d.m }))
+      .sort((a, b) => a.frame - b.frame);
+  }
+
+  /**
+   * Packets, bytes or bits per interval for up to four filters. The interval
+   * grows when the capture would need more than MAX_IO_BUCKETS buckets.
+   */
+  async ioGraph(specs: IoGraphSpec[], intervalMs: number): Promise<IoGraphResult> {
+    this.requireFile();
+    if (!specs.length || specs.length > MAX_IO_GRAPHS) throw new Error(`give 1 to ${MAX_IO_GRAPHS} graphs`);
+    if (!Number.isFinite(intervalMs) || intervalMs < 1) throw new Error("the interval must be at least 1 ms");
+    const params: Record<string, unknown> = {};
+    for (const [i, g] of specs.entries()) {
+      if (g.metric !== "packets" && g.metric !== "bytes" && g.metric !== "bits") throw new Error(`unknown metric "${g.metric}"`);
+      params[`graph${i}`] = g.metric;
+      const filter = (g.filter ?? "").trim();
+      if (filter) {
+        const check = await this.checkFilter(filter);
+        if (!check.ok) throw new Error(`invalid display filter "${filter}": ${check.error}`);
+        params[`filter${i}`] = filter;
+      }
+    }
+    const spanUs = Math.max(Math.round(this.state.duration * 1e6), 1);
+    const interval = Math.min(niceInterval(Math.max(Math.round(intervalMs), Math.ceil(spanUs / 1000 / MAX_IO_BUCKETS))), MAX_IO_INTERVAL);
+    const buckets = Math.floor(spanUs / (interval * 1000)) + 1;
+    if (buckets > MAX_IO_BUCKETS_HARD) throw new Error("the capture spans too much time for an I/O graph (check for packets with bogus timestamps)");
+    const r = await this.engine.call<{ iograph: { items?: (number | string)[] }[] }>("iograph", { interval, ...params });
+    return {
+      interval,
+      series: specs.map((g, i) => ({ metric: g.metric, filter: (g.filter ?? "").trim(), values: denseItems(r.iograph[i]?.items ?? [], buckets) })),
+    };
+  }
+
+  /** First frame at or after `seconds` since the first frame, within the display filter. */
+  async frameAt(seconds: number): Promise<number | null> {
+    this.requireFile();
+    if (!Number.isFinite(seconds) || seconds < 0) throw new Error("time must be a non-negative number of seconds");
+    const at = `frame.time_relative >= ${seconds.toFixed(9)}`;
+    const filter = this.state.filter ? `(${this.state.filter}) && ${at}` : at;
+    const rows = await this.engine.call<{ num: number }[]>("frames", { filter, limit: 1, column0: "frame.number:0" });
+    return rows[0]?.num ?? null;
+  }
+
+  /** Reads the keylog file Wireshark's own preferences may already set. */
+  async loadTlsPreference(): Promise<void> {
+    try {
+      const r = await this.engine.call<{ prefs?: Record<string, { s?: string }> }>("dumpconf", { pref: "tls.keylog_file" });
+      const path = r.prefs?.["tls.keylog_file"]?.s;
+      if (path && !this.state.tlsKeylog) this.set({ tlsKeylog: path });
+    } catch {
+      // older sharkd without dumpconf
+    }
+  }
+
+  /** Decrypts TLS with a key log file (null turns it off) and re-dissects the open capture. */
+  async setTlsKeylog(path: string | null): Promise<void> {
+    if (path !== null) {
+      const st = statSync(path, { throwIfNoEntry: false });
+      if (!st?.isFile()) throw new Error(`no such file: ${path}`);
+    }
+    await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
+    this.set({ tlsKeylog: path });
+    if (this.state.file) await this.reload(true);
+  }
+
+  /** Writes a subset of the open capture to a new file, like Wireshark's Export Specified Packets. */
+  async exportPackets(req: ExportRequest & { filter?: string }, by: "user" | "agent"): Promise<ExportResult> {
+    this.requireFile();
+    const input = this.state.file!;
+    const format = checkTarget(String(req.path ?? ""), [input, ...this.capture.state.files], !!req.overwrite);
+    // Always explicit frames: a live capture may have written more than the view knows
+    const everything: [number, number][] = this.state.totalFrames ? [[1, this.state.totalFrames]] : [];
+    let ranges: [number, number][];
+    if (req.filter !== undefined) {
+      const check = await this.checkFilter(req.filter);
+      if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
+      ranges = req.filter.trim() ? toRanges(await this.matchingFrames(this.engine, req.filter.trim())) : everything;
+    } else if (req.which === "all") ranges = everything;
+    else if (req.which === "displayed") ranges = this.displayed ? toRanges(this.displayed) : everything;
+    else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
+    else if (req.which === "selected") ranges = this.state.selected ? [[this.state.selected, this.state.selected]] : [];
+    else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), this.state.totalFrames);
+    else throw new Error(`unknown selection "${req.which}"`);
+    if (!ranges.length) throw new Error("no packets to export");
+    const frames = countFrames(ranges);
+    const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges });
+    if (by === "agent") this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
+    return { path: req.path, frames, size };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
@@ -530,6 +729,7 @@ export class Viewer extends EventEmitter {
     if (!this.wiresharkBin) throw new Error("wireshark was not found on PATH");
     const args = ["-r", this.state.file!];
     if (this.profile) args.push("-C", this.profile);
+    if (this.state.tlsKeylog) args.push("-o", `tls.keylog_file:${this.state.tlsKeylog}`);
     if (this.state.filter) args.push("-Y", this.state.filter);
     const target = frame ?? this.state.selected;
     if (target) args.push("-g", String(target));
@@ -549,8 +749,41 @@ export class Viewer extends EventEmitter {
 
   shutdown(): void {
     this.capture.stop();
+    this.capture.stopActivity();
     for (const e of this.engines) e.close();
   }
+}
+
+/** sharkd custom columns: column0..N as "<field>:0" (all occurrences). */
+function columnParams(fields: string[]): Record<string, string> {
+  return Object.fromEntries(fields.map((f, i) => [`column${i}`, `${f}:0`]));
+}
+
+function clip(value: string): string {
+  return value.length > MAX_COLUMN_VALUE ? value.slice(0, MAX_COLUMN_VALUE - 1) + "…" : value;
+}
+
+/** Rounds up to 1, 2 or 5 times a power of ten milliseconds. */
+function niceInterval(ms: number): number {
+  const p = 10 ** Math.floor(Math.log10(ms));
+  for (const m of [1, 2, 5, 10]) if (m * p >= ms) return m * p;
+  return 10 * p;
+}
+
+/** sharkd skips empty buckets: a string item is the next bucket's index in hex. */
+function denseItems(items: (number | string)[], buckets: number): number[] {
+  const values = new Array<number>(buckets).fill(0);
+  let i = 0;
+  for (const item of items) {
+    if (typeof item === "string") i = parseInt(item, 16);
+    else {
+      // Rounding of the capture duration can leave sharkd one bucket ahead of us
+      while (values.length <= i) values.push(0);
+      values[i] = item;
+      i++;
+    }
+  }
+  return values;
 }
 
 /** sharkd rejects skip: 0, so leave it out. */

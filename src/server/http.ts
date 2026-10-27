@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, DirEntry, DirListing, RecentFiles, ServerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, IoGraphSpec, RecentFiles, ServerEvent } from "../shared/api.ts";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -50,14 +50,18 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/frame": (q) => viewer.frame(num(q, "num")),
     "/api/filter/check": (q) => viewer.checkFilter(q.get("filter") ?? ""),
     "/api/filter/complete": async (q) => ({ fields: await viewer.complete(q.get("field") ?? "") }),
-    "/api/files": (q) => listDir(q.get("dir") || defaultDir(viewer)),
+    "/api/files": (q) => listDir(q.get("dir") || defaultDir(viewer), q.get("kind") === "any"),
     "/api/recent": () => recentFiles(viewer.recent),
-    "/api/stats/phs": () => viewer.phs(),
-    "/api/stats/conv": (q) => viewer.conversations(convType(q)),
-    "/api/stats/endpt": (q) => viewer.endpoints(convType(q)),
+    "/api/stats/phs": (q) => viewer.phs(q.get("filter") ?? ""),
+    "/api/stats/conv": (q) => viewer.conversations(convType(q), q.get("filter") ?? ""),
+    "/api/stats/endpt": (q) => viewer.endpoints(convType(q), q.get("filter") ?? ""),
+    "/api/stats/expert": (q) => viewer.expert(q.get("filter") ?? ""),
+    "/api/stats/iograph": (q) => viewer.ioGraph(graphs(q.get("graphs")), num(q, "interval")),
+    "/api/frame-at": async (q) => ({ frame: await viewer.frameAt(num(q, "t")) }),
     "/api/follow": (q) => viewer.follow(q.get("proto") || "TCP", q.get("filter") ?? ""),
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
+    "/api/capture/activity": () => viewer.capture.activity(),
   };
 
   const ok = { ok: true };
@@ -69,6 +73,9 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/marks": (_q, b) => (viewer.mark(numbers(b.frames), String(b.note ?? ""), "user"), ok),
     "/api/marks/clear": (_q, b) => (viewer.clearMarks(b.frames ? numbers(b.frames) : undefined), ok),
     "/api/wireshark": (_q, b) => (viewer.openInWireshark(b.frame ?? null), ok),
+    "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
+    "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? String(b.keylog) : null), ok),
+    "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
     "/api/capture/start": async (_q, b) => (await viewer.capture.start(b as CaptureRequest), ok),
     "/api/capture/stop": () => (viewer.capture.stop(), ok),
   };
@@ -180,6 +187,26 @@ function numbers(value: unknown): number[] {
   return value.map(Number).filter(Number.isInteger);
 }
 
+function graphs(raw: string | null): IoGraphSpec[] {
+  let list: unknown;
+  try {
+    list = JSON.parse(raw ?? "");
+  } catch {
+    throw new HttpError(400, "graphs must be a JSON array");
+  }
+  if (!Array.isArray(list)) throw new HttpError(400, "graphs must be a JSON array");
+  return list.map((g) => ({ metric: String(g?.metric ?? "packets") as IoGraphSpec["metric"], filter: String(g?.filter ?? "") }));
+}
+
+function columnList(value: unknown): CustomColumn[] {
+  if (!Array.isArray(value)) throw new HttpError(400, "columns must be an array");
+  return value.map((c) => ({ field: String(c?.field ?? ""), title: String(c?.title ?? "") }));
+}
+
+function exportRequest(b: any): ExportRequest {
+  return { path: String(b.path ?? ""), which: b.which, range: b.range === undefined ? undefined : String(b.range), overwrite: !!b.overwrite };
+}
+
 /** Request URLs are client input: malformed ones must not throw out of a handler. */
 function parseUrl(raw: string | undefined): URL | null {
   try {
@@ -232,7 +259,7 @@ function defaultDir(viewer: Viewer): string {
   return homedir();
 }
 
-function listDir(dir: string): DirListing {
+function listDir(dir: string, anyFile = false): DirListing {
   const abs = resolve(dir);
   const st = statSync(abs, { throwIfNoEntry: false });
   if (!st?.isDirectory()) throw new HttpError(400, `not a directory: ${abs}`);
@@ -243,7 +270,7 @@ function listDir(dir: string): DirListing {
     const s = statSync(path, { throwIfNoEntry: false });
     if (!s) continue;
     if (s.isDirectory()) entries.push({ name: d.name, path, isDir: true, size: 0, mtime: s.mtimeMs });
-    else if (s.isFile() && CAPTURE_FILE.test(d.name)) entries.push({ name: d.name, path, isDir: false, size: s.size, mtime: s.mtimeMs });
+    else if (s.isFile() && (anyFile || CAPTURE_FILE.test(d.name))) entries.push({ name: d.name, path, isDir: false, size: s.size, mtime: s.mtimeMs });
   }
   entries.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
   const parent = dirname(abs);

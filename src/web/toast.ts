@@ -11,7 +11,12 @@ export function createToastHost(): HTMLElement {
   return host;
 }
 
-export function toast(level: "info" | "error", text: string): void {
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
+export function toast(level: "info" | "error", text: string, action?: ToastAction): void {
   if (!host) {
     console.log(`[${level}] ${text}`);
     return;
@@ -26,13 +31,23 @@ export function toast(level: "info" | "error", text: string): void {
     el.classList.add("out");
     window.setTimeout(() => el.remove(), 180);
   };
-  el.append(
-    h("span", { class: "toast-text" }, text),
-    h("button", { class: "toast-x", title: "Dismiss", attrs: { "aria-label": "Dismiss" }, onclick: remove }, "×"),
-  );
+  el.append(h("span", { class: "toast-text" }, text));
+  if (action) {
+    el.append(
+      h("button", {
+        class: "toast-action",
+        onclick: () => {
+          remove();
+          action.run();
+        },
+      }, action.label),
+    );
+  }
+  el.append(h("button", { class: "toast-x", title: "Dismiss", attrs: { "aria-label": "Dismiss" }, onclick: remove }, "×"));
   host.appendChild(el);
   while (host.childElementCount > MAX_TOASTS) host.firstElementChild?.remove();
-  window.setTimeout(remove, level === "error" ? 9000 : 4500);
+  // Toasts with an action stay longer so there is time to use it.
+  window.setTimeout(remove, action ? 12000 : level === "error" ? 9000 : 4500);
 }
 
 export function toastError(e: unknown, prefix?: string): void {

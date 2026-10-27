@@ -6,6 +6,7 @@ import { app, hooks } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import { showMenu } from "../menu.ts";
 import { copyText, fmtInt, h } from "../util.ts";
+import { scopeControl } from "./scope.ts";
 
 function pctCell(part: number, whole: number): HTMLTableCellElement {
   const pct = whole ? (100 * part) / whole : 0;
@@ -33,8 +34,8 @@ export function openPhsDialog(): void {
     tbody,
   );
   const msg = h("div", { class: "stat-msg" }, "Computing…");
-  d.body.append(h("div", { class: "stat-wrap" }, table, msg));
-  d.footerLeft.textContent = s.filter ? "All packets (display filter not applied)" : "All packets";
+  const scope = scopeControl(() => void load());
+  d.body.append(h("div", { class: "stat-bar" }, scope.el), h("div", { class: "stat-wrap" }, table, msg));
 
   let roots: PhsNode[] = [];
   const collapsed = new Set<PhsNode>();
@@ -116,17 +117,28 @@ export function openPhsDialog(): void {
   d.button("Close", () => d.close(), { primary: true });
   d.show();
 
-  get<PhsNode[]>("api/stats/phs")
-    .then((r) => {
+  let loadSeq = 0;
+  async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    d.footerLeft.textContent = scope.text();
+    msg.hidden = false;
+    msg.classList.remove("error");
+    msg.textContent = "Computing…";
+    try {
+      const r = await get<PhsNode[]>("api/stats/phs", { filter: scope.filter() });
+      if (seq !== loadSeq) return;
       roots = Array.isArray(r) ? r : [];
       totalFrames = roots.reduce((a, n) => a + n.frames, 0);
       totalBytes = roots.reduce((a, n) => a + n.bytes, 0);
       msg.hidden = roots.length > 0;
       msg.textContent = "No protocols";
-      render();
-    })
-    .catch((e: unknown) => {
+    } catch (e) {
+      if (seq !== loadSeq) return;
+      roots = [];
       msg.textContent = `Failed: ${errorText(e)}`;
       msg.classList.add("error");
-    });
+    }
+    render();
+  }
+  void load();
 }

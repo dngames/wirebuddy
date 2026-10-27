@@ -25,7 +25,7 @@ interface Pending {
  *
  * sharkd answers requests strictly in order, so requests can be pipelined; a
  * `load` therefore only affects requests sent after it. A crashed process is
- * respawned on the next call, with the last successfully loaded file restored.
+ * respawned on the next call, with preferences and the last loaded file restored.
  */
 export class Sharkd {
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -34,6 +34,7 @@ export class Sharkd {
   private pending = new Map<number, Pending>();
   private stderrTail = "";
   private lastLoad: Record<string, unknown> | undefined;
+  private readonly prefs = new Map<string, string>();
 
   constructor(
     private readonly bin = "sharkd",
@@ -104,7 +105,8 @@ export class Sharkd {
     let proc = this.proc;
     if (!proc) {
       proc = this.start();
-      // A respawned sharkd has no file loaded; restore the last one first
+      // A respawned sharkd starts with defaults; restore preferences and the last file first
+      for (const [name, value] of this.prefs) if (method !== "setconf" || params?.name !== name) this.call("setconf", { name, value }).catch(() => {});
       if (method !== "load" && this.lastLoad) this.call("load", this.lastLoad).catch(() => {});
     }
     const result = new Promise<T>((resolve, reject) => {
@@ -122,6 +124,13 @@ export class Sharkd {
       if (status.status === "OK" || status.err === -12) this.lastLoad = params;
       return r;
     });
+  }
+
+  /** Sets a preference now and after every respawn. */
+  async setPref(name: string, value: string): Promise<void> {
+    const r = await this.call<{ status?: string }>("setconf", { name, value });
+    if (r?.status && r.status !== "OK") throw new Error(`${name}: ${r.status}`);
+    this.prefs.set(name, value);
   }
 
   close(): void {

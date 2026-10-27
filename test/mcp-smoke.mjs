@@ -5,6 +5,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -74,8 +75,32 @@ try {
     assert.match(t, /cut at about 300 characters; 81329 payload bytes/);
   });
   await call("mark_frames", { frames: [21, 25], note: "404 request/response" }, (t) => assert.match(t, /2 marked in total/));
+  await call("query_packets", { filter: "http", fields: ["http.request.uri", "http.response.code"] }, (t) => {
+    assert.match(t, /^No\. \| http\.request\.uri \| http\.response\.code$/m);
+    assert.match(t, /^25 \| \/nothere \| 404$/m);
+  });
+  await call("set_columns", { columns: [{ field: "http.response.code" }] }, (t) => assert.match(t, /\| Status Code$/));
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /Custom columns: Status Code \(http\.response\.code\)/);
+    assert.match(t, /TLS decryption: off/);
+  });
+  await call("set_columns", { columns: [] }, (t) => assert.match(t, /Removed/));
+  await call("expert_info", { min_severity: "Note" }, (t) => {
+    assert.match(t, /^4 expert items in 2 groups/);
+    assert.match(t, /Note \/ Sequence \/ TCP \/ This frame initiates the connection closing: 2/);
+  });
+  await call("expert_info", { min_severity: "Error" }, (t) => assert.match(t, /No expert items/));
+  await call("io_graph", { filters: ["", "http"], interval_ms: 1 }, (t) => {
+    assert.match(t, /packets per 1 ms/);
+    assert.match(t, /"all packets": total 29/);
+    assert.match(t, /"http": total 4/);
+  });
+  const exportPath = join(dirname(fixture), `.mcp-export-${process.pid}.pcapng`);
+  await call("export_packets", { path: exportPath, filter: "tcp.stream eq 1" }, (t) => assert.match(t, /Wrote 12 packets/));
+  await call("export_packets", { path: exportPath, filter: "http" }, (t, r) => assert.ok(r.isError && /already exists/.test(t)));
+  rmSync(exportPath, { force: true });
   await call("clear_marks", {}, (t) => assert.match(t, /0 marks left/));
-  await call("list_interfaces", {}, (t) => assert.match(t, /^lo \(Loopback\) \[loopback\]/m));
+  await call("list_interfaces", {}, (t) => assert.match(t, /^lo \(Loopback\) \[loopback\]: 127\.0\.0\.1, ::1 — \d+ pkt\/s now/m));
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
 } finally {
   await client.close();

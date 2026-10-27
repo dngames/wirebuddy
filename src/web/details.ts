@@ -3,7 +3,7 @@
 import type { FrameDetail, TreeNode } from "../shared/api.ts";
 import * as act from "./actions.ts";
 import { bus, hooks } from "./app.ts";
-import { fieldInfoText, fieldValue, frameInfo, nodeLabel, sevClass, srcIndex, walk } from "./frame.ts";
+import { fieldInfoText, fieldName, fieldValue, frameInfo, nodeLabel, sevClass, srcIndex, walk } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
 import { bytesToHex, copyText, h, isMod } from "./util.ts";
 import { VList } from "./vlist.ts";
@@ -162,6 +162,17 @@ function needsParens(t: string): boolean {
   return /&&|\|\||\^\^|\b(and|or|xor|not)\b|^\s*!/.test(t);
 }
 
+/** Column title like Wireshark's: the field's display name, else its field name. */
+function columnTitle(n: TreeNode): string {
+  const name = fieldName(n).trim();
+  const t = name && name.length <= 40 && !name.includes(": ") ? name : (n.fn ?? name);
+  return t.length > 40 ? `${t.slice(0, 39)}…` : t;
+}
+
+function applyAsColumn(n: TreeNode): void {
+  if (n.fn) act.addCustomColumn(n.fn, columnTitle(n));
+}
+
 function nodeMenu(n: TreeNode, x: number, y: number): void {
   const f = n.f;
   const kids = hasKids(n);
@@ -192,6 +203,8 @@ function nodeMenu(n: TreeNode, x: number, y: number): void {
     { label: "Collapse Subtrees", shortcut: "Shift+Left", disabled: !kids, action: () => setSubtree(n, false) },
     { label: "Expand All", shortcut: "Ctrl+Right", action: expandAll },
     { label: "Collapse All", shortcut: "Ctrl+Left", action: collapseAll },
+    SEP,
+    { label: "Apply as Column", disabled: !n.fn, title: n.fn ? `Add a packet list column showing ${n.fn}` : undefined, action: () => applyAsColumn(n) },
     SEP,
     { label: "Apply as Filter", disabled: !f, sub: combos(true) },
     { label: "Prepare as Filter", disabled: !f, sub: combos(false) },

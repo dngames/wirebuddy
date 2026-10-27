@@ -1,7 +1,7 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
 // Generates its own ICMP traffic with ping. Usage: node test/live-smoke.mjs   (after npm run build)
-import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { spawn, execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -141,6 +141,56 @@ try {
       api("/api/capture/start", { iface: "lo", filter: "", autostop: { filesizeKB: 100 }, ring: { files: 2, durationSec: 2 } }),
       /cannot be combined/,
     );
+  });
+
+  await check("export with more selections than one editcap run allows", async () => {
+    const pinger = spawn("ping", ["-i", "0.005", "-c", "700", "127.0.0.1"], { stdio: "ignore" });
+    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 5 }, ring: null });
+    const s = await waitIdle(10000);
+    pinger.kill();
+    await sleep(1200);
+    const total = (await state()).totalFrames;
+    assert.ok(total >= 1100, `need >1000 frames, got ${total}`);
+    // every other frame: about 550 single-frame selections
+    const odd = Array.from({ length: Math.floor(total / 2) }, (_, i) => 2 * i + 1);
+    const out = join(captureDir, "odd.pcapng");
+    const r = await api("/api/export", { path: out, which: "range", range: odd.join(",") });
+    assert.equal(r.frames, odd.length);
+    const n = Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-c", out], { encoding: "utf8" }))[1]);
+    assert.equal(n, odd.length);
+    assert.equal(s.capture.error, null);
+  });
+
+  await check("TLS decryption with a key log file", async () => {
+    // Local HTTPS server with a throwaway certificate; curl writes its session keys
+    const dir = join(captureDir, "tls");
+    mkdirSync(dir);
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
+      "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem")], { stdio: "ignore" });
+    const serverPy = [
+      "import http.server, ssl, sys",
+      "s = http.server.HTTPServer(('127.0.0.1', 18443), http.server.SimpleHTTPRequestHandler)",
+      "c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain(sys.argv[1], sys.argv[2])",
+      "s.socket = c.wrap_socket(s.socket, server_side=True); s.serve_forever()",
+    ].join("\n");
+    const https = spawn("python3", ["-c", serverPy, join(dir, "cert.pem"), join(dir, "key.pem")], { cwd: dir, stdio: "ignore" });
+    try {
+      await sleep(700);
+      await api("/api/capture/start", { iface: "lo", filter: "tcp port 18443", autostop: { durationSec: 3 }, ring: null });
+      await sleep(800);
+      const keylog = join(dir, "keys.log");
+      execFileSync("curl", ["-sk", "--http1.1", "-o", "/dev/null", "https://127.0.0.1:18443/cert.pem"], { env: { ...process.env, SSLKEYLOGFILE: keylog } });
+      await waitIdle(8000);
+      await sleep(1200);
+      const http = () => api("/api/filter", { filter: "http" }).then(() => state()).then((s) => s.displayedFrames);
+      assert.equal(await http(), 0, "without keys the HTTP inside TLS stays hidden");
+      await api("/api/tls", { keylog });
+      assert.ok((await http()) >= 2, "with the key log the request and response are decrypted");
+      await api("/api/tls", { keylog: null });
+      await api("/api/filter", { filter: "" });
+    } finally {
+      https.kill();
+    }
   });
 
   await check("stop", async () => {

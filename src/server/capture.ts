@@ -1,8 +1,12 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CaptureInterface, CaptureRequest, CaptureState, FilterCheck } from "../shared/api.ts";
+import type { CaptureInterface, CaptureRequest, CaptureState, FilterCheck, InterfaceActivity } from "../shared/api.ts";
+
+const ACTIVITY_SAMPLES = 60;
+/** dumpcap -S keeps running this long after the last activity request. */
+const ACTIVITY_IDLE_MS = 10_000;
 
 function run(bin: string, args: string[], timeoutMs = 10000): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve) => {
@@ -10,6 +14,24 @@ function run(bin: string, args: string[], timeoutMs = 10000): Promise<{ stdout: 
       resolve({ stdout: String(stdout), stderr: String(stderr) }),
     );
   });
+}
+
+/** Interface names and indexes, to notice when interfaces come, go or are re-created. */
+function interfaceSignature(): string {
+  try {
+    return readdirSync("/sys/class/net")
+      .map((n) => {
+        try {
+          return `${n}:${readFileSync(`/sys/class/net/${n}/ifindex`, "utf8").trim()}`;
+        } catch {
+          return n;
+        }
+      })
+      .sort()
+      .join(",");
+  } catch {
+    return "";
+  }
 }
 
 function positiveInt(value: unknown, name: string): number | undefined {
@@ -30,6 +52,14 @@ export class Capture extends EventEmitter {
   private stopRequested = false;
   private killTimer: NodeJS.Timeout | null = null;
   private interfaceCache: { at: number; list: CaptureInterface[] } | null = null;
+  private statsProc: ChildProcess | null = null;
+  private statsIdle: NodeJS.Timeout | null = null;
+  private statsError: string | null = null;
+  private statsFailedAt = 0;
+  private statsSignature = "";
+  private statsCheckedAt = 0;
+  private readonly activityTotals = new Map<string, number>();
+  private readonly activityHistory = new Map<string, number[]>();
 
   constructor(
     dir: string,
@@ -225,6 +255,100 @@ export class Capture extends EventEmitter {
       if (ring.durationSec) args.push("-b", `duration:${ring.durationSec}`);
     }
     return { args, settings: { iface: req.iface, filter, autostop, ring } };
+  }
+
+  /**
+   * Packets per second per interface over the last minute. Keeps `dumpcap -S`
+   * running while it is asked for and stops it once nobody asks any more.
+   */
+  activity(): InterfaceActivity {
+    this.ensureStats();
+    return {
+      interval: 1,
+      ifaces: Object.fromEntries(this.activityHistory),
+      ...(this.statsError ? { error: this.statsError } : {}),
+    };
+  }
+
+  private ensureStats(): void {
+    if (this.statsIdle) clearTimeout(this.statsIdle);
+    this.statsIdle = setTimeout(() => this.stopActivity(), ACTIVITY_IDLE_MS);
+    this.statsIdle.unref();
+    // dumpcap -S opens its interfaces once; restart it when they change (added, removed, re-plugged)
+    if (this.statsProc && Date.now() - this.statsCheckedAt > 5000) {
+      this.statsCheckedAt = Date.now();
+      if (interfaceSignature() !== this.statsSignature) this.restartStats();
+    }
+    // A failing dumpcap is retried at most every 10 s
+    if (this.statsProc || Date.now() - this.statsFailedAt < ACTIVITY_IDLE_MS) return;
+    this.statsSignature = interfaceSignature();
+    this.statsCheckedAt = Date.now();
+    const proc = spawn(this.bin, ["-S", "-M"], { stdio: ["ignore", "pipe", "pipe"] });
+    this.statsProc = proc;
+    this.statsError = null;
+    let partial = "";
+    let errTail = "";
+    proc.stdout!.setEncoding("utf8");
+    proc.stdout!.on("data", (chunk: string) => {
+      if (this.statsProc !== proc) return;
+      const lines = (partial + chunk).split("\n");
+      partial = lines.pop() ?? "";
+      for (const line of lines) this.onStatsLine(line);
+    });
+    proc.stderr!.setEncoding("utf8");
+    proc.stderr!.on("data", (chunk: string) => {
+      errTail = (errTail + chunk).slice(-500);
+    });
+    const failed = (message: string) => {
+      if (this.statsProc !== proc) return;
+      this.statsProc = null;
+      this.statsError = message;
+      this.statsFailedAt = Date.now();
+      // A respawned dumpcap counts from its own start; old values would show as current
+      this.activityTotals.clear();
+      this.activityHistory.clear();
+    };
+    proc.on("error", (err) => failed(err.message));
+    proc.on("exit", (code) => failed(errTail.trim().split("\n").pop()?.replace(/^dumpcap:\s*/, "") || `dumpcap -S exited with code ${code}`));
+  }
+
+  /** One `name<TAB>received<TAB>dropped` line; counters are cumulative. */
+  private onStatsLine(line: string): void {
+    const [name, received] = line.split("\t");
+    const total = Number(received);
+    if (!name || !Number.isFinite(total)) return;
+    const last = this.activityTotals.get(name);
+    this.activityTotals.set(name, total);
+    if (last === undefined) return;
+    let delta = total - last;
+    // pcap counters are 32 bits; a drop from below 2^31 is a reset, not a wrap
+    if (delta < 0) {
+      if (last < 2 ** 31) return;
+      delta += 2 ** 32;
+    }
+    const history = this.activityHistory.get(name) ?? [];
+    history.push(delta);
+    if (history.length > ACTIVITY_SAMPLES) history.shift();
+    this.activityHistory.set(name, history);
+  }
+
+  /** Replaces dumpcap -S, keeping the history; the new process's first block is only a baseline. */
+  private restartStats(): void {
+    const proc = this.statsProc;
+    this.statsProc = null;
+    proc?.kill();
+    this.activityTotals.clear();
+    this.statsFailedAt = 0;
+  }
+
+  stopActivity(): void {
+    if (this.statsIdle) clearTimeout(this.statsIdle);
+    this.statsIdle = null;
+    const proc = this.statsProc;
+    this.statsProc = null;
+    proc?.kill();
+    this.activityTotals.clear();
+    this.activityHistory.clear();
   }
 
   stop(): void {

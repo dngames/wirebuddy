@@ -43,6 +43,17 @@ const ICONS = {
   sparkle: '<path d="M8 1c.5 3.6 2.4 5.5 6 6-3.6.5-5.5 2.4-6 6-.5-3.6-2.4-5.5-6-6 3.6-.5 5.5-2.4 6-6z" fill="currentColor"/>',
   x: `<path d="M4 4l8 8M12 4l-8 8" ${S} stroke-width="1.5"/>`,
   iface: `<rect x="1.5" y="4.5" width="13" height="7" rx="1" ${S}/><path d="M4 7h1M6.5 7h1M9 7h1M11.5 7h1" ${S}/>`,
+  export:
+    `<path d="M3.5 6.5v8h9v-8" ${S}/><path d="M8 10.5V1.8M5 4.6 8 1.6l3 3" ${S}/>`,
+  lock:
+    '<rect x="3" y="7" width="10" height="7.5" rx="1.3" fill="#d9a520" stroke="#9a7212" stroke-width="1"/>' +
+    `<path d="M5.3 7V5.2a2.7 2.7 0 0 1 5.4 0V7" ${S}/>`,
+  graph:
+    `<path d="M1.5 1.8v12.7h13" ${S}/>` +
+    '<path d="M3.5 11.5 6.5 7l2.5 2.5 4.5-6" fill="none" stroke="#2e6fd8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
+  expert:
+    '<path d="M8 1.6 15 14H1z" fill="#f7d774" stroke="#a88400" stroke-width="1" stroke-linejoin="round"/>' +
+    '<path d="M8 6v4.2M8 11.8v.4" stroke="#3a2e00" stroke-width="1.5" stroke-linecap="round"/>',
 } as const;
 
 export type IconName = keyof typeof ICONS;

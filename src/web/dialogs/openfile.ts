@@ -1,4 +1,4 @@
-/** "Open Capture File" dialog with a server-side directory browser. */
+/** Server-side file picker: "Open Capture File" and other path choosers. */
 
 import type { DirEntry, DirListing, RecentFiles } from "../../shared/api.ts";
 import { errorText, get } from "../api.ts";
@@ -7,19 +7,35 @@ import { Dialog } from "../dialog.ts";
 import { icon } from "../icons.ts";
 import { baseName, dirName, fmtDateTime, fmtSize, h, load, save } from "../util.ts";
 
-let current: Dialog | null = null;
+export interface PickerOptions {
+  title: string;
+  /** Label of the accept button, e.g. "Open", "Choose", "Save". */
+  accept: string;
+  /** "capture" lists capture files only, "any" every file. */
+  kind: "capture" | "any";
+  /** Storage key for the last visited directory. */
+  storeKey: string;
+  /** Pre-filled path; its directory is opened first. */
+  initialPath?: string;
+  /** Show the recent captures column. */
+  showRecent?: boolean;
+  /** Receives the chosen path; returns an error to keep the dialog open. */
+  onPick: (path: string) => Promise<string | null> | string | null;
+}
 
-export function openFileDialog(): void {
-  if (current?.isOpen) return;
-  const d = new Dialog("Open Capture File", { width: 780, height: 520, cls: "dlg-open" });
-  current = d;
+const openPickers = new Set<string>();
+
+export function openFilePicker(opts: PickerOptions): void {
+  if (openPickers.has(opts.title)) return;
+  openPickers.add(opts.title);
+  const d = new Dialog(opts.title, { width: 780, height: 520, cls: "dlg-open" });
 
   const dirIn = h("input", { class: "of-dir", type: "text", spellcheck: false, autocomplete: "off", attrs: { "aria-label": "Look in" } });
   const upBtn = h("button", { class: "tb-mini", title: "Parent directory (Backspace)", attrs: { "aria-label": "Parent directory" } }, icon("up"));
   const reloadBtn = h("button", { class: "tb-mini", title: "Reload", attrs: { "aria-label": "Reload" } }, icon("refresh"));
   const list = h("div", { class: "of-list", tabIndex: 0, role: "listbox" });
   const recent = h("div", { class: "of-recent" }, h("div", { class: "of-side-title" }, "Recent"));
-  const nameIn = h("input", { class: "of-name", type: "text", spellcheck: false, autocomplete: "off", attrs: { "aria-label": "File name" } });
+  const nameIn = h("input", { class: "of-name", type: "text", spellcheck: false, autocomplete: "off", value: opts.initialPath ?? "", attrs: { "aria-label": "File name" } });
   const err = h("div", { class: "of-err", hidden: true });
 
   d.body.append(
@@ -27,13 +43,13 @@ export function openFileDialog(): void {
     h(
       "div",
       { class: "of-main" },
-      recent,
+      opts.showRecent ? recent : null,
       h("div", { class: "of-files" }, h("div", { class: "of-head" }, h("span", { class: "of-c-name" }, "Name"), h("span", { class: "of-c-size" }, "Size"), h("span", { class: "of-c-date" }, "Modified")), list),
     ),
     h("div", { class: "of-bottom" }, h("label", { class: "of-lbl" }, "File name:"), nameIn),
     err,
   );
-  const openBtn = d.button("Open", () => void doOpen(), { primary: true });
+  const acceptBtn = d.button(opts.accept, () => void doAccept(), { primary: true });
   d.button("Cancel", () => d.close());
 
   let listing: DirListing | null = null;
@@ -59,7 +75,7 @@ export function openFileDialog(): void {
     const r = rows[k];
     if (!r) return;
     if (r.entry.isDir) void nav(r.entry.path);
-    else void doOpen(r.entry.path);
+    else void doAccept(r.entry.path);
   };
 
   const render = (): void => {
@@ -83,17 +99,17 @@ export function openFileDialog(): void {
       rows.push({ el, entry });
       list.appendChild(el);
     });
-    if (!listing.entries.length) list.appendChild(h("div", { class: "of-empty" }, "No capture files in this directory"));
+    if (!listing.entries.length) list.appendChild(h("div", { class: "of-empty" }, opts.kind === "any" ? "This directory is empty" : "No capture files in this directory"));
   };
 
   const nav = async (dir?: string, fallback = false): Promise<void> => {
     showErr(null);
     list.classList.add("loading");
     try {
-      const l = await get<DirListing>("api/files", dir ? { dir } : {});
+      const l = await get<DirListing>("api/files", { dir, kind: opts.kind });
       listing = l;
       dirIn.value = l.dir;
-      save("opendir", l.dir);
+      save(opts.storeKey, l.dir);
       render();
     } catch (e) {
       if (fallback) {
@@ -106,7 +122,7 @@ export function openFileDialog(): void {
     }
   };
 
-  const doOpen = async (path?: string): Promise<void> => {
+  const doAccept = async (path?: string): Promise<void> => {
     let p = (path ?? nameIn.value).trim();
     if (!p) {
       if (selIdx >= 0) activate(selIdx);
@@ -119,11 +135,16 @@ export function openFileDialog(): void {
       await nav(dirEntry ? dirEntry.path : p);
       return;
     }
-    openBtn.disabled = true;
+    acceptBtn.disabled = true;
     showErr(null);
-    const e = await act.openFile(p);
-    openBtn.disabled = false;
-    if (e) showErr(`Can't open ${baseName(p)}: ${e}`);
+    let e: string | null;
+    try {
+      e = await opts.onPick(p);
+    } catch (x) {
+      e = errorText(x);
+    }
+    acceptBtn.disabled = false;
+    if (e) showErr(e);
     else d.close();
   };
 
@@ -150,16 +171,17 @@ export function openFileDialog(): void {
   reloadBtn.addEventListener("click", () => void nav(listing?.dir));
   d.defaultAction = () => {
     if (document.activeElement === dirIn) return;
-    void doOpen();
+    void doAccept();
   };
   d.onClose = () => {
-    current = null;
+    openPickers.delete(opts.title);
   };
 
   d.show(nameIn);
-  const lastDir = load<string | null>("opendir", null);
-  void nav(lastDir ?? undefined, !!lastDir);
+  const startDir = opts.initialPath ? dirName(opts.initialPath) : load<string | null>(opts.storeKey, null);
+  void nav(startDir || undefined, !!startDir);
 
+  if (!opts.showRecent) return;
   void get<RecentFiles>("api/recent")
     .then((r) => {
       const files = r.files ?? [];
@@ -176,9 +198,23 @@ export function openFileDialog(): void {
           recent.querySelectorAll(".sel").forEach((x) => x.classList.remove("sel"));
           el.classList.add("sel");
         });
-        el.addEventListener("dblclick", () => void doOpen(f.path));
+        el.addEventListener("dblclick", () => void doAccept(f.path));
         recent.appendChild(el);
       }
     })
     .catch(() => recent.append(h("div", { class: "of-empty" }, "Unavailable")));
+}
+
+export function openFileDialog(): void {
+  openFilePicker({
+    title: "Open Capture File",
+    accept: "Open",
+    kind: "capture",
+    storeKey: "opendir",
+    showRecent: true,
+    onPick: async (p) => {
+      const e = await act.openFile(p);
+      return e ? `Can't open ${baseName(p)}: ${e}` : null;
+    },
+  });
 }
