@@ -8,38 +8,68 @@
   <br><sub>50-second demo · <a href="docs/demo.mp4">MP4 version</a></sub>
 </p>
 
-A lightweight, Wireshark-style packet viewer that runs in a browser tab — built to sit next to
-an AI chat (e.g. the Claude Code desktop app's browser pane) so you and the agent look at the
-same capture, filter, selected packet and marks.
+**You and your AI agent, looking at the same packets.**
 
-- **Packet list / details / bytes** like Wireshark, with its menu bar, main toolbar and keyboard
-  shortcuts: coloring rules, display filter bar with live validation and field autocompletion,
-  linked tree ↔ hex highlighting, custom columns ("Apply as Column"), Find Packet (display
-  filter, string or hex), packet history, zoom.
-- **Follow Stream** like Wireshark's window: TCP, UDP, TLS, HTTP and more; the packet list
-  shows the stream while it is open; step through streams, show data as ASCII, C Arrays, Hex
-  Dump, UTF-8 or Raw, find text, filter the stream out, save it.
-- **Select several packets** with Ctrl+click and Shift+click to mark, copy or export them — the
-  agent sees the selection too, so you can ask "what's wrong with these packets?".
+WireBuddy is a Wireshark-style packet viewer in a browser tab, built to sit next to an AI chat
+(for example in the Claude Code desktop app's browser pane). The agent works the viewer over MCP
+while you watch and click in the same view, and when a capture holds something Wireshark can't
+decode or a packet list can't show, the agent extends the viewer itself.
+
+- **One view for both of you.** The agent's filters, selected packet, marks and columns show up
+  in your view as it works, each with a notice; what you do there (open a file, apply a filter,
+  start a capture) reaches the agent with its next call, and it sees which packets you selected.
+  You check its findings in the packets instead of taking a summary on trust.
+- **The agent extends the viewer.** Traffic Wireshark doesn't know, such as a company's sensor
+  stream or a game's protocol, shows up as "Data". The agent writes a Lua dissector for it from
+  the bytes or a spec, tests it against the open capture and reloads the view, which then
+  decodes the new protocol, with fields you can filter on and show as columns. When rows aren't
+  enough, it writes a **panel**: a sandboxed page next to the packets that plots, plays or draws
+  what's in the capture (images, video, point clouds, a field over time).
+- **Wireshark's own decoding.** Everything is dissected by Wireshark's engine (`sharkd`), with
+  your plugins and preferences (and a profile you choose), so results match Wireshark; **Open in
+  Wireshark** jumps to the real GUI at the same file, filter and packet.
+- **Live captures the agent can run.** The agent starts and stops captures with `dumpcap` and
+  reads them as they grow; so can you, with a Capture Options dialog like Wireshark's.
+
+The viewer itself works like Wireshark:
+
+- **Packet list, details and bytes** with Wireshark's menu bar, toolbar and keyboard shortcuts:
+  coloring rules, a display filter bar with live validation and field autocompletion, linked tree
+  and hex highlighting, custom columns ("Apply as Column"), Find Packet, packet history, zoom.
+- **Follow Stream** like Wireshark's window (TCP, UDP, TLS, HTTP and more), and **several
+  packets selected** with Ctrl+click and Shift+click to mark, copy or export them; the agent sees
+  the selection too, so you can ask "what's wrong with these packets?".
 - **Statistics:** Expert Information, I/O Graph, protocol hierarchy, conversations and
   endpoints, optionally limited to the display filter.
 - **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
   (displayed, marked, selected or a range) to a new pcapng/pcap.
-- **Live capture** with `dumpcap` and Wireshark's Capture Options dialog: interfaces with live
-  traffic sparklines (also on the start page), promiscuous mode, a capture filter checked as you
-  type, new files automatically, a ring buffer and stop conditions. The view updates about once a
-  second.
-- **Open in Wireshark** jumps to the real GUI with the same file, filter and packet.
-- **MCP server** so an agent can start and stop captures, read the capture, apply filters,
-  select and mark packets, and follow streams.
-- **Extensions:** when traffic shows up as undecoded "Data", the agent can write a Lua dissector
-  for it, test it on the open capture and reload the view, which then decodes the new protocol
-  with fields you can filter on.
-
-All protocol decoding is done by Wireshark's own engine (`sharkd`), so dissection is identical
-to Wireshark.
+- **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
+  checked as you type, new files automatically, a ring buffer and stop conditions; the view
+  updates about once a second.
 
 ![WireBuddy screenshot: a reassembled HTTP response, with frames marked by the agent](docs/screenshot.png)
+
+## How it compares
+
+Several MCP servers give an agent packet data through Wireshark's command-line tools, for example
+[Wireshark MCP](https://github.com/bx33661/Wireshark-MCP) and
+[WireMCP](https://github.com/0xKoda/WireMCP). They are the better fit when the agent works on its
+own: they run wherever `tshark` runs (macOS, Windows and Linux, also headless on a server),
+Wireshark MCP installs and registers itself with one pip command, they capture live traffic too,
+and they bring ready-made analyses WireBuddy doesn't have, such as security and anomaly checks,
+threat-intelligence lookups, credential extraction and capture indexes.
+
+WireBuddy is for working on a capture together with the agent:
+
+| | tshark-based MCP servers | WireBuddy |
+|---|---|---|
+| What you see | the agent's answer, in Wireshark MCP with frame references and `tshark` commands to re-check it | the packets, with the agent's filters, marks and selected packet in your view |
+| Protocols Wireshark doesn't decode | stay "Data" unless you install a dissector yourself (Wireshark MCP offers Decode As for protocols Wireshark has) | Lua dissectors the agent writes, tests and loads into the view |
+| Beyond packet rows | text and JSON for the agent | panels the agent writes: plots, images, video, point clouds |
+| Ready-made analyses | many, from statistics to threat intelligence | Wireshark's statistics and expert info |
+| Where it runs | anywhere `tshark` runs, headless too | Linux with a browser, Wireshark 4.6 and Node.js 22 (macOS and Windows untested; extensions and panels need Linux) |
+
+(Compared with what those projects describe in their READMEs, October 2026.)
 
 ## Requirements
 
