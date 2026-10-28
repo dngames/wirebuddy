@@ -141,7 +141,8 @@ function sync(s: ViewState): void {
 
 function open(p: PanelState): void {
   const geo = load<{ w: number; h: number } | null>(`panel:${p.name}`, null);
-  const dialog = new Dialog(p.title, { width: geo?.w ?? p.size[0], height: geo?.h ?? p.size[1], cls: "dlg-panel", modal: false });
+  // 0 or none: the panel's own size
+  const dialog = new Dialog(p.title, { width: geo?.w || p.size[0], height: geo?.h || p.size[1], cls: "dlg-panel", modal: false });
   const footer = h("span", { class: "pn-status" });
   dialog.footerLeft.append(footer);
   const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, footer, maximized: false, pointerIn: 0 };
@@ -154,8 +155,7 @@ function open(p: PanelState): void {
   dialog.button("Close", () => dialog.close(), { primary: true });
   dialog.onClose = () => {
     stopWatch(w);
-    const r = dialog.win.getBoundingClientRect();
-    if (!w.maximized) save(`panel:${p.name}`, { w: Math.round(r.width), h: Math.round(r.height) });
+    if (!w.maximized && dialog.closedSize) save(`panel:${p.name}`, dialog.closedSize);
     // Closed here (Close, Esc): the server forgets it too
     if (wins.get(p.name) === w) {
       wins.delete(p.name);

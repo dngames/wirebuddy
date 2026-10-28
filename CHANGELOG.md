@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 - Big live captures list new packets within about a second, provisionally until the next full read
 - Example investigation of a CT archive that loses thin slices, `examples/investigations/ct-archive`
+- Panels reopen at the size they had when closed, not at the smallest size
 
 ## [0.9.0] - 2026-10-27
 

@@ -206,6 +206,23 @@ try {
     });
     await click(...center(await box(menuItem(label))));
   };
+
+  await check("browser: a panel reopens at the size it had when it closed", async () => {
+    const size = async () => {
+      const r = await box("document.querySelector('.dlg-panel')");
+      return r && [Math.round(r.width), Math.round(r.height)];
+    };
+    // As the user resized it, not its default
+    await evaluate("Object.assign(document.querySelector('.dlg-panel').style, { width: '520px', height: '310px' })");
+    const before = await size();
+    assert.deepEqual(before, [520, 310]);
+    await call("panel", { action: "close", name: "clicker" });
+    await until("the panel to close", () => evaluate("!document.querySelector('.panel-frame')"));
+    await call("panel", { action: "open", name: "clicker", wait_ms: 10_000 });
+    await until("the panel", size);
+    assert.deepEqual(await size(), before);
+  });
+
   // A failed check must not leave its dialog over the next one
   const closeDialog = async () => {
     if (await evaluate("!!document.querySelector('.dlg-ask, .dlg-export')")) await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });

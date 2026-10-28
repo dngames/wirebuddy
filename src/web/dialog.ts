@@ -35,6 +35,8 @@ export class Dialog {
   /** Runs on Enter in a single-line input inside the dialog. */
   defaultAction: (() => void) | null = null;
   onClose: (() => void) | null = null;
+  /** The window's size as it closed, for onClose: by then it is gone from the page. */
+  closedSize: { w: number; h: number } | null = null;
   readonly modal: boolean;
   private closed = false;
   /** Focused element when the dialog opened. */
@@ -107,6 +109,8 @@ export class Dialog {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    const r = this.win.getBoundingClientRect();
+    this.closedSize = { w: Math.round(r.width), h: Math.round(r.height) };
     this.overlay.remove();
     const i = open.indexOf(this);
     if (i >= 0) open.splice(i, 1);
