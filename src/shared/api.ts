@@ -131,7 +131,9 @@ export interface ViewState {
   /**
    * Generation since which row indices show the same frames, provisional rows
    * included. It changes when the displayed list is rebuilt (file, filter, a
-   * re-read that is not just a live capture growing), not when it only grows.
+   * re-read that is not just a live capture growing, provisional matches of
+   * the display filter that a later check changed, as packets that came since
+   * tell more), not when it only grows.
    */
   rowsSince: number;
   /** Frames the agent (or the user) marked, keyed by frame number. */
@@ -194,7 +196,7 @@ export interface ProvisionalTail {
   displayed: number;
   /** Of `frames`, the newest ones the display filter wasn't checked against yet. */
   unfiltered: number;
-  /** Why newer packets wait for a full read with this display filter (it uses stream indices or frame numbers), else null. */
+  /** Why newer packets wait for a full read with this display filter (it uses stream indices, TCP conversation completeness or frame numbers), else null. */
   held: string | null;
   /** How long a full read of the file takes now, in ms: provisional packets turn exact with the next one. */
   readMs: number;

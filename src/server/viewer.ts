@@ -878,10 +878,12 @@ export class Viewer extends EventEmitter {
     this.tailFiltering = true;
     try {
       for (let more = true; more && this.tail === tail; ) {
+        const revision = tail.revision;
         this.filterAgain = false;
         more = (await tail.filterPass()) || this.filterAgain;
         this.tailWorked(tail);
-        this.publishTail();
+        if (tail.revision !== revision && this.listedTail === tail) this.tailRevised();
+        else this.publishTail();
       }
     } catch (err) {
       if (!(err instanceof Superseded)) this.tailFailed(tail, err as Error);
@@ -904,6 +906,14 @@ export class Viewer extends EventEmitter {
   private exactAfter(): ProvisionalTail["exactAfter"] {
     if (this.capture.running) return this.paused ? "stop" : "read";
     return this.readStartedAt || this.finalRead ? "reading" : "reload";
+  }
+
+  /** Provisional matches listed before changed: the list's rows are read again, the selection stays on its packet. */
+  private tailRevised(): void {
+    const generation = this.state.generation + 1;
+    this.state = { ...this.state, tail: this.tailState(), generation, rowsSince: generation };
+    const selectedIndex = this.indexOf(this.state.selected);
+    this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
   }
 
   /** Publishes the tail as it is now; the list's generation moves when its rows grew. */

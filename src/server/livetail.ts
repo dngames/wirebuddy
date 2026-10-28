@@ -8,12 +8,13 @@
  * more than CHUNK_BYTES. A chunk's slice holds the chunk, the CONTEXT frames
  * before and after it (later packets complete reassembled PDUs), and what
  * FlowIndex finds the chunk's flows need from further away: frame 1 (the time
- * reference), their first packets, their messages under way before the slice
- * and their data under way after it. Every part has a byte budget too, so a
- * slice takes about 64 MiB at most whatever the packet sizes. A chunk's rows
- * always come from a slice of its own, so they read the same every time once
- * nothing that comes later can change them. sharkd numbers a slice's frames
- * from 1: rows and details are renumbered to the file's frame numbers.
+ * reference), their first packets, their messages under way before the slice,
+ * their data under way after it and the answers they still owe. Every part
+ * has a byte budget too, so a slice takes about 64 MiB at most whatever the
+ * packet sizes. A chunk's rows always come from a slice of its own, so they
+ * read the same every time once nothing that comes later can change them.
+ * sharkd numbers a slice's frames from 1: rows and details are renumbered to
+ * the file's frame numbers.
  */
 
 import { createHash } from "node:crypto";
@@ -42,16 +43,39 @@ const MAX_CACHED_ROWS = 100_000;
 const READ_BATCH = 500;
 /** Slices worked out, kept by chunk. */
 const MAX_SLICES = 16;
+/** Chunks whose slice wasn't final when checked against the filter that a pass looks at again. */
+const UNSETTLED_LOOKS = 2;
 /** Folders of slices start with this, then the machine's tag (see machineTag) and the server's process id. */
 const DIR_PREFIX = ".wirebuddy-slices-";
 /** sharkd's ftype of frame-number fields (FT_FRAMENUM). */
 export const FT_FRAMENUM = 35;
-/** Fields counted over what sharkd read (stream indices): a slice counts them differently. */
-const STREAM_NUMBERED = /(^|\.)stream(\.|$)|^sctp\.assoc_index$|^quic\.connection\.number$/;
+/**
+ * Fields counted over all sharkd read of a conversation (stream and
+ * conversation indices, TCP's conversation completeness): a slice counts them
+ * differently. Not the fields of a protocol's own streams (http2.stream,
+ * quic.stream.offset).
+ */
+const STREAM_NUMBERED = /^(?:eth|ip|ipv6|ilnp|tcp|udp|dccp|mptcp|tls|dtls|bt-utp|wg|mp2t|usbcom\.data|irdma\.ep)\.stream(\.|$)|^sctp\.assoc_index$|^quic\.connection\.number$|^dect_nr\.conv_index$|^tcp\.completeness(\.|$)/;
 /** Fields of frame numbers and displayed frames that filters on slices get wrong. */
 const FRAME_FIELDS = /^frame\.(number|time_delta_displayed|ref_time)$/;
-/** Frame numbers dissectors put into Info, after the words before them. */
-const INFO_FRAMES = /\b((?:reply|request|call|response) in|response to|reassembled in|reas:|duplicate of|retransmission of|continuation to)(:? ?(?:#|packet |frame )?)(\d+)/gi;
+/** Frame numbers dissectors put into Info, in the forms they write them (text a packet carries is left alone). */
+const INFO_FRAMES = [
+  /([([](?:reply|request) in )(\d+)(?=[)\]])/g,
+  /(\((?:Call|Reply) In )(\d+)(?=\))/g,
+  /(\[response to )(\d+)(?=\])/g,
+  /(\[TCP PDU reassembled in )(\d+)(?=\])/g,
+  /(\b[Rr]eassembled in #)(\d+)\b/g,
+  /(\[MTP2 Reassembled in: )(\d+)(?=\])/g,
+  /(\([^()]*\breassembled in packet )(\d+)(?=\))/g,
+  /(\[Reas: #|\breas: #)(\d+)(?=\])/g,
+  /(\[RPC (?:retransmission|duplicate) of #)(\d+)(?=\])/g,
+  /(\[Continuation to #)(\d+)(?=\])/g,
+  /(\[(?:TCP )?Dup ACK )(\d+)(?=#\d+\])/g,
+];
+/** Frame numbers in expert info texts: "Original request in frame 12", "(frame 12)", "a retransmission of frame 12". */
+const EXPERT_FRAMES = /(\b(?:in|of|to|from|at|using) frame:? |\(frame:? |\bin packet:? )(\d+)\b/g;
+/** Longest label sharkd shows: lists of frames that would make it longer stop before. */
+const MAX_LABEL = 239;
 
 /** The list changed since rows were asked for, or the tail closed: they are asked for again. */
 export class Superseded extends Error {}
@@ -130,17 +154,20 @@ export function renumberRow(row: PacketRow, s: Slice, n: Numbering, bytes?: (fra
  * retransmission of #12]", "[TCP Dup ACK 12#1]" and the like.
  */
 export function renumberInfo(info: string, map: (frame: number) => number): string {
-  return info
-    .replace(INFO_FRAMES, (_, words: string, sep: string, d: string) => words + sep + map(Number(d)))
-    .replace(/(Dup ACK )(\d+)(#)/g, (_, p: string, d: string, h: string) => p + map(Number(d)) + h);
+  for (const re of INFO_FRAMES) info = info.replace(re, (_, words: string, d: string) => words + map(Number(d)));
+  return info;
 }
 
-/** Renumbers a details tree read from slice `s`; fields numbered within the slice lose their value. */
-export function renumberTree(nodes: TreeNode[], s: Slice): TreeNode[] {
+/**
+ * Renumbers a details tree read from slice `s`; fields counted within the
+ * slice lose their value. `expert`: the nodes are an expert info's.
+ */
+export function renumberTree(nodes: TreeNode[], s: Slice, expert = false): TreeNode[] {
   const g = (n: number): number => toGlobal(s, n);
   const word = (text: string, from: number, to: number): string => text.replace(new RegExp(`\\b${from}\\b`), String(to));
   return nodes.map((n) => {
     const out: TreeNode = { ...n };
+    const inExpert = expert || n.fn === "_ws.expert";
     if (n.t === "framenum" && n.fnum) {
       out.fnum = g(n.fnum);
       out.l = word(n.l, n.fnum, out.fnum);
@@ -150,20 +177,27 @@ export function renumberTree(nodes: TreeNode[], s: Slice): TreeNode[] {
       out.l = n.l.replace(/\d+$/, (d) => String(g(Number(d))));
       if (n.f) out.f = n.f.replace(/\d+$/, (d) => String(g(Number(d))));
     } else if (n.fn && STREAM_NUMBERED.test(n.fn)) {
-      out.l = n.l.replace(/:.*$/, ": unknown until read in full");
+      // Its parts (TCP's completeness flags) are just as unknown
+      out.l = n.l.replace(/:.*?(\]?)$/, ": unknown until read in full$1");
       delete out.f;
+      delete out.n;
+      return out;
+    } else if (inExpert) out.l = n.l.replace(EXPERT_FRAMES, (_, words: string, d: string) => words + g(Number(d)));
+    // Lists of the frames a PDU was reassembled from, "#12(1448), #14(552)", as long as the file's numbers let them be
+    if (/#\d+\(/.test(out.l)) {
+      out.l = out.l.replace(/#(\d+)\(/g, (_, d: string) => `#${g(Number(d))}(`);
+      while (out.l.length > MAX_LABEL && /, #\d+\(\d+\)(?=[^#]*$)/.test(out.l)) out.l = out.l.replace(/, #\d+\(\d+\)(?=[^#]*$)/, "");
     }
-    // Lists of the frames a PDU was reassembled from: "#12(1448), #14(552)"
-    out.l = out.l.replace(/#(\d+)\(/g, (_, d: string) => `#${g(Number(d))}(`);
-    if (n.n) out.n = renumberTree(n.n, s);
+    if (n.n) out.n = renumberTree(n.n, s, inExpert);
     return out;
   });
 }
 
 /**
  * Why a display filter can't be checked on slices, or null: it uses a field
- * numbered within what sharkd read (stream indices, frame numbers), or a
- * field reference or macro ("$"). `type` gives a field's sharkd ftype.
+ * counted over what sharkd read (stream indices, TCP's conversation
+ * completeness, frame numbers), or a field reference or macro ("$"). `type`
+ * gives a field's sharkd ftype.
  */
 export async function heldReason(filter: string, type: (field: string) => Promise<number | null>): Promise<string | null> {
   if (filter.includes("$")) return "the filter uses a field reference or macro";
@@ -245,6 +279,10 @@ export class LiveTail {
   private checked = 0;
   /** When the newest chunk may be checked again. */
   private growingAt = 0;
+  /** Chunks checked before their slice was final, by first frame: the slice checked, the count of frames then and when last looked at. */
+  private readonly unsettled = new Map<number, { key: string; checked: number; looked: number }>();
+  /** Changes when a check changed provisional matches listed before. */
+  revision = 0;
   /** Changes with the filter and on close: passes started before are dropped. */
   private seq = 0;
   private folder: string | null = null;
@@ -285,8 +323,8 @@ export class LiveTail {
     const index = async (): Promise<void> => {
       await this.store.update();
       if (this.store.count > this.flows.count) {
-        await this.store.readHeads(this.flows.count + 1, this.store.count, HEAD_BYTES, (frame, _time, len, link, data) => {
-          this.flows.feed(frame, link, data);
+        await this.store.readHeads(this.flows.count + 1, this.store.count, HEAD_BYTES, (frame, time, len, link, data) => {
+          this.flows.feed(frame, link, data, time);
           this.addBytes(frame, len);
         });
         this.cut();
@@ -333,6 +371,7 @@ export class LiveTail {
     this.matches = [];
     this.checked = this.base;
     this.growingAt = 0;
+    this.unsettled.clear();
     this.seq++;
   }
 
@@ -491,16 +530,19 @@ export class LiveTail {
 
   /** The filter's provisional matches in lo..hi. */
   private matchesIn(lo: number, hi: number): number[] {
+    return this.matches.slice(this.matchAt(lo), this.matchAt(hi + 1));
+  }
+
+  /** Where the first of the filter's provisional matches from `frame` on is. */
+  private matchAt(frame: number): number {
     let a = 0;
     let b = this.matches.length;
     while (a < b) {
       const mid = (a + b) >> 1;
-      if (this.matches[mid] < lo) a = mid + 1;
+      if (this.matches[mid] < frame) a = mid + 1;
       else b = mid;
     }
-    const out: number[] = [];
-    for (let i = a; i < this.matches.length && this.matches[i] <= hi; i++) out.push(this.matches[i]);
-    return out;
+    return a;
   }
 
   /** Keeps a row of a final chunk; the chunks used longest ago go first. */
@@ -529,34 +571,76 @@ export class LiveTail {
   }
 
   /**
-   * Checks the next chunk of newer packets against the filter. True when it
-   * was a complete chunk and more wait: the newest chunk, still growing, is
-   * checked again once more packets came, and after a pause as long as the
-   * last check took (sharkd reads the whole slice for each).
+   * Checks the next chunk of newer packets against the filter, else again
+   * one whose slice wasn't final then and changed since (a reply that came
+   * may change its matches): once it is final, or else once the chunk is
+   * twice as old as then (CONTEXT packets at least). True when more wait:
+   * the newest chunk, still growing, is checked again once more packets
+   * came, and after a pause as long as the last check took (sharkd reads the
+   * whole slice for each).
    */
   async filterPass(): Promise<boolean> {
     const { seq, filter } = this;
+    if (!filter || this.held || this.closed) return false;
     const from = Math.max(this.checked, this.base) + 1;
-    if (!filter || this.held || from > this.count || this.closed) return false;
-    if (!this.chunk(from).complete && Date.now() < this.growingAt) return false;
+    const next = from <= this.count && (this.chunk(from).complete || Date.now() >= this.growingAt) ? from : this.settled();
+    if (!next) return false;
     const engine = (this.filterEngine ??= this.newEngine());
     return engine.run(async () => {
       const started = Date.now();
-      const s = this.slice(from);
+      const s = this.slice(next);
       await this.load(engine, s);
       const found = await this.matchesOf(engine, filter);
       if (seq !== this.seq) return false;
-      const after = Math.max(this.checked, this.base);
+      const lo = Math.max(s.lo, this.base + 1);
       const first = s.extras.length + 1;
       const last = s.extras.length + s.hi - s.c0 + 1;
+      const now: number[] = [];
       for (const local of found) {
         const f = toGlobal(s, local);
-        if (local >= first && local <= last && f > after && f <= s.end) this.matches.push(f);
+        if (local >= first && local <= last && f >= lo && f <= s.end) now.push(f);
       }
+      this.place(lo, s.end, now);
       this.checked = Math.max(this.checked, s.end);
       if (!s.complete) this.growingAt = 2 * Date.now() - started;
-      return s.complete && this.checked < this.count;
+      this.unsettled.delete(s.lo);
+      if (s.complete && !s.final) this.unsettled.set(s.lo, { key: sliceKey(s), checked: this.count, looked: this.count });
+      return (s.complete && this.checked < this.count) || this.settled() > 0;
     });
+  }
+
+  /** Puts the filter's matches in lo..end in place of those found before; a change to ones listed before is a new revision. */
+  private place(lo: number, end: number, found: number[]): void {
+    const a = this.matchAt(lo);
+    const b = this.matchAt(end + 1);
+    const listed = (fs: number[]): string => fs.filter((f) => f <= this.checked).join();
+    if (listed(this.matches.slice(a, b)) !== listed(found)) this.revision++;
+    this.matches.splice(a, b - a, ...found);
+  }
+
+  /**
+   * The first frame of a chunk to check again (see filterPass()), or 0. A
+   * few others are looked at a pass, each again after the others once more
+   * packets came.
+   */
+  private settled(): number {
+    let looks = UNSETTLED_LOOKS;
+    for (const [lo, was] of this.unsettled) {
+      const { end } = this.chunk(lo);
+      if (end <= this.base) {
+        this.unsettled.delete(lo);
+        continue;
+      }
+      if (was.looked === this.count) continue;
+      const s = this.slice(lo);
+      const changed = sliceKey(s) !== was.key;
+      if (changed && (s.final || this.count - end >= Math.max(CONTEXT, 2 * (was.checked - end)))) return lo;
+      // Final as it was checked: its matches stand
+      this.unsettled.delete(lo);
+      if (!s.final) this.unsettled.set(lo, { ...was, looked: this.count });
+      if (!--looks) break;
+    }
+    return 0;
   }
 
   /** Slices must be read with the TLS keys now in use. */

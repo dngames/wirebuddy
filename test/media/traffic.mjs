@@ -1,8 +1,9 @@
 // Busy traffic for the live view's tests, the same on every run: long-lived HTTP keep-alive
 // connections with window scaling, TLS 1.3 connections, short HTTP connections on ports used again
 // and again, big downloads over HTTP and over TLS 1.2 (decryptable with the key log it writes),
-// DNS and pings, with segments lost before the capture saw them (dup ACKs and retransmissions
-// follow).
+// requests pipelined into a big response, uploads after a 100 Continue on connections used before,
+// DNS, pings and pings answered thousands of packets later, with segments lost before the capture
+// saw them (dup ACKs and retransmissions follow).
 // Usage: node test/media/traffic.mjs <out.pcapng> <packets> [packets per second] [key log]
 import { createCipheriv, createHmac } from "node:crypto";
 import { closeSync, openSync, writeFileSync, writeSync } from "node:fs";
@@ -141,6 +142,47 @@ function* http(rnd, client, cport, requests, lossRate, size) {
   yield* c.close();
 }
 
+/** A response of `n` bytes with its headers. */
+const response = (rnd, n, status = "200 OK") => Buffer.concat([Buffer.from(`HTTP/1.1 ${status}\r\nContent-Type: text/plain\r\nContent-Length: ${n}\r\n\r\n`), body(rnd, n)]);
+
+/** A keep-alive HTTP connection: a few requests, then a big response the next three requests are pipelined into while it is under way. */
+function* pipelined(rnd, client, cport) {
+  const c = new Tcp(rnd, client, cport, [10, 0, 1, 1], 80);
+  yield* c.handshake();
+  for (let k = 0; k < 6; k++) {
+    yield c.seg(0, 0x18, Buffer.from(`GET /small?k=${k} HTTP/1.1\r\nHost: 10.0.1.1\r\n\r\n`));
+    yield* c.send(rnd, 1, response(rnd, 300), 0);
+  }
+  yield c.seg(0, 0x18, Buffer.from("GET /big HTTP/1.1\r\nHost: 10.0.1.1\r\n\r\n"));
+  const big = response(rnd, 600_000);
+  let at = 0;
+  for (let k = 0; k < 3; k++) {
+    const to = Math.floor((big.length * (k + 1)) / 4 / MSS) * MSS;
+    yield* c.send(rnd, 1, big.subarray(at, to), 1 / 600);
+    at = to;
+    yield c.seg(0, 0x18, Buffer.from(`GET /next?k=${k} HTTP/1.1\r\nHost: 10.0.1.1\r\n\r\n`));
+  }
+  yield* c.send(rnd, 1, big.subarray(at), 1 / 600);
+  for (let k = 0; k < 3; k++) yield* c.send(rnd, 1, response(rnd, 500 + k * 1000), 0);
+  yield* c.close();
+}
+
+/** A keep-alive HTTP connection: a few requests, then an upload with Expect: 100-continue. */
+function* upload(rnd, client, cport) {
+  const c = new Tcp(rnd, client, cport, [10, 0, 1, 1], 80);
+  yield* c.handshake();
+  for (let k = 0; k < 8; k++) {
+    yield c.seg(0, 0x18, Buffer.from(`GET /small?k=${k} HTTP/1.1\r\nHost: 10.0.1.1\r\n\r\n`));
+    yield* c.send(rnd, 1, response(rnd, 400), 0);
+  }
+  const size = 500_000;
+  yield c.seg(0, 0x18, Buffer.from(`PUT /up HTTP/1.1\r\nHost: 10.0.1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: ${size}\r\nExpect: 100-continue\r\n\r\n`));
+  yield c.seg(1, 0x18, Buffer.from("HTTP/1.1 100 Continue\r\n\r\n"));
+  yield* c.send(rnd, 0, body(rnd, size), 1 / 600);
+  yield* c.send(rnd, 1, response(rnd, 20, "201 Created"), 0);
+  yield* c.close();
+}
+
 /** A TLS record of `type` (22 handshake, 20 change cipher spec, 23 application data). */
 const record = (type, payload, version = 0x0303) => Buffer.concat([Buffer.from([type]), u16(version), u16(payload.length), payload]);
 const ext = (type, data) => Buffer.concat([u16(type), u16(data.length), data]);
@@ -228,8 +270,8 @@ function* tls12(rnd, client, cport, size, lossRate, key) {
   yield* c.close();
 }
 
-/** A ping (ICMP echo request) and its reply. */
-function* ping(seq) {
+/** A ping (ICMP echo request) and its reply, `wait` turns of its actor later, between 10.0.0.(30 + host) and 10.0.1.(30 + host). */
+function* ping(seq, host = 0, wait = 0) {
   const icmp = (type) => {
     const b = Buffer.alloc(64);
     b[0] = type;
@@ -242,8 +284,10 @@ function* ping(seq) {
     b.writeUInt16BE(~sum & 0xffff, 2);
     return b;
   };
-  yield ip([10, 0, 0, 30], [10, 0, 1, 30], 1, icmp(8), seq);
-  yield ip([10, 0, 1, 30], [10, 0, 0, 30], 1, icmp(0), seq);
+  yield ip([10, 0, 0, 30 + host], [10, 0, 1, 30 + host], 1, icmp(8), seq);
+  // A late reply: the actor waits turns of its own
+  for (let i = 0; i < wait; i++) yield null;
+  yield ip([10, 0, 1, 30 + host], [10, 0, 0, 30 + host], 1, icmp(0), seq);
 }
 
 /** A DNS query and its answer. */
@@ -268,13 +312,20 @@ export function* traffic(seed = 1, key = () => {}) {
   let short = 0;
   let big = 0;
   let secure = 0;
+  let piped = 0;
+  let uploads = 0;
   for (let n = 0; ; n++) {
     if (n % 350 === 0) actors.push(http(rnd, [10, 0, 0, 100], 50000 + (short++ % 24), 1 + Math.floor(rnd() * 3), 0));
     if (n % 90 === 0) actors.push(dns(rnd, n));
     if (n % 120 === 60) actors.push(ping(n / 120));
+    // Pings answered about 4,000 packets later, after the slice of the chunk they are in
+    if (n % 2000 === 1250) actors.push(ping(Math.floor(n / 2000), 1, 150));
     // Downloads of hundreds of segments, which chunks of slices cut in the middle
     if (n % 7000 === 3500) actors.push(http(rnd, [10, 0, 0, 101], 51000 + (big++ % 24), 1, 1 / 600, 600_000));
     if (n % 9000 === 6000) actors.push(tls12(rnd, [10, 0, 0, 40], 42000 + (secure++ % 24), [150_000, 400_000, 900_000][secure % 3], 1 / 600, key));
+    // The other side sends while a message is under way: pipelined requests, a 100 Continue
+    if (n % 16000 === 1000) actors.push(pipelined(rnd, [10, 0, 0, 102], 52000 + (piped++ % 24)));
+    if (n % 16000 === 9000) actors.push(upload(rnd, [10, 0, 0, 103], 53000 + (uploads++ % 24)));
     for (;;) {
       const i = Math.floor(rnd() * actors.length);
       const next = actors[i].next();
@@ -282,6 +333,8 @@ export function* traffic(seed = 1, key = () => {}) {
         actors.splice(i, 1);
         continue;
       }
+      // Waiting: another actor sends
+      if (next.value === null) continue;
       yield next.value;
       break;
     }

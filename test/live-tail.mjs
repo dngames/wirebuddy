@@ -3,13 +3,13 @@
 // never show provisional packets. With a display filter the newest rows keep coming; slices that
 // can't be written leave the exact rows alone; the profile's and custom columns read as in full,
 // also after an extension changes a field; a final read that fails leaves newer packets
-// provisional and says so; and when memory is short, full reads wait, read in place without
-// failing requests in flight, and one killed for memory lists the file from slices without blaming
-// an extension. A full read that dies after the stop, with the final read still to come, leaves it
-// to that one (test/holding-sharkd.mjs holds and kills it). A server ends on SIGHUP as on SIGTERM,
-// also right as its URL is out, and removes slices killed ones left. dumpcap is
-// test/fake-dumpcap.mjs, which writes generated traffic. The packet list's marking is checked in
-// headless Chrome when there is one.
+// provisional and says so; and when memory is short, full reads wait, matches that later packets
+// change are listed anew, reads in place don't fail requests in flight, and one killed for memory
+// lists the file from slices without blaming an extension. A full read that dies after the stop,
+// with the final read still to come, leaves it to that one (test/holding-sharkd.mjs holds and
+// kills it). A server ends on SIGHUP as on SIGTERM, also right as its URL is out, and removes
+// slices killed ones left. dumpcap is test/fake-dumpcap.mjs, which writes generated traffic. The
+// packet list's marking is checked in headless Chrome when there is one.
 // Usage: node test/live-tail.mjs   (after npm run build; CHROME=<path> picks the browser)
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
@@ -401,8 +401,10 @@ try {
     const examples = [];
     for (const r of exact) {
       const p = seen.get(r.num);
-      // A PDU that a packet written after the row was read completes: Wireshark couldn't tell then either
-      const info = r.c[6].replace(/ \[TCP PDU reassembled in (\d+)\]$/, (all, n) => (Number(n) > knownThen ? "" : all));
+      // A PDU that a packet written after the row was read completes, or a reply: Wireshark couldn't tell then either
+      const info = r.c[6]
+        .replace(/ \[TCP PDU reassembled in (\d+)\]$/, (all, n) => (Number(n) > knownThen ? "" : all))
+        .replace(/\(reply in (\d+)\)$/, (all, n) => (Number(n) > knownThen ? "(no response found!)" : all));
       const same = [r.c, [...r.c.slice(0, 6), info, ...r.c.slice(7)]].some((c) => p.c.join("\t") === c.join("\t"));
       if (!same || (p.bg ?? "") !== (r.bg ?? "")) {
         diff++;
@@ -513,7 +515,7 @@ try {
   writeFileSync(tailLua, `local p = Proto("wbtail", "Live tail")\nfunction p.dissector(tvb, pinfo, tree) tree:add(p, tvb()) end\nDissectorTable.get("udp.port"):add(59999, p)\n`);
   const lean = await server("lean", { WIREBUDDY_MEM_AVAILABLE: "1" }, leanHome);
   servers.push(lean);
-  await check("short of memory: full reads wait, View › Reload reads in place once the requests in flight are answered", async () => {
+  await check("short of memory: full reads wait, matches a later reply changes are listed anew, View › Reload reads in place once the requests in flight are answered", async () => {
     await lean.api("/api/capture/start", { iface: "lo", filter: "burst 200000 rate 3000", autostop: {}, ring: null });
     const paused = await lean.until("full reads to wait", 60_000, (s) => s.tail?.paused);
     assert.match(paused.tail.paused, /not enough free memory/);
@@ -522,6 +524,11 @@ try {
     const later = await lean.state();
     assert.equal(later.totalFrames, paused.totalFrames, "no full read while they wait");
     assert.ok(later.tail.frames > paused.tail.frames);
+    // A reply that came since changes provisional matches listed before: the list's rows are read again
+    assert.equal((await lean.api("/api/filter", { filter: "icmp.resp_not_found" })).ok, true);
+    const listed = await lean.until("provisional matches", 20_000, (s) => s.tail?.displayed > 0);
+    await lean.until("matches checked again", 30_000, (s) => s.rowsSince > listed.rowsSince && s.filter === "icmp.resp_not_found" && s.totalFrames === paused.totalFrames);
+    assert.equal((await lean.api("/api/filter", { filter: "" })).ok, true);
     // View › Reload: in place of the copy there is, under an agent's slow query and pages of rows
     const slow = lean.tool("query_packets", { filter: 'frame contains "wbzz" || tcp.payload contains "zzwb"', limit: 1 });
     await sleep(150);

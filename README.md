@@ -340,11 +340,11 @@ the questions you asked it.
 - Once such a re-read takes a second or more, the packets that arrived since are listed within
   about a second anyway, in italics, until the next re-read replaces them: two more `sharkd` read
   them from slices of the file (about 64 MiB at most) that also hold the packets before them, the
-  start of their connections and the messages under way, so they nearly always read as the full
-  read will. Display filters on stream indices or frame numbers, statistics, Follow Stream, Find
-  and the agent's queries wait for the full read. When another full read would need more memory
-  than is free, full reads wait until the capture stops, and a reload reads the file in place of
-  the copy there is.
+  start of their connections, the messages under way and the answers still owed, so they nearly
+  always read as the full read will. Display filters on stream indices, TCP conversation
+  completeness or frame numbers, statistics, Follow Stream, Find and the agent's queries wait for
+  the full read. When another full read would need more memory than is free, full reads wait
+  until the capture stops, and a reload reads the file in place of the copy there is.
 - The packet list is virtualized and pages rows from `sharkd`, so large captures stay smooth.
 
 ## Security
@@ -403,9 +403,11 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
 - In a big live capture the newest packets stay provisional until the next full read of the file,
   which takes longer the bigger the file gets (about 10 s at a million packets, more with a
   display filter). A ring buffer or a capture filter keeps files small. Provisional packets of a
-  TLS connection that carried other requests before (HTTP/2, keep-alive) can't be decrypted, and
-  ones of a message that ends more than about 10,000 of its connection's packets later don't say
-  where it is reassembled.
+  TLS connection that carried more than a few requests before (HTTP/2, keep-alive) can't be
+  decrypted. Ones of a message that began more than about 16 MiB before them, or that more than
+  three requests were pipelined into, read as plain TCP segments, and ones of a message that ends
+  more than about 8 MiB after them don't say where it is reassembled (less when many connections
+  are busy at once).
 - Packet comments can't be added or edited in the viewer (marks go into pcapng exports as
   comments), and there are no time references yet.
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
