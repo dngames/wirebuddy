@@ -7,7 +7,7 @@ security reports are taken seriously.
 
 Please **do not open a public issue**. Report it privately through GitHub:
 **Security → Report a vulnerability** on https://github.com/dngames/wirebuddy. If that is not
-available, contact the maintainer through the address on their GitHub profile.
+available, contact the maintainer through the website linked from their GitHub profile.
 
 Include what you found, how to reproduce it, and the impact you expect. You'll get an answer
 as soon as possible; please give us a reasonable time to fix it before disclosing.
