@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-28
+
 - The agent learns whether a panel it opens runs in a process of its own also when the panel is ready at once
 
 ## [0.10.0] - 2026-10-28
@@ -51,6 +53,7 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/dngames/wirebuddy/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dngames/wirebuddy/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/dngames/wirebuddy/releases/tag/v0.9.0
