@@ -101,6 +101,8 @@ export interface Slice {
   complete: boolean;
   /** Nothing more comes before hi: the chunk's slices differ only in `after` from now on. */
   settled: boolean;
+  /** Flows whose rows what comes later may still change (see FlowIndex.after). */
+  openFlows: Set<number>;
   /** Its rows read the same from now on: what comes later can't change them. */
   final: boolean;
 }
@@ -430,9 +432,10 @@ export class LiveTail {
     const hi = this.fit(end + 1, Math.min(end + CONTEXT, this.count), CONTEXT_BYTES);
     // Nothing more comes before hi once it holds CONTEXT frames, or stopped short of the newest one
     const settled = complete && (hi === end + CONTEXT || hi < this.count);
-    const after = settled ? this.flows.after(lo, end, hi, { ...AFTER, size }) : { frames: new Int32Array(0), open: true };
+    const openFlows = new Set<number>();
+    const after = settled ? this.flows.after(lo, end, hi, { ...AFTER, size }, openFlows) : { frames: new Int32Array(0), open: true };
     const extras = this.flows.context(c0, end, { ...BEFORE, size });
-    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, complete, settled, final: settled && !after.open };
+    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, complete, settled, openFlows, final: settled && !after.open };
     this.slices.delete(lo);
     this.slices.set(lo, { count: this.count, slice: s });
     if (this.slices.size > MAX_SLICES) this.slices.delete(this.slices.keys().next().value!);
@@ -533,7 +536,7 @@ export class LiveTail {
    * later than its slice holds names its request (ping, NFS).
    */
   private settled(s: Slice, frame: number): boolean {
-    return s.final || (s.settled && !this.flows.pending(frame, s.hi));
+    return s.final || (s.settled && !s.openFlows.has(this.flows.idOf(frame)));
   }
 
   /** Keeps a row read from slice `s` while that is its chunk's slice; the chunks used longest ago go first. */
@@ -682,17 +685,18 @@ export class LiveTail {
         const f = toGlobal(s, local);
         if (local >= first && local <= last && f >= lo && f <= s.end) now.push(f);
       }
+      // Placed before reading rows: a full read meanwhile (rebase) drops what it covers
+      this.place(lo, s.end, now);
+      this.checked = Math.max(this.checked, s.end);
+      this.unsettled.delete(s.lo);
+      if (s.complete && !s.final) this.unsettled.set(s.lo, { key: sliceKey(s), checked: this.count, looked: this.count });
       if (view && rows > 0 && next === from && now.length) {
         this.useView(view);
         const newest = now.slice(-rows);
         this.keepAll(s, newest, (await this.read(engine, newest, view)).rows);
         if (seq !== this.seq) return false;
       }
-      this.place(lo, s.end, now);
-      this.checked = Math.max(this.checked, s.end);
       if (!s.complete) this.growingAt = 2 * Date.now() - started;
-      this.unsettled.delete(s.lo);
-      if (s.complete && !s.final) this.unsettled.set(s.lo, { key: sliceKey(s), checked: this.count, looked: this.count });
       return (s.complete && this.checked < this.count) || this.recheck() > 0;
     });
   }

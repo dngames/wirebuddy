@@ -259,17 +259,25 @@ try {
     assert.equal(pings(300).after(1, 50, 60, budget(1000)).open, false);
   });
 
-  await check("flows: whether what comes after hi may still change a frame's row", () => {
-    // 1-3 handshake, 4 request, 5-104 response, 105 the next request, 106 its answer
-    const flows = fed(exchange.slice(0, 106));
+  await check("flows: the flows whose rows what comes after hi may still change are named, and only those", () => {
+    const openOf = (flows, lo, end, hi) => {
+      const open = new Set();
+      flows.after(lo, end, hi, budget(1000), open);
+      return [...open];
+    };
+    // The response under way at hi, until it ended and the connection closed
     const growing = fed(exchange.slice(0, 80));
-    const udp = fed(Array.from({ length: 100 }, (_, i) => g.udpFrame(i)));
-    assert.deepEqual([flows.pending(4, 50), flows.pending(40, 50), flows.pending(4, 104), flows.pending(4, 105), flows.pending(105, 106)], [true, true, false, false, true]);
-    assert.deepEqual([growing.pending(4, 50), growing.pending(4, 80), udp.pending(10, 50)], [true, true, false]);
-    // Pings answered 35 packets later: a ping's row changes once its reply came
+    assert.deepEqual(openOf(growing, 1, 40, 50), [growing.idOf(4)]);
+    assert.deepEqual(openOf(fed(exchange), 1, 40, 50), []);
+    // A request pipelined into the response is the flow's last packet up to hi: the response goes on after it
+    const piped = fed([...exchange.slice(0, 105), ...response(20)]);
+    assert.deepEqual(openOf(piped, 1, 100, 105), [piped.idOf(4)]);
+    // Pings answered 35 packets later among a one-way UDP stream: the pings' flow, until their replies came
     const icmp = (back) => g.eth(0x0800, g.ip4(1, Buffer.alloc(16), back ? { src: [10, 0, 0, 2], dst: [10, 0, 0, 1] } : {}));
-    const pings = fed(Array.from({ length: 100 }, (_, n) => (n % 10 === 0 ? icmp(false) : n % 10 === 5 && n > 30 ? icmp(true) : g.udpFrame(n))));
-    assert.deepEqual([pings.pending(1, 20), pings.pending(1, 40), pings.pending(21, 40)], [true, false, true]);
+    const frames = Array.from({ length: 100 }, (_, n) => (n % 10 === 0 ? icmp(false) : n % 10 === 5 && n > 30 ? icmp(true) : g.udpFrame(n)));
+    const asked = fed(frames.slice(0, 34));
+    assert.deepEqual(openOf(asked, 1, 20, 30), [asked.idOf(1)]);
+    assert.deepEqual(openOf(fed(frames), 1, 20, 30), []);
   });
 
   await check("flows: when there are too many, ended flows and those without a handshake are forgotten first", () => {
@@ -668,6 +676,45 @@ try {
     }
   });
 
+  await check("a full read that lands while a filter pass reads its newest rows: the matches it covers aren't listed again", async () => {
+    const file = await cutAt(25_000);
+    let landing = null;
+    const racing = {
+      ...view,
+      fetch: async (engine, params) => {
+        const rows = await view.fetch(engine, params);
+        const land = landing;
+        landing = null;
+        land?.();
+        return rows;
+      },
+    };
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      await tail.update();
+      tail.rebase(20_000);
+      tail.setFilter("tcp", null);
+      while (await tail.filterPass(racing, 500));
+      const more = join(out, "more.pcapng");
+      rmSync(more, { force: true });
+      await bigStore.writeSlice(Int32Array.from({ length: 1000 }, (_, i) => 25_001 + i), more);
+      appendFileSync(file, readFileSync(more).subarray(header().length));
+      await tail.update();
+      landing = () => tail.rebase(24_000);
+      // The growing chunk is checked again after a pause as long as its last check took
+      for (let i = 0; landing && i < 100; i++) {
+        await tail.filterPass(racing, 500);
+        if (landing) await sleep(100);
+      }
+      assert.equal(landing, null, "the full read landed while the pass read rows");
+      const listed = Array.from({ length: tail.listed() }, (_, i) => tail.frameAt(i));
+      assert.ok(listed.length > 0);
+      assert.deepEqual(listed.filter((f) => f <= tail.base), []);
+    } finally {
+      tail.close();
+    }
+  });
+
   await check("rows kept while their chunk grew read as sharkd reads the file once it grew", async () => {
     const [cut, later, base] = [25_000, 31_000, 20_000];
     const file = await cutAt(cut);
@@ -767,6 +814,58 @@ try {
       const differ = rows.filter((r, i) => !same(r, exact[i]));
       assert.equal(differ.length, 0, `${differ.length} rows differ, e.g. ${differ.slice(0, 3).map((r) => `${r.num}: ${exact[r.num - base - 1].c[6]} | ${r.c[6]}`).join("; ")}`);
       assert.match(exact[29_990 - base - 1].c[6], /\(Reply In 34793\)/);
+    } finally {
+      tail.close();
+      rmSync(file, { force: true });
+    }
+  });
+
+  await check("rows of a chunk whose response goes on past a request pipelined into it read as sharkd reads the file once the response ended", async () => {
+    const [client, server] = [{ src: [10, 0, 0, 1], dst: [10, 0, 0, 2] }, { src: [10, 0, 0, 2], dst: [10, 0, 0, 1] }];
+    const seq = [1000, 50000];
+    /** A segment of the connection; `from` 1: the server sends. */
+    const seg = (from, flags, payload = Buffer.alloc(0)) => {
+      const t = g.tcp(from ? 80 : 1000, from ? 1000 : 80, payload);
+      t.writeUInt32BE(seq[from] >>> 0, 4);
+      t.writeUInt32BE(seq[1 - from] >>> 0, 8);
+      t[13] = flags;
+      seq[from] += payload.length + (flags & 0x02 ? 1 : 0);
+      return g.eth(0x0800, g.ip4(6, t, from ? server : client));
+    };
+    const body = Buffer.concat([Buffer.from("HTTP/1.1 200 OK\r\nContent-Length: 40000\r\n\r\n"), Buffer.alloc(40_000, 0x61)]);
+    let sent = 0;
+    const next = () => seg(1, 0x18, body.subarray(sent, (sent += 1000)));
+    const frames = [seg(0, 0x02), seg(1, 0x12), seg(0, 0x10)];
+    const fill = (to) => {
+      while (frames.length < to) frames.push(g.udpFrame(frames.length));
+    };
+    // The response from 9981 on, past the chunk's end and hi; the client's next request right after hi, at 12001
+    fill(9979);
+    frames.push(seg(0, 0x18, Buffer.from("GET /big HTTP/1.1\r\nHost: x\r\n\r\n")));
+    while (frames.length < CHUNK) frames.push(next());
+    fill(CHUNK + CONTEXT - 10);
+    frames.push(next());
+    fill(CHUNK + CONTEXT);
+    frames.push(seg(0, 0x18, Buffer.from("GET /next HTTP/1.1\r\nHost: x\r\n\r\n")));
+    for (let i = 0; i < 5; i++) frames.push(next());
+    const cut = frames.length;
+    while (sent < body.length) frames.push(next());
+    const file = join(out, "pipelined.pcapng");
+    writeFileSync(file, Buffer.concat([header(), ...frames.slice(0, cut).map((f, i) => packet(i, f))]));
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      await tail.update();
+      tail.rebase(0);
+      await tail.rows(9979, 22, view);
+      appendFileSync(file, Buffer.concat(frames.slice(cut).map((f, i) => packet(cut + i, f))));
+      await tail.update();
+      const rows = await tail.rows(9979, 22, view);
+      const whole = newSharkd();
+      await whole.call("load", { file });
+      const exact = await rowsOf(whole, 9980, 10_001);
+      assert.match(exact[1].c[6], /reassembled in/);
+      const differ = rows.filter((r, i) => !same(r, exact[i]));
+      assert.equal(differ.length, 0, `${differ.length} rows differ, e.g. ${differ.slice(0, 2).map((r) => `${r.num}: ${exact[r.num - 9980].c[6]} | ${r.c[6]}`).join("; ")}`);
     } finally {
       tail.close();
       rmSync(file, { force: true });

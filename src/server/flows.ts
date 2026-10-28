@@ -42,8 +42,6 @@ const HTTP_START = /^(?:HTTP\/1\.[01] [1-5]\d\d[ \r]|(?:GET|HEAD|POST|PUT|DELETE
 /** Per frame data: payload, payload that starts a message (an HTTP/1 one, a TLS record). */
 const PAYLOAD = 1;
 const STARTS = 2;
-/** Packets walked after a slice's end for a flow's next data. */
-const MAX_AFTER_WALK = 1000;
 
 /** How much a slice may bring along: frames, and bytes as `size` counts them. */
 export interface Budget {
@@ -119,8 +117,6 @@ export class FlowIndex {
   private readonly byKey = new Map<string, Flow>();
   private readonly byId = new Map<number, Flow>();
   private nextId = 1;
-  /** Flows' last frames up to a hi, for pending(). */
-  private lastSeen = { hi: 0, count: 0, last: new Map<number, number>() };
   private readonly parsed = new Parsed();
 
   /** Adds the next frame (count + 1) with its first bytes and its capture time in seconds. */
@@ -267,12 +263,13 @@ export class FlowIndex {
    * response). `open`: they may still change, as such a run reaches the
    * newest packet indexed (more may come, unless its side ended or went
    * quiet: see over()), the budget cut short a side's run before the other
-   * side sent, or answers are still owed. Past the other side's runs a new
+   * side sent, or answers are still owed; the flows that leave it open go
+   * into `openFlows`. Past the other side's runs a new
    * message may have started instead: those walks go the shortest first, and
    * cutting them short leaves the chunk as it is. It walks no more than about
    * three times the budget's frames, however long the flows.
    */
-  after(lo: number, end: number, hi: number, budget: Budget): { frames: Int32Array; open: boolean } {
+  after(lo: number, end: number, hi: number, budget: Budget, openFlows = new Set<number>()): { frames: Int32Array; open: boolean } {
     const out = new Taken(budget);
     /** Per flow in the chunk: its first and last frame there and its last frame up to hi; of a TCP flow a walk from each side's last data there. */
     const chunk = new Map<number, { first: number; last: number; upTo: number; tcp: boolean; walks: [Walk | null, Walk | null] }>();
@@ -291,7 +288,6 @@ export class FlowIndex {
       // Past the turns it may walk already: what its side sent ended before hi
       for (const w of c.walks) if (w && !w.done) w.done = !this.step(w, f, 2 * MAX_PIPELINED);
     }
-    let open = false;
     const walks: Walk[] = [];
     for (const c of chunk.values()) {
       for (const w of c.walks) {
@@ -304,7 +300,7 @@ export class FlowIndex {
     for (const w of walks) {
       if (w.turns > 0) continue;
       this.walk(w, 0, out);
-      open ||= this.mayChange(w);
+      if (this.mayChange(w)) openFlows.add(w.id);
     }
     let steps = budget.frames;
     for (const [id, c] of chunk) {
@@ -321,7 +317,7 @@ export class FlowIndex {
           got++;
         }
         // Owed still: an answer may come, unless the other side has been quiet for a while
-        if (got < owed && (x || !this.over(flow, -side))) open = true;
+        if (got < owed && (x || !this.over(flow, -side))) openFlows.add(id);
       }
     }
     // Those shorter than an even share of the budget left first, the shortest first: a long one may be a new message
@@ -336,46 +332,14 @@ export class FlowIndex {
     later.sort((a, b) => length.get(a)! - length.get(b)!);
     for (const w of later) {
       this.walk(w, 2 * MAX_PIPELINED, out);
-      open ||= !w.cut && this.mayChange(w);
+      if (!w.cut && this.mayChange(w)) openFlows.add(w.id);
     }
-    return { frames: out.sorted(), open };
+    return { frames: out.sorted(), open: openFlows.size > 0 };
   }
 
-  /**
-   * Whether packets after `hi` may still change how `frame` reads (a slice
-   * of a complete chunk may take them, see after). Of a TCP flow: after its
-   * last packet up to hi, more data of that run comes before the other side
-   * sends, or nothing came yet. Of another flow of requests and answers: the
-   * answer to it hadn't come by hi and still may (see owed).
-   */
-  pending(frame: number, hi: number): boolean {
-    const id = Math.abs(this.flowOf[frame - 1]);
-    const flow = this.byId.get(id);
-    if (!flow) return false;
-    const x = this.lastUpTo(id, frame, hi);
-    if (!flow.tcp) {
-      const side = Math.sign(this.flowOf[frame - 1]);
-      const asked = this.sentBy(x, side);
-      const answers = this.sentBy(x, -side);
-      if (asked + answers > HEAD_FRAMES && 4 * answers < asked) return false;
-      return answers < this.sentBy(frame, side) && !this.over(flow, -side);
-    }
-    const turn = this.turnOf[x - 1];
-    for (let y = this.nextOf[x - 1], steps = 0; ; y = this.nextOf[y - 1], steps++) {
-      if (!y || steps >= MAX_AFTER_WALK) return true;
-      // The other side sent, or the ports were used again
-      if (this.turnOf[y - 1] !== turn || Math.abs(this.flowOf[y - 1]) !== id) return false;
-      if (this.data[y - 1]) return true;
-    }
-  }
-
-  /** The last frame of flow `id` up to `hi`, from its `frame` on; remembered per flow while hi and the count stay. */
-  private lastUpTo(id: number, frame: number, hi: number): number {
-    if (this.lastSeen.hi !== hi || this.lastSeen.count !== this.count) this.lastSeen = { hi, count: this.count, last: new Map() };
-    let x = Math.max(frame, this.lastSeen.last.get(id) ?? 0);
-    for (let y = this.nextOf[x - 1]; y && y <= hi && Math.abs(this.flowOf[y - 1]) === id; y = this.nextOf[y - 1]) x = y;
-    this.lastSeen.last.set(id, x);
-    return x;
+  /** The flow `frame` belongs to, 0 for none. */
+  idOf(frame: number): number {
+    return frame >= 1 && frame <= this.count ? Math.abs(this.flowOf[frame - 1]) : 0;
   }
 
   /** The first frame of the flow `frame` belongs to, or null when unknown. */
