@@ -518,7 +518,8 @@ const muted = (s) => wb.h("span", { class: "muted" }, s);
 /** The C-STORE under x in the strip, or null. */
 function storeAt(px, py) {
   const st = view?.strip;
-  if (!st || py < st.top - 6 || py > st.bottom + 10 || px < st.left || px > st.right) return null;
+  // The strip of a capture already gone stays painted until the next frame
+  if (!st || !pickedAssociation || py < st.top - 6 || py > st.bottom + 10 || px < st.left || px > st.right) return null;
   const list = pickedAssociation.stores;
   return list[Math.min(list.length - 1, Math.floor(((px - st.left) / (st.right - st.left)) * list.length))] ?? null;
 }
@@ -542,6 +543,7 @@ function showReadout(px, py) {
   if (!s) return void (readout.hidden = true);
   const rows = [line(wb.h("span", { class: "head" }, `C-STORE ${s.n}`), muted(` · frame ${s.frame} · ${wb.fmt.bytes(s.size)}`))];
   if (s.failed) rows.push(line(muted(s.failed)));
+  else if (!s.same) rows.push(line(muted("reading its image…")));
   else {
     rows.push(line(`series ${s.number || "?"} · instance ${s.instance} · ${mm(s.location)}`));
     rows.push(line(muted(`SOP Instance UID ${s.sop}`)));
