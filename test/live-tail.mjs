@@ -1,13 +1,18 @@
 // The live view of a big, busy capture: newer packets show provisionally within about two seconds
 // while full reads of the file lag behind, become exact once the capture stops, and small captures
 // never show provisional packets. With a display filter the newest rows keep coming; slices that
-// can't be written leave the exact rows alone; and when memory is short, full reads wait, read in
-// place, and a failed one lists the file from slices. dumpcap is test/fake-dumpcap.mjs, which
-// writes generated traffic. The packet list's marking is checked in headless Chrome when there is
-// one.
+// can't be written leave the exact rows alone; the profile's and custom columns read as in full,
+// also after an extension changes a field; a final read that fails leaves newer packets
+// provisional and says so; and when memory is short, full reads wait, read in place without
+// failing requests in flight, and one killed for memory lists the file from slices without blaming
+// an extension. A full read that dies after the stop, with the final read still to come, leaves it
+// to that one (test/holding-sharkd.mjs holds and kills it). A server ends on SIGHUP as on SIGTERM,
+// also right as its URL is out, and removes slices killed ones left. dumpcap is
+// test/fake-dumpcap.mjs, which writes generated traffic. The packet list's marking is checked in
+// headless Chrome when there is one.
 // Usage: node test/live-tail.mjs   (after npm run build; CHROME=<path> picks the browser)
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,22 +29,24 @@ mkdirSync(home);
 mkdirSync(bin);
 writeFileSync(join(bin, "dumpcap"), `#!/bin/sh\nexec "${process.execPath}" "${join(root, "test/fake-dumpcap.mjs")}" "$@"\n`);
 chmodSync(join(bin, "dumpcap"), 0o755);
+const homeEnv = (dir) => ({ HOME: dir, XDG_CONFIG_HOME: join(dir, ".config"), XDG_DATA_HOME: join(dir, ".local/share"), XDG_RUNTIME_DIR: join(dir, "run") });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const listLength = (s) => s.displayedFrames + (s.tail?.displayed ?? 0);
+/** What a tool result tells the agent about the live capture's packets after the last full read. */
+const liveLine = (text) => /Live capture: [^\n\]]*/.exec(text)?.[0] ?? "";
 
 /** A WireBuddy server with an MCP client, capturing into a folder of its own; `env` adds to its environment. */
-async function server(name, env = {}) {
+async function server(name, env = {}, homeDir = home) {
   const captureDir = join(work, name);
   const client = new Client({ name: "live-tail", version: "0" });
-  await client.connect(
-    new StdioClientTransport({
-      command: process.execPath,
-      args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0", "--capture-dir", captureDir],
-      // A home of its own: the tester's Wireshark preferences and plugins don't apply
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "", ...env },
-      stderr: "ignore",
-    }),
-  );
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0", "--capture-dir", captureDir],
+    // A home of its own: the tester's Wireshark preferences and plugins don't apply
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...homeEnv(homeDir), WIREBUDDY_EXTENSIONS: "", ...env },
+    stderr: "ignore",
+  });
+  await client.connect(transport);
   const tool = async (tool, args = {}) => {
     const r = await client.callTool({ name: tool, arguments: args });
     return { text: r.content.map((c) => c.text).join("\n"), error: !!r.isError };
@@ -58,6 +65,7 @@ async function server(name, env = {}) {
   const state = () => api("/api/state");
   return {
     captureDir,
+    pid: transport.pid,
     ui,
     tool,
     api,
@@ -88,6 +96,21 @@ async function server(name, env = {}) {
       await client.close();
     },
   };
+}
+
+/** The sharkd processes of the server `pid` that have `file` open (they read it in full). */
+function sharkdsReading(pid, file) {
+  const out = [];
+  for (const p of readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
+    try {
+      const m = /^\d+ \((.*)\) \S (\d+)/.exec(readFileSync(`/proc/${p}/stat`, "utf8"));
+      if (m?.[1] !== "sharkd" || Number(m[2]) !== pid) continue;
+      if (readdirSync(`/proc/${p}/fd`).some((fd) => readlinkSync(`/proc/${p}/fd/${fd}`) === file)) out.push(Number(p));
+    } catch {
+      // ended meanwhile
+    }
+  }
+  return out;
 }
 
 /** The viewer in headless Chrome: evaluates an expression in its page; null without Chrome. */
@@ -131,6 +154,8 @@ async function check(name, fn) {
   }
 }
 const report = [];
+/** Of a folder of slices this machine's servers make: what tells the machine. */
+let sliceTag = null;
 
 const servers = [];
 try {
@@ -213,10 +238,21 @@ try {
     assert.match(go.text, new RegExp(`^Selected frame ${num} \\(row \\d+ of \\d+\\)`));
     const [, row, of] = /row (\d+) of (\d+)/.exec(go.text).map(Number);
     assert.ok(row <= of && of >= at.totalFrames, go.text);
+    // Only what reads from the full read says which frames it covers
+    assert.doesNotMatch(go.text, /these results cover/);
     // Right after a full read lands nothing may be provisional for a moment
     let query;
     for (let k = 0; k < 10 && !/provisional/.test(query?.text ?? ""); k++) query = await tool("query_packets", { filter: "dns", limit: 1 });
-    assert.match(query.text, /these results cover frames 1-\d+, read in full; \d+ newer packets are provisional/);
+    assert.match(liveLine(query.text), /^Live capture: these results cover frames 1-\d+, read in full; \d+ newer packets \(\d+-\d+\) arrived after the last full read; the user's list shows all of them provisionally; your tools see them with the next full read/);
+    // An export writes provisional packets as captured, and says how many
+    let exported;
+    for (let k = 0; k < 10 && !/; 2 of them are newer packets/.test(exported?.text ?? ""); k++) {
+      const s = await state();
+      rmSync(join(work, "across.pcapng"), { force: true });
+      exported = await tool("export_packets", { path: join(work, "across.pcapng"), which: "range", range: `${s.totalFrames - 1}-${s.totalFrames + 2}` });
+    }
+    assert.match(exported.text, /^Wrote 4 packets .*; 2 of them are newer packets of the live capture, not read in full yet/);
+    assert.doesNotMatch(exported.text, /these results cover/);
   });
 
   await check("the packet list marks provisional rows, the status bar counts them (headless Chrome)", async () => {
@@ -255,6 +291,10 @@ try {
       go = await tool("goto_frame", { frame: s.totalFrames + s.tail.frames });
     }
     assert.match(go.text, /but it is listed once read in full, as the filter uses tcp\.stream/);
+    // The list shows none of the newer packets
+    let view;
+    for (let k = 0; k < 5 && !liveLine(view?.text ?? ""); k++) view = await tool("get_view_state");
+    assert.match(liveLine(view.text), /^Live capture: \d+ newer packets \(\d+-\d+\) arrived after the last full read; the user's list shows none of them: with this display filter they wait for a full read \(the filter uses tcp\.stream\)/);
     const exported = await tool("export_packets", { path: join(work, "held.pcapng"), which: "displayed" });
     assert.match(exported.text, /; \d+ newer packets? of the live capture, not read in full yet, (was|were) left out/);
   }
@@ -321,7 +361,9 @@ try {
   });
 
   await check("slices that can't be written: the exact rows still come, and newer packets wait for full reads after a few failures", async () => {
-    const folder = join(wb.captureDir, readdirSync(wb.captureDir).find((n) => n.startsWith(".wirebuddy-slices-")));
+    const name = readdirSync(wb.captureDir).find((n) => n.startsWith(".wirebuddy-slices-"));
+    sliceTag = name.split("-")[2];
+    const folder = join(wb.captureDir, name);
     chmodSync(folder, 0o500);
     try {
       let s = await state();
@@ -383,41 +425,291 @@ try {
   await wb.close();
   servers.pop();
 
-  // Memory too short for any second copy of the capture
-  const lean = await server("lean", { WIREBUDDY_MEM_AVAILABLE: "1" });
+  // The profile's own columns, and an extension whose field turns into a frame number
+  const colsHome = join(work, "columns-home");
+  mkdirSync(join(colsHome, ".config/wireshark"), { recursive: true });
+  const columns = ["No.", "%m", "Time", "%t", "Source", "%s", "Destination", "%d", "Protocol", "%p", "Length", "%L", "Info", "%i", "ACK of", "%Cus:tcp.analysis.acks_frame:0:R", "Bytes", "%B"];
+  writeFileSync(join(colsHome, ".config/wireshark/preferences"), `gui.column.format:\n${columns.map((c) => `\t"${c}"`).join(",\n")}\n`);
+  const backLua = join(colsHome, ".local/share/wirebuddy/extensions/back/back.lua");
+  const back = (type) => `local p = Proto("back", "Three back")\nlocal f = ProtoField.${type}("back.frame", "Three back")\np.fields = { f }\nfunction p.dissector(tvb, pinfo, tree)\n  if pinfo.number > 3 then tree:add(p, tvb(0, 0)):add(f, tvb(0, 0), pinfo.number - 3) end\nend\nregister_postdissector(p)\n`;
+  mkdirSync(dirname(backLua), { recursive: true });
+  writeFileSync(join(dirname(backLua), "extension.json"), JSON.stringify({ label: "back", version: "1" }));
+  writeFileSync(backLua, back("uint32"));
+  const cols = await server("columns", {}, colsHome);
+  servers.push(cols);
+  // Provisional rows kept to compare with the exact ones
+  let colsSeen = null;
+  await check("frame-number fields in custom columns are renumbered, typed again when an extension changes; so is the display filter's reason to wait", async () => {
+    await cols.api("/api/capture/start", { iface: "lo", filter: "burst 200000 rate 3000", autostop: {}, ring: null });
+    await cols.until("provisional packets", 60_000, (s) => s.tail?.frames > 2000 && s.totalFrames > 0);
+    assert.equal((await cols.api("/api/columns", { columns: [{ field: "back.frame", title: "Back" }] })).ok, true);
+    // The field holds frame numbers now
+    writeFileSync(backLua, back("framenum"));
+    await cols.api("/api/extensions/reload", {});
+    assert.equal((await cols.api("/api/filter", { filter: "back.frame > 0" })).ok, true);
+    assert.equal((await cols.until("the tail", 30_000, (s) => s.tail)).tail.held, "the filter uses the frame number field back.frame");
+    assert.equal((await cols.api("/api/filter", { filter: "" })).ok, true);
+    const { s, rows } = await cols.rows((s) => s.displayedFrames, 500);
+    const at = s.columns.indexOf("Back");
+    const wrong = rows.filter((r) => r.p && r.c[at] !== String(r.num - 3));
+    assert.ok(rows.some((r) => r.p), "provisional rows");
+    assert.deepEqual(wrong.slice(0, 3).map((r) => `${r.num}: ${r.c[at]}`), []);
+    colsSeen = { columns: s.columns, rows: rows.filter((r) => r.p) };
+    // Full reads without it are quicker
+    await cols.api("/api/columns", { columns: [] });
+    rmSync(dirname(backLua), { recursive: true });
+    await cols.api("/api/extensions/reload", {});
+  });
+
+  await check("a final full read that fails: newer packets stay provisional, and the view and the agent say why and how to retry", async () => {
+    const file = (await cols.state()).file;
+    chmodSync(file, 0);
+    try {
+      // A live read failed: none under way can still cover the last packets
+      let failing = false;
+      for (const end = Date.now() + 180_000; !failing && Date.now() < end; await sleep(200)) {
+        failing = (await cols.api("/api/events?after=0")).events.some((e) => /^Live reload: /.test(e.text));
+      }
+      assert.ok(failing, "a live read failed");
+      await cols.api("/api/capture/stop", {});
+      const failed = await cols.until("the final read to fail", 60_000, (s) => s.capture.status === "idle" && s.loadError);
+      assert.match(failed.loadError, /in full failed \(.*\); its newer packets stay provisional\. View › Reload tries again$/);
+      assert.equal(failed.tail.exactAfter, "reload");
+      assert.equal(failed.totalFrames + failed.tail.frames, failed.capture.packets);
+      assert.ok((await cols.api("/api/events?after=0")).events.some((e) => e.level === "ERROR" && /in full failed/.test(e.text)));
+      const view = await cols.tool("get_view_state");
+      assert.match(liveLine(view.text), /your tools see them once a full read succeeds \(View › Reload\) \(reading .* in full failed/);
+      const inspect = await cols.tool("inspect_frame", { frame: failed.capture.packets });
+      assert.match(inspect.text, /: it is read in full once a full read succeeds \(View › Reload\)/);
+    } finally {
+      chmodSync(file, 0o600);
+    }
+    await cols.api("/api/reload", {});
+    const done = await cols.state();
+    assert.deepEqual([done.tail, done.loadError, done.totalFrames], [null, null, done.capture.packets]);
+  });
+
+  await check("profile columns read as Wireshark reads them: frame-number fields renumbered, Cumulative Bytes over the whole file", async () => {
+    assert.ok(colsSeen, "provisional rows to compare");
+    const nums = colsSeen.rows.map((r) => r.num);
+    const { s, rows } = await cols.rows(nums[0] - 1, nums.length);
+    assert.equal(s.tail, null);
+    const exact = new Map(rows.map((r) => [r.num, r]));
+    for (const name of ["ACK of", "Bytes"]) {
+      const at = colsSeen.columns.indexOf(name);
+      const diff = colsSeen.rows.filter((r) => r.c[at] !== exact.get(r.num)?.c[at]);
+      assert.deepEqual(diff.slice(0, 3).map((r) => `${name} of ${r.num}: ${r.c[at]}, exact ${exact.get(r.num)?.c[at]}`), []);
+      if (name === "ACK of") assert.ok(colsSeen.rows.some((r) => r.c[at]), "some ACKs");
+    }
+  });
+  await cols.close();
+  servers.pop();
+
+  // Memory too short for any second copy of the capture; an extension that a kill mustn't be blamed on
+  const leanHome = join(work, "lean-home");
+  const tailLua = join(leanHome, ".local/share/wirebuddy/extensions/wbtail/wbtail.lua");
+  mkdirSync(dirname(tailLua), { recursive: true });
+  writeFileSync(join(dirname(tailLua), "extension.json"), JSON.stringify({ label: "wbtail", version: "1" }));
+  writeFileSync(tailLua, `local p = Proto("wbtail", "Live tail")\nfunction p.dissector(tvb, pinfo, tree) tree:add(p, tvb()) end\nDissectorTable.get("udp.port"):add(59999, p)\n`);
+  const lean = await server("lean", { WIREBUDDY_MEM_AVAILABLE: "1" }, leanHome);
   servers.push(lean);
-  await check("short of memory: full reads wait, View › Reload reads in place, a failed final read lists the file from slices", async () => {
+  await check("short of memory: full reads wait, View › Reload reads in place once the requests in flight are answered", async () => {
     await lean.api("/api/capture/start", { iface: "lo", filter: "burst 200000 rate 3000", autostop: {}, ring: null });
     const paused = await lean.until("full reads to wait", 60_000, (s) => s.tail?.paused);
     assert.match(paused.tail.paused, /not enough free memory/);
+    assert.equal(paused.tail.exactAfter, "stop");
     await sleep(2500);
     const later = await lean.state();
     assert.equal(later.totalFrames, paused.totalFrames, "no full read while they wait");
     assert.ok(later.tail.frames > paused.tail.frames);
-    // View › Reload: in place of the copy there is
+    // View › Reload: in place of the copy there is, under an agent's slow query and pages of rows
+    const slow = lean.tool("query_packets", { filter: 'frame contains "wbzz" || tcp.payload contains "zzwb"', limit: 1 });
+    await sleep(150);
+    let reading = true;
+    const failed = [];
+    const pages = async () => {
+      while (reading) {
+        const s = await lean.state();
+        await lean.api(`/api/rows?gen=${s.generation}&start=${Math.floor(Math.random() * s.displayedFrames)}&count=200`).catch((err) => err.status !== 409 && failed.push(err.message));
+      }
+    };
+    const loops = [pages(), pages()];
     await lean.api("/api/reload", {});
+    reading = false;
+    await Promise.all(loops);
+    const queried = await slow;
+    assert.equal(queried.error, false, queried.text);
+    assert.deepEqual(failed, []);
     const reread = await lean.state();
     assert.ok(reread.totalFrames > later.totalFrames && !reread.loading && reread.tail?.paused);
-    const told = await lean.tool("get_view_state");
-    assert.match(told.text, /reads it again in place of the one it has/);
-    // The final read can't open the file
-    chmodSync(reread.file, 0);
+    const told = (await lean.api("/api/events?after=0")).events.map((e) => e.text);
+    assert.ok(told.some((t) => /reads it again in place of the one it has/.test(t)), told.join("\n"));
+  });
+
+  await check("a final read in place killed for memory: no extension is blamed, the file is listed from slices, the agent hears why", async () => {
+    const before = await lean.state();
+    const seen = (await lean.api("/api/events?after=0")).events.length;
+    // sharkd keeps the file it read open: the one reading it in place is a new one
+    const holding = sharkdsReading(lean.pid, before.file);
+    await lean.api("/api/capture/stop", {});
+    // The kernel's OOM killer, as it ends the sharkd reading the file
+    let victim = null;
+    for (const end = Date.now() + 30_000; !victim && Date.now() < end; await sleep(20)) victim = sharkdsReading(lean.pid, before.file).find((p) => !holding.includes(p));
+    assert.ok(victim, "a sharkd reading the file in place");
+    process.kill(victim, "SIGKILL");
+    const failed = await lean.until("the final read to fail", 60_000, (s) => s.capture.status === "idle" && !s.loading && s.loadError);
+    assert.match(failed.loadError, /in full failed \(sharkd exited \(SIGKILL\)\), perhaps for lack of memory; its packets are listed provisionally from slices of the file/);
+    assert.equal(failed.totalFrames, 0);
+    assert.equal(failed.tail.frames, failed.capture.packets);
+    assert.equal(failed.tail.exactAfter, "reload");
+    assert.equal(failed.extensions.revision, before.extensions.revision);
+    assert.equal((await lean.api("/api/filter/check?filter=wbtail")).ok, true);
+    const events = (await lean.api("/api/events?after=0")).events.slice(seen).map((e) => e.text);
+    assert.deepEqual(events.filter((t) => /crashed|an extension may/.test(t)), []);
+    const { rows } = await lean.rows(Infinity, 100);
+    assert.ok(rows.length === 100 && rows.every((r) => r.p && r.c.length), JSON.stringify(rows[0]));
+    assert.equal(rows.at(-1).num, failed.capture.packets);
+    // Nothing is read in full: no "newer" packets, no frames 1-0
+    const inspect = await lean.tool("inspect_frame", { frame: failed.capture.packets });
+    assert.match(inspect.text, /^Error: frame \d+ is not read in full, as no packet of the live capture is: it is read in full once a full read succeeds \(View › Reload\)/);
+    const view = liveLine((await lean.tool("get_view_state")).text);
+    assert.match(view, /^Live capture: none of the capture's \d+ packets is read in full; the user's list shows all of them provisionally; your tools see them once a full read succeeds \(View › Reload\)/);
+    assert.doesNotMatch(view, /newer/);
+  });
+
+  await check("after it, a display filter checks the whole file, also one changed while a check runs", async () => {
     try {
-      await lean.api("/api/capture/stop", {});
-      const failed = await lean.until("the final read to fail", 60_000, (s) => s.capture.status === "idle" && !s.loading && s.loadError);
-      assert.match(failed.loadError, /in full failed .*listed provisionally from slices/);
-      assert.equal(failed.totalFrames, 0);
-      assert.equal(failed.tail.frames, failed.capture.packets);
-      const { rows } = await lean.rows(Infinity, 100);
-      assert.ok(rows.length === 100 && rows.every((r) => r.p && r.c.length), JSON.stringify(rows[0]));
-      assert.equal(rows.at(-1).num, failed.capture.packets);
+      assert.equal((await lean.api("/api/filter", { filter: "dns" })).ok, true);
+      await lean.until("the check to run", 60_000, (s) => s.tail?.unfiltered > 0 && s.tail.unfiltered < s.tail.frames);
+      assert.equal((await lean.api("/api/filter", { filter: "tcp" })).ok, true);
+      const s = await lean.until("every packet checked", 180_000, (s) => s.tail?.unfiltered === 0);
+      assert.ok(s.tail.displayed > 0);
     } finally {
-      chmodSync(reread.file, 0o600);
+      await lean.api("/api/filter", { filter: "" });
     }
-    // Readable again: View › Reload reads it in full
-    await lean.api("/api/reload", {});
+  });
+
+  await check("View › Reload reads it in full, and while it runs the view and the agent say so", async () => {
+    const reloading = lean.api("/api/reload", {});
+    let settled = false;
+    reloading.finally(() => (settled = true)).catch(() => {});
+    let told = null;
+    while (!settled && !told) {
+      if ((await lean.state()).tail?.exactAfter === "reading") told = liveLine((await lean.tool("get_view_state")).text);
+      else await sleep(30);
+    }
+    await reloading;
+    assert.ok(told !== null, "the read under way seen");
+    assert.match(told, /your tools see them once the full read under way finishes$/);
     const done = await lean.state();
     assert.deepEqual([done.tail, done.loadError, done.totalFrames], [null, null, done.capture.packets]);
+  });
+  await lean.close();
+  servers.pop();
+
+  // A sharkd whose full reads the checks hold under way and kill, as the kernel's OOM killer would
+  const holdBin = join(work, "hold-bin");
+  mkdirSync(holdBin);
+  writeFileSync(join(holdBin, "sharkd"), `#!/bin/sh\nexec "${process.execPath}" "${join(root, "test/holding-sharkd.mjs")}" "$@"\n`);
+  chmodSync(join(holdBin, "sharkd"), 0o755);
+  const realSharkd = process.env.PATH.split(":").map((d) => join(d, "sharkd")).find((p) => existsSync(p));
+  const hold = { HOLD: join(work, "sharkd-hold"), HELD: join(work, "sharkd-held"), KILL: join(work, "sharkd-kill") };
+  const holding = (name, env = {}) => server(name, { PATH: `${holdBin}:${bin}:${process.env.PATH}`, REAL_SHARKD: realSharkd, ...hold, ...env });
+  /** Starts a capture and holds a live full read under way until the packets after the last one are listed. */
+  const heldRead = async (wb) => {
+    await wb.api("/api/capture/start", { iface: "lo", filter: "burst 20000 rate 1000", autostop: {}, ring: null });
+    await wb.until("a full read", 30_000, (s) => s.totalFrames > 0);
+    writeFileSync(hold.HOLD, "");
+    return wb.until("a full read held, and the tail", 30_000, (s) => existsSync(hold.HELD) && s.tail?.frames > 0);
+  };
+  const stopAndKill = async (wb) => {
+    await wb.api("/api/capture/stop", {});
+    await wb.until("the capture to stop", 15_000, (s) => s.capture.status === "idle");
+    writeFileSync(hold.KILL, "");
+    return wb.until("the final read", 60_000, (s) => !existsSync(hold.KILL) && !s.tail && !s.loading && s.totalFrames === s.capture.packets);
+  };
+
+  const held = await holding("held");
+  servers.push(held);
+  await check("a live full read that dies after the capture stopped: the final read still makes the view exact, and nothing says it failed", async () => {
+    await heldRead(held);
+    const done = await stopAndKill(held);
+    assert.equal(done.loadError, null);
+    const events = (await held.api("/api/events?after=0")).events.map((e) => e.text);
+    assert.ok(events.some((t) => /^Live reload: sharkd exited \(SIGKILL\)/.test(t)), events.join("\n"));
+    assert.deepEqual(events.filter((t) => /in full failed/.test(t)), []);
+  });
+  await held.close();
+  servers.pop();
+
+  const heldLean = await holding("held-lean", { WIREBUDDY_MEM_AVAILABLE: "1" });
+  servers.push(heldLean);
+  await check("short of memory, a read in place that dies after the capture stopped: the final read is what tries again, and says so", async () => {
+    await heldRead(heldLean);
+    rmSync(hold.HOLD);
+    await heldLean.until("full reads to wait", 30_000, (s) => !existsSync(hold.HELD) && s.tail?.paused);
+    // View › Reload reads in place, held under way
+    writeFileSync(hold.HOLD, "");
+    const reloading = heldLean.api("/api/reload", {}).catch((err) => err);
+    await heldLean.until("the read in place", 30_000, () => existsSync(hold.HELD));
+    const done = await stopAndKill(heldLean);
+    assert.match((await reloading).message, /sharkd exited \(SIGKILL\)/);
+    assert.equal(done.loadError, null);
+    const failed = (await heldLean.api("/api/events?after=0")).events.filter((e) => /in full failed/.test(e.text)).map((e) => e.text);
+    assert.equal(failed.length, 1, failed.join("\n"));
+    assert.match(failed[0], /, perhaps for lack of memory; its packets are listed provisionally from slices of the file\. The full read after the capture's end tries again$/);
+  });
+  await heldLean.close();
+  servers.pop();
+
+  await check("SIGHUP ends a server as SIGTERM does, and a server removes the slices that killed ones left behind", async () => {
+    assert.ok(sliceTag, "a folder of slices seen");
+    const dir = join(work, "hup");
+    const stale = join(dir, `.wirebuddy-slices-${sliceTag}-99999999-stale`);
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, "1.pcapng"), "x");
+    const hupHome = join(work, "hup-home");
+    mkdirSync(hupHome);
+    const proc = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", "t".repeat(32), "--capture-dir", dir], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...homeEnv(hupHome), WIREBUDDY_EXTENSIONS: "" },
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let out = "";
+    proc.stdout.on("data", (d) => (out += d));
+    const exited = new Promise((resolve) => proc.once("exit", (code, signal) => resolve({ code, signal })));
+    try {
+      for (const end = Date.now() + 15_000; !out.includes("UI at") && Date.now() < end; ) await sleep(50);
+      assert.match(out, /UI at/);
+      assert.equal(existsSync(stale), false, "the stale folder is gone");
+      const instance = join(hupHome, "run/wirebuddy", `${proc.pid}.json`);
+      assert.ok(existsSync(instance));
+      proc.kill("SIGHUP");
+      assert.deepEqual(await exited, { code: 0, signal: null });
+      assert.equal(existsSync(instance), false);
+    } finally {
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGTERM");
+    }
+  });
+
+  await check("a server signalled as soon as its URL is out ends as cleanly", async () => {
+    const quickHome = join(work, "quick-home");
+    mkdirSync(quickHome);
+    for (let k = 0; k < 5; k++) {
+      const proc = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", "t".repeat(32), "--capture-dir", join(work, "quick")], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...homeEnv(quickHome), WIREBUDDY_EXTENSIONS: "" },
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      let out = "";
+      let sent = false;
+      proc.stdout.on("data", (d) => {
+        if (!sent && (out += d).includes("UI at")) sent = proc.kill("SIGHUP");
+      });
+      const timer = setTimeout(() => proc.kill("SIGKILL"), 15_000);
+      const exited = await new Promise((resolve) => proc.once("exit", (code, signal) => resolve({ code, signal })));
+      clearTimeout(timer);
+      assert.deepEqual(exited, { code: 0, signal: null }, `server ${k + 1}`);
+      assert.equal(existsSync(join(quickHome, "run/wirebuddy", `${proc.pid}.json`)), false);
+    }
   });
 } finally {
   browser?.close();

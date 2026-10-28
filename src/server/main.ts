@@ -5,6 +5,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Extensions } from "./extensions.ts";
+import { removeStaleSlices } from "./livetail.ts";
 import { Viewer } from "./viewer.ts";
 import { startHttp } from "./http.ts";
 import { startMcp } from "./mcp.ts";
@@ -83,8 +84,11 @@ const extensions = new Extensions(join(dirname(fileURLToPath(import.meta.url)), 
 await extensions.init(sharkd);
 if (extensions.unavailable) log(`extensions are unavailable: ${extensions.unavailable}`);
 
+const captureDir = resolve(values["capture-dir"] ?? join(homedir(), ".local/share/wirebuddy/captures"));
+// Slices of big live captures that servers killed before left there
+removeStaleSlices(captureDir);
 const viewer = new Viewer({
-  captureDir: resolve(values["capture-dir"] ?? join(homedir(), ".local/share/wirebuddy/captures")),
+  captureDir,
   sharkd,
   dumpcap: dumpcap ?? "dumpcap",
   wireshark: which("wireshark"),
@@ -117,22 +121,24 @@ const http = await startHttp(viewer, {
   token,
   webRoot,
 });
-log(`UI at ${http.url}`);
 const instance = instanceFile();
-writeInstance(instance, http.url);
-
-if (positionals[0]) {
-  viewer.open(resolve(positionals[0])).catch((err) => log(`could not open ${positionals[0]}: ${(err as Error).message}`));
-}
-
 const shutdown = () => {
   viewer.shutdown();
   http.close();
   removeInstance(instance);
   process.exit(0);
 };
+// Set before the URL is out: a caller may signal as soon as it sees it
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+// The terminal closed
+process.on("SIGHUP", shutdown);
+log(`UI at ${http.url}`);
+writeInstance(instance, http.url);
+
+if (positionals[0]) {
+  viewer.open(resolve(positionals[0])).catch((err) => log(`could not open ${positionals[0]}: ${(err as Error).message}`));
+}
 
 if (values.mcp) {
   viewer.attachAgent();

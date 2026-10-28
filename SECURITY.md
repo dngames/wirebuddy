@@ -47,9 +47,12 @@ Supported versions: the latest `main` and the latest release.
   also gzip- or zstd-compressed), whatever the name.
 - Live captures, exports and saved objects are created readable only by the user. While a big
   live capture is read provisionally, slices of its newest packets are written next to it, into
-  a folder `.wirebuddy-slices-<pid>-<random>` only the user can open (`0700`, files `0600`,
-  created exclusively); the folder is removed once the capture is read in full, the view moves
-  on or WireBuddy exits, and a later WireBuddy removes ones whose server is gone.
+  a folder `.wirebuddy-slices-<machine>-<pid>-<random>` only the user can open (`0700`, files
+  `0600`, created exclusively); the folder is removed once the capture is read in full, the view
+  moves on or WireBuddy exits (also when its terminal closes). One left behind by a server that
+  was killed is removed by a later WireBuddy when it starts, starts a capture or writes slices
+  there, but only a folder of the user's own (not a link) of a server on the same machine (host,
+  boot and pid namespace) that is gone.
 - Extensions are Lua code that runs as the user inside `sharkd` and the Wireshark WireBuddy
   opens. The MCP tools and the UI can test, reload and switch them on and off, not write them;
   switching one off doesn't stop the agent from testing it or switching it on again.

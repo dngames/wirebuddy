@@ -9,7 +9,7 @@ import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
-import { FT_FRAMENUM, heldReason, LiveTail, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
+import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
 import { Panels } from "./panels.ts";
@@ -202,13 +202,18 @@ export class Viewer extends EventEmitter {
   private baseColumns: string[] = [];
   /** Their formats (%m the number, %i Info). */
   private columnFormats: string[] = [];
-  /** sharkd ftypes of fields, null when unknown. */
+  /** sharkd ftypes of fields, null when unknown; as the extensions of `typesSeq` define them. */
   private readonly fieldTypes = new Map<string, number | null>();
+  private typesSeq = 0;
   /** The live capture's packets after the last full read, listed from slices once it is active. */
   private tail: LiveTail | null = null;
   private tailTimer: NodeJS.Timeout | null = null;
   private tailBusy = false;
   private tailFiltering = false;
+  /** A filter pass was asked for while one ran: the running one goes on. */
+  private filterAgain = false;
+  /** The full read after the capture stopped is queued or running. */
+  private finalRead = false;
   /** A live file whose tail was turned off: it gets none again. */
   private tailOff: string | null = null;
   private tailProblemAt = 0;
@@ -220,7 +225,7 @@ export class Viewer extends EventEmitter {
   private loads = 0;
   /** Why live full reads wait, or null. */
   private paused: string | null = null;
-  /** Why the last full read, in place, failed: the view lists the file from slices until one succeeds. */
+  /** Why the last full read failed while nothing would read the file again by itself: newer packets stay provisional until one succeeds. */
   private readFailed: string | null = null;
   /** Marks and the selection on frames up to here stay although the tail that listed them closed. */
   private keptFrames = 0;
@@ -256,8 +261,9 @@ export class Viewer extends EventEmitter {
     this.engines = [new Sharkd(this.sharkdBin, opts.profile, env, generation), new Sharkd(this.sharkdBin, opts.profile, env, generation)];
     for (const e of this.engines) {
       e.onFailure = (message) => {
-        // A dissector that crashes sharkd crashes every respawn that reads the same packets
-        const hint = this.extensions.any() && message.startsWith("sharkd exited") ? " — if this repeats, an extension may crash it: test them with extensions(action \"test\") and disable the culprit" : "";
+        // A dissector that crashes sharkd crashes every respawn that reads the same packets; a kill (memory) is no crash
+        const crashed = message.startsWith("sharkd exited") && !message.startsWith("sharkd exited (SIGKILL)");
+        const hint = this.extensions.any() && crashed ? " — if this repeats, an extension may crash it: test them with extensions(action \"test\") and disable the culprit" : "";
         this.events.add("WARNING", printable(message) + hint);
       };
       e.onLua = (report) => this.luaReport(report);
@@ -332,6 +338,7 @@ export class Viewer extends EventEmitter {
     this.capture.on("file", (file: string) => {
       // A new capture takes over the view; later ring files only if the view still follows it
       const files = this.capture.state.files;
+      if (files.length === 1) removeStaleSlices(dirname(file));
       if (files.length > 1 && !this.followingCapture(files[files.length - 2])) return;
       this.open(file).catch((err) => this.problem(`Live view: ${(err as Error).message}`));
       this.scheduleReload();
@@ -342,8 +349,14 @@ export class Viewer extends EventEmitter {
       this.reloadTimer = null;
       if (!this.followingCapture()) return;
       // The last packets show while the final full read runs
+      this.finalRead = true;
       void this.tailTick();
-      this.reload(true).then(() => this.checkOffers(false), () => {});
+      this.exclusive(() => this.reloadNow(true, false, false, true))
+        .finally(() => {
+          this.finalRead = false;
+          this.publishTail();
+        })
+        .then(() => this.checkOffers(false), () => {});
     });
   }
 
@@ -437,16 +450,18 @@ export class Viewer extends EventEmitter {
     return -1;
   }
 
-  /** Loads `file` into `engine` and computes the displayed frames for `filter`. */
   /**
    * Loads `file` into `engine` and computes the displayed frames for `filter`;
    * with `fallback`, a filter that doesn't compile (its protocol is gone) is
-   * dropped and the result's `filter` is "".
+   * dropped and the result's `filter` is "". `inPlace`: the engine read the
+   * only copy, so a kill (SIGKILL) is the memory running out, not an
+   * extension.
    */
-  private async loadInto(engine: Sharkd, file: string, filter: string, fallback = false) {
+  private async loadInto(engine: Sharkd, file: string, filter: string, fallback = false, inPlace = false) {
+    const memory = (err: unknown): boolean => inPlace && err instanceof SharkdExit && err.signal === "SIGKILL";
     const once = (dropFilter: boolean) =>
       this.crashRetries(async () => {
-        await this.current(engine);
+        await this.current(engine, true);
         const load = await engine.call<{ status: string; err?: number }>("load", { file });
         // A file still being written ends mid-packet; sharkd reports that but keeps what it read.
         if (load.status !== "OK" && load.err !== -12) throw new Error(load.status);
@@ -462,7 +477,7 @@ export class Viewer extends EventEmitter {
     try {
       return await once(fallback);
     } catch (err) {
-      if (!(err instanceof SharkdExit) || !this.extensions.any()) throw err;
+      if (!(err instanceof SharkdExit) || !this.extensions.any() || memory(err)) throw err;
       // Without the extensions' last change, then without any; if it still dies, they weren't the cause
       const before = this.extensions.saved();
       const steps: [RollBack, () => boolean, string][] = [
@@ -478,7 +493,7 @@ export class Viewer extends EventEmitter {
           this.problem(`sharkd crashed reading ${basename(file)} with the extensions (${printable(err.message)}), so it reads it ${how}${cleared}. Test the extensions to find the one at fault (extensions action "test")`);
           return { ...result, rolledBack: kind };
         } catch (again) {
-          if (!(again instanceof SharkdExit)) {
+          if (!(again instanceof SharkdExit) || memory(again)) {
             this.extensions.restore(before);
             throw again;
           }
@@ -501,9 +516,13 @@ export class Viewer extends EventEmitter {
     }
   }
 
-  /** Restarts an engine that runs other extensions than the current ones (once its requests are done). */
-  private async current(engine: Sharkd): Promise<void> {
-    if (!engine.outdated()) return;
+  /**
+   * Restarts an engine that runs other extensions than the current ones, or
+   * (`load`: before it reads a capture) one that would count Cumulative
+   * Bytes on from the capture it read before; once its requests are done.
+   */
+  private async current(engine: Sharkd, load = false): Promise<void> {
+    if (!engine.outdated() && !(load && engine.loaded && this.columnFormats.includes("%B"))) return;
     await engine.idle(RESTART_WAIT_MS);
     engine.restart();
   }
@@ -511,15 +530,16 @@ export class Viewer extends EventEmitter {
   /**
    * Shows what a full read found. `changed`: why packets read differently
    * now (panels start over); `redissected`: TLS keys or extensions changed,
-   * so the tail checks its filter again; `untrusted`: the tail doesn't line
-   * up with the read and goes.
+   * so the tail checks its filter again (`held`: why it can't now, if
+   * typed again); `untrusted`: the tail doesn't line up with the read and
+   * goes.
    */
   private applyLoad(
     file: string,
     filter: string,
     { status, displayed }: { status: SharkdStatus; displayed: Int32Array | null },
     keepSelection: boolean,
-    { changed = null, redissected = false, untrusted = false }: { changed?: string | null; redissected?: boolean; untrusted?: boolean } = {},
+    { changed = null, redissected = false, untrusted = false, held }: { changed?: string | null; redissected?: boolean; untrusted?: boolean; held?: string | null } = {},
   ): void {
     // Opened, or not just grown: what panels read is outdated
     const why = !keepSelection ? "file" : (changed ?? (status.frames < this.state.totalFrames ? "rewritten" : null));
@@ -527,7 +547,7 @@ export class Viewer extends EventEmitter {
     const before = this.rowFrames();
     if (this.tail && (this.tail.file !== file || why === "rewritten" || untrusted)) this.dropTail();
     this.tail?.rebase(status.frames);
-    if (redissected || why === "extensions") this.tail?.setFilter(this.tail.filter, this.tail.held);
+    if (redissected || why === "extensions") this.tail?.setFilter(this.tail.filter, held === undefined ? this.tail.held : held);
     // Read in full after the capture stopped: nothing provisional is left
     if (this.tail && !this.capture.running && this.tail.count <= status.frames) this.dropTail();
     if (!this.listedTail) this.paused = null;
@@ -596,6 +616,7 @@ export class Viewer extends EventEmitter {
         const result = await this.loadInto(this.engines[standby], file, filter, true);
         filter = result.filter;
         this.active = standby;
+        this.forgetTypes();
         this.lastReadMs = 0;
         this.paused = null;
         this.tailOff = null;
@@ -622,30 +643,37 @@ export class Viewer extends EventEmitter {
   /**
    * `dropped`: the display filter didn't apply any more (only with
    * `fallback`); `rolledBack`: extensions crashed sharkd. `redissect`: TLS
-   * keys or extensions changed. While full reads wait for memory, the read
-   * replaces the active engine's copy if there is no room for a second one.
+   * keys or extensions changed. `final`: the read after the capture stopped.
+   * While full reads wait for memory, the read replaces the active engine's
+   * copy if there is no room for a second one.
    */
-  private async reloadNow(force: boolean, fallback = false, redissect = false): Promise<{ dropped: boolean; rolledBack: RollBack }> {
+  private async reloadNow(force: boolean, fallback = false, redissect = false, final = false): Promise<{ dropped: boolean; rolledBack: RollBack }> {
     const file = this.state.file;
     if (!file) return { dropped: false, rolledBack: false };
     const size = safeSize(file);
     if (!force && size === this.loadedSize) return { dropped: false, rolledBack: false };
-    const inPlace = this.readInPlace();
+    const inPlace = await this.readInPlace();
     const target = inPlace ? this.active : 1 - this.active;
+    this.readStartedAt = Date.now();
     if (inPlace) {
       const text = `Not enough free memory for a second copy of ${basename(file)}: WireBuddy reads it again in place of the one it has, so the packet list waits until it has`;
       this.events.add("WARNING", text);
       this.emit("toast", "info", text);
-      this.engines[target].restart();
       this.set({ loading: true });
+      // Requests in flight are answered first
+      await this.engines[target].idle(RESTART_WAIT_MS);
+      this.engines[target].restart();
     }
+    this.publishTail();
     const started = Date.now();
-    this.readStartedAt = started;
     let result: Awaited<ReturnType<Viewer["loadInto"]>>;
     try {
-      result = await this.loadInto(this.engines[target], file, this.state.filter, fallback);
+      result = await this.loadInto(this.engines[target], file, this.state.filter, fallback, inPlace);
     } catch (err) {
-      if (inPlace) await this.inPlaceFailed(file, err as Error);
+      this.readStartedAt = 0;
+      if (final) this.finalRead = false;
+      // The active engine lost its copy, or no full read comes by itself
+      if (inPlace || (this.listedTail && !this.capture.running && !this.finalRead)) await this.fullReadFailed(file, err as Error, inPlace);
       throw err;
     } finally {
       this.readStartedAt = 0;
@@ -658,12 +686,14 @@ export class Viewer extends EventEmitter {
     const head = fileHead(file);
     const n = Math.min(head.length, this.loadedHead.length);
     const rewritten = ino !== this.loadedIno || !head.subarray(0, n).equals(this.loadedHead.subarray(0, n));
+    // Other extensions: fields may hold frame numbers now, or no longer
+    const held = redissect || result.rolledBack ? await this.retype(this.engines[target], result.status, result.filter) : undefined;
     const untrusted = !rewritten && !(await this.checkTail(this.engines[target], file, result));
     if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
     this.active = target;
     this.loadedSize = size;
     // Read without some extensions now: packets dissect differently
-    this.applyLoad(file, result.filter, result, true, { changed: result.rolledBack ? "extensions" : rewritten ? "rewritten" : null, redissected: redissect, untrusted });
+    this.applyLoad(file, result.filter, result, true, { changed: result.rolledBack ? "extensions" : rewritten ? "rewritten" : null, redissected: redissect, untrusted, held });
     this.loadedIno = ino;
     this.loadedHead = head;
     if (redissect || result.rolledBack) void this.filterTail();
@@ -679,28 +709,41 @@ export class Viewer extends EventEmitter {
    * wait for memory, or would need to, and even without the standby's copy
    * there is no room for another one.
    */
-  private readInPlace(): boolean {
+  private async readInPlace(): Promise<boolean> {
     if (!this.paused && !(this.listedTail && this.memoryShort())) return false;
     // A standby holds on to the memory of its last read until it restarts
-    this.engines[1 - this.active].restart();
+    const standby = this.engines[1 - this.active];
+    await standby.idle(RESTART_WAIT_MS);
+    standby.restart();
     return this.memoryShort();
   }
 
   /**
-   * A read in place failed: the active engine holds nothing of the file now
-   * and mustn't read it again by itself. The view lists all of its packets
-   * provisionally from slices, and live full reads wait, until a read
-   * succeeds (View › Reload, or the capture's end).
+   * A full read failed in place, or with none to come by itself (the
+   * capture has stopped and its final read is done). Newer packets stay
+   * provisional, and live full reads wait, until a read succeeds (View ›
+   * Reload, or the capture's end). In place, the active engine holds
+   * nothing of the file now and mustn't read it again by itself: the view
+   * lists all of its packets provisionally from slices.
    */
-  private async inPlaceFailed(file: string, err: Error): Promise<void> {
-    this.engine.forgetFile();
+  private async fullReadFailed(file: string, err: Error, inPlace: boolean): Promise<void> {
+    if (inPlace) this.engine.forgetFile();
     // The packets the capture wrote last, too
     await this.listedTail?.update();
     if (this.state.file !== file) return;
     const tail = this.listedTail;
-    tail?.rebase(0);
-    this.readFailed = `reading ${basename(file)} in full failed (${printable(err.message)}), perhaps for lack of memory`;
+    this.readFailed = `reading ${basename(file)} in full failed (${printable(err.message)})${inPlace ? ", perhaps for lack of memory" : ""}`;
     this.paused = this.readFailed;
+    const listed = !tail ? "" : inPlace || !this.state.totalFrames ? "; its packets are listed provisionally from slices of the file" : "; its newer packets stay provisional";
+    // A read in place failed ahead of the capture's final one
+    const retry = this.finalRead ? "The full read after the capture's end tries again" : "View › Reload tries again";
+    const loadError = `${this.readFailed[0].toUpperCase()}${this.readFailed.slice(1)}${listed}. ${retry}`;
+    if (!inPlace) {
+      this.set({ loadError, tail: this.tailState() });
+      this.events.add("ERROR", loadError);
+      return;
+    }
+    tail?.rebase(0);
     this.displayed = this.state.filter ? new Int32Array(0) : null;
     this.loads++;
     const known = tail?.count ?? 0;
@@ -709,7 +752,7 @@ export class Viewer extends EventEmitter {
     this.state = {
       ...this.state,
       loading: false,
-      loadError: `${this.readFailed[0].toUpperCase()}${this.readFailed.slice(1)}${tail ? "; its packets are listed provisionally from slices of the file" : ""}. View › Reload tries again`,
+      loadError,
       totalFrames: 0,
       displayedFrames: 0,
       marks: this.state.marks.filter((m) => m.frame <= known),
@@ -721,7 +764,7 @@ export class Viewer extends EventEmitter {
     };
     const selectedIndex = this.indexOf(selected);
     this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
-    this.events.add("ERROR", this.state.loadError!);
+    this.events.add("ERROR", loadError);
     void this.filterTail();
   }
 
@@ -820,14 +863,23 @@ export class Viewer extends EventEmitter {
     }
   }
 
-  /** Checks newer packets against the display filter: whole chunks back to back, the newest once a tick. */
+  /**
+   * Checks newer packets against the display filter: whole chunks back to
+   * back, the newest once a tick. Asked for while a pass runs (another
+   * filter, packets checked again), the running one goes on after it.
+   */
   private async filterTail(): Promise<void> {
     const tail = this.listedTail;
-    if (!tail || this.tailFiltering) return;
+    if (!tail) return;
+    if (this.tailFiltering) {
+      this.filterAgain = true;
+      return;
+    }
     this.tailFiltering = true;
     try {
       for (let more = true; more && this.tail === tail; ) {
-        more = await tail.filterPass();
+        this.filterAgain = false;
+        more = (await tail.filterPass()) || this.filterAgain;
         this.tailWorked(tail);
         this.publishTail();
       }
@@ -836,6 +888,8 @@ export class Viewer extends EventEmitter {
     } finally {
       this.tailFiltering = false;
     }
+    // Asked for by a tail that came meanwhile
+    if (this.filterAgain && this.listedTail && this.listedTail !== tail) void this.filterTail();
   }
 
   /** What the view tells about the tail, null while it isn't listed. */
@@ -843,14 +897,21 @@ export class Viewer extends EventEmitter {
     const tail = this.listedTail;
     if (!tail) return null;
     const readMs = this.lastReadMs || (this.readStartedAt ? Date.now() - this.readStartedAt : 0);
-    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, paused: this.paused };
+    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, paused: this.paused, exactAfter: this.exactAfter() };
+  }
+
+  /** What makes provisional packets exact (see ProvisionalTail.exactAfter). */
+  private exactAfter(): ProvisionalTail["exactAfter"] {
+    if (this.capture.running) return this.paused ? "stop" : "read";
+    return this.readStartedAt || this.finalRead ? "reading" : "reload";
   }
 
   /** Publishes the tail as it is now; the list's generation moves when its rows grew. */
   private publishTail(): void {
     const tail = this.tailState();
     const was = this.state.tail;
-    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused) return;
+    if (!tail && !was) return;
+    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused && tail.exactAfter === was.exactAfter) return;
     const grew = (tail?.displayed ?? 0) !== (was?.displayed ?? 0);
     this.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}) });
   }
@@ -922,7 +983,7 @@ export class Viewer extends EventEmitter {
       this.tailOff = file;
       return false;
     }
-    if (tail.active && result.filter !== tail.filter) tail.setFilter(result.filter, await this.heldReason(result.filter));
+    if (tail.active && result.filter !== tail.filter) tail.setFilter(result.filter, await this.heldReason(result.filter, engine));
     return true;
   }
 
@@ -941,38 +1002,61 @@ export class Viewer extends EventEmitter {
     this.events.add("WARNING", `Live view: newer packets could not be read provisionally: ${printable(message)}`);
   }
 
-  /** Why the tail can't check `filter`, or null. */
-  private heldReason(filter: string): Promise<string | null> {
-    return filter ? heldReason(filter, (field) => this.fieldType(field)) : Promise.resolve(null);
+  /** Why the tail can't check `filter`, or null; fields typed by `engine`'s extensions. */
+  private heldReason(filter: string, engine = this.engine): Promise<string | null> {
+    return filter ? heldReason(filter, (field) => this.fieldType(field, engine)) : Promise.resolve(null);
   }
 
   /** sharkd's ftype of a field, or null. */
-  private async fieldType(field: string): Promise<number | null> {
+  private async fieldType(field: string, engine = this.engine): Promise<number | null> {
     if (this.fieldTypes.has(field)) return this.fieldTypes.get(field)!;
+    const seq = this.typesSeq;
     let type: number | null = null;
     try {
-      const r = await this.engine.call<{ field?: { f: string; t?: number }[] }>("complete", { field });
+      const r = await engine.call<{ field?: { f: string; t?: number }[] }>("complete", { field });
       type = r.field?.find((x) => x.f === field)?.t ?? null;
     } catch {
       // unknown: treated as an ordinary field
     }
-    this.fieldTypes.set(field, type);
+    // Not from extensions replaced meanwhile
+    if (seq === this.typesSeq && !engine.outdated()) this.fieldTypes.set(field, type);
     return type;
   }
 
-  /** How provisional rows read: like the exact ones, renumbered. */
-  private rowView(): RowView {
+  /** Field types go with the extensions they were read with. */
+  private forgetTypes(): void {
+    this.fieldTypes.clear();
+    this.typesSeq++;
+  }
+
+  /** Types the fields of the view's columns (`formats`, then the custom ones) as `engine` reads them. */
+  private async typeColumns(engine = this.engine, formats = this.columnFormats): Promise<void> {
+    for (const format of formats) if (format.startsWith("%Cus:")) await this.fieldType(format.split(":")[1], engine);
+    for (const c of this.state.customColumns) await this.fieldType(c.field, engine);
+  }
+
+  /** Types the columns' fields again for `engine`, read with other extensions; returns why the tail can't check `filter` now. */
+  private async retype(engine: Sharkd, status: SharkdStatus, filter: string): Promise<string | null> {
+    this.forgetTypes();
+    await this.typeColumns(engine, (status.column_info ?? []).map((c) => c.format));
+    return this.heldReason(filter, engine);
+  }
+
+  /** How provisional rows read: like the exact ones, renumbered once the columns' fields are typed. */
+  private async rowView(): Promise<RowView> {
+    await this.typeColumns();
+    const numbering = this.numbering();
     const { epoch, columns, customColumns } = this.state;
     return {
-      numbering: this.numbering(),
+      numbering,
       fetch: (engine, params) => this.framesWithColumns(engine, params),
-      key: [epoch, ...columns, ...customColumns.map((c) => c.field)].join("\u0001"),
+      key: [epoch, ...columns, ...customColumns.map((c) => c.field), JSON.stringify(numbering)].join("\u0001"),
     };
   }
 
-  /** Which columns of the view's rows show frame numbers, and which slices can't fill. */
+  /** Which columns of the view's rows show frame numbers, and which slices can't fill or count alone. */
   private numbering(): Numbering {
-    const out: Numbering = { frames: [], info: -1, blank: [] };
+    const out: Required<Numbering> = { frames: [], info: -1, blank: [], bytes: [] };
     const classify = (j: number, field: string): void => {
       if (field === "frame.number" || this.fieldTypes.get(field) === FT_FRAMENUM) out.frames.push(j);
       else if (streamNumbered(field)) out.blank.push(j);
@@ -980,6 +1064,7 @@ export class Viewer extends EventEmitter {
     this.columnFormats.forEach((format, j) => {
       if (format === "%m") out.frames.push(j);
       else if (format === "%i") out.info = j;
+      else if (format === "%B") out.bytes.push(j);
       else if (format.startsWith("%Cus:")) classify(j, format.split(":")[1]);
     });
     this.state.customColumns.forEach((c, k) => classify(this.baseColumns.length + k, c.field));
@@ -1089,7 +1174,7 @@ export class Viewer extends EventEmitter {
    */
   private async tailRows(tail: LiveTail, generation: number, i0: number, n: number): Promise<PacketRow[]> {
     try {
-      const rows = await tail.rows(i0, n, this.rowView(), () => generation === this.state.generation);
+      const rows = await tail.rows(i0, n, await this.rowView(), () => generation === this.state.generation);
       this.tailWorked(tail);
       return rows;
     } catch (err) {
@@ -1102,8 +1187,9 @@ export class Viewer extends EventEmitter {
 
   /** Summary row of one frame, regardless of the display filter. */
   async row(num: number): Promise<PacketRow | null> {
-    if (num > this.state.totalFrames && this.listedTail && num <= this.known()) {
-      const [r] = await this.listedTail.rowsOf([num], this.rowView());
+    const tail = this.listedTail;
+    if (num > this.state.totalFrames && tail && num <= this.known()) {
+      const [r] = await tail.rowsOf([num], await this.rowView());
       return r ?? null;
     }
     if (num < 1 || num > this.state.totalFrames) return null;
@@ -1227,10 +1313,15 @@ export class Viewer extends EventEmitter {
   /** Why a frame after the last full read can't be read exactly yet. */
   private notReadYet(num: number): string {
     const t = this.tailState();
-    const wait = t?.paused
-      ? `it is read in full once ${this.capture.running ? "the capture stops" : "a full read succeeds (View › Reload)"} (full reads wait: ${t.paused})`
-      : `the next full read covers it, in about ${Math.ceil(((t?.readMs ?? 0) + LIVE_RELOAD_MS) / 1000)} s`;
-    return `frame ${num} arrived after the last full read of the live capture (frames 1-${this.state.totalFrames}): ${wait}`;
+    const read = this.state.totalFrames;
+    const wait = {
+      read: `the next full read covers it, in about ${Math.ceil(((t?.readMs ?? 0) + LIVE_RELOAD_MS) / 1000)} s`,
+      stop: `it is read in full once the capture stops (full reads wait: ${t?.paused})`,
+      reading: "the full read under way covers it",
+      reload: `it is read in full once a full read succeeds (View › Reload)${t?.paused ? ` (${t.paused})` : ""}`,
+    }[t?.exactAfter ?? "read"];
+    const why = read ? `frame ${num} arrived after the last full read of the live capture (frames 1-${read})` : `frame ${num} is not read in full, as no packet of the live capture is`;
+    return `${why}: ${wait}`;
   }
 
   /** Rows for an arbitrary filter, without touching what the UI shows. */
@@ -1644,6 +1735,9 @@ export class Viewer extends EventEmitter {
     else throw new Error(`unknown selection "${req.which}"`);
     if (!ranges.length) throw new Error("no packets to export");
     const frames = countRanges(ranges);
+    // Packets of the live capture not read in full yet
+    const read = this.state.totalFrames;
+    const provisional = ranges.reduce((n, [a, b]) => n + Math.max(0, b - Math.max(a, read + 1) + 1), 0);
     // Wireshark shows them as packet comments
     const comments = new Map<number, string>();
     if (req.markComments && format === "pcapng") {
@@ -1656,7 +1750,7 @@ export class Viewer extends EventEmitter {
       this.agentExports.add(resolve(req.path));
       this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
     }
-    return { path: req.path, frames, size, comments: comments.size, ...(leftOut ? { leftOut } : {}) };
+    return { path: req.path, frames, size, comments: comments.size, ...(leftOut ? { leftOut } : {}), ...(provisional ? { provisional } : {}) };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
@@ -1961,6 +2055,7 @@ export class Viewer extends EventEmitter {
             await fresh.call("status");
           });
           this.active = 1 - this.active;
+          this.forgetTypes();
         }
       } finally {
         this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });

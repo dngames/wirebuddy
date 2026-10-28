@@ -484,7 +484,12 @@ function render(): void {
 /** Tooltip of provisional rows. */
 function provisionalTitle(): string {
   const t = app.state?.tail;
-  const when = !t?.paused ? `with the next full read of the capture (about ${Math.max(1, Math.round((t?.readMs ?? 0) / 1000))} s)` : captureActive() ? "once the capture stops" : "once read in full (View › Reload)";
+  const when = {
+    read: `with the next full read of the capture (about ${Math.max(1, Math.round((t?.readMs ?? 0) / 1000))} s)`,
+    stop: "once the capture stops",
+    reading: "once the full read under way finishes",
+    reload: "once read in full (View › Reload)",
+  }[t?.exactAfter ?? "read"];
   return `Provisional: read from the newest packets, with their connections' start, before WireBuddy read the whole capture again. Exact ${when}.`;
 }
 

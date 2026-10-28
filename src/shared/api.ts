@@ -178,9 +178,10 @@ export interface ViewState {
    * Packets of a live capture that arrived after the last full read of the
    * file, once full reads take a second or more. The packet list shows them
    * after the exact rows (row indices from displayedFrames on), dissected
-   * provisionally ({@link PacketRow.p}); the next full read makes them exact.
-   * totalFrames and displayedFrames count only packets read in full. null
-   * otherwise, and once the capture stopped and was read in full.
+   * provisionally ({@link PacketRow.p}); a full read makes them exact (see
+   * {@link ProvisionalTail.exactAfter}). totalFrames and displayedFrames
+   * count only packets read in full. null otherwise, and once the capture
+   * stopped and was read in full.
    */
   tail: ProvisionalTail | null;
 }
@@ -198,11 +199,18 @@ export interface ProvisionalTail {
   /** How long a full read of the file takes now, in ms: provisional packets turn exact with the next one. */
   readMs: number;
   /**
-   * Why full reads wait (not enough memory for another copy, or a read in
-   * place of the only copy failed), else null; the capture is read in full
-   * once it stops, or after a failed read once one is asked for.
+   * Why full reads wait (not enough memory for another copy, or the last
+   * full read failed), else null; the capture is read in full once it
+   * stops, or after a failed read once one is asked for.
    */
   paused: string | null;
+  /**
+   * What makes these packets exact: "read" the next live full read (in
+   * about readMs), "stop" the capture's end (full reads wait), "reading"
+   * the full read under way (the capture has stopped), "reload" only a
+   * full read the user asks for (View › Reload), as the last one failed.
+   */
+  exactAfter: "read" | "stop" | "reading" | "reload";
 }
 
 /** A panel window: an extension's web page in a sandboxed frame of its own. */
@@ -564,6 +572,8 @@ export interface ExportResult {
   comments: number;
   /** Newer packets of a live capture left out because they weren't read in full yet (export by display filter). */
   leftOut?: number;
+  /** Of `frames`, packets of a live capture that weren't read in full yet (written as captured). */
+  provisional?: number;
 }
 
 export type ServerEvent =

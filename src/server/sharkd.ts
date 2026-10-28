@@ -21,8 +21,15 @@ export class SharkdError extends Error {
   }
 }
 
-/** sharkd died (crashed, or a plugin ended it), or hung and was killed. */
-export class SharkdExit extends Error {}
+/** sharkd died (crashed, or a plugin ended it), or hung and was killed; `signal` ended it, if one did. */
+export class SharkdExit extends Error {
+  constructor(
+    message: string,
+    readonly signal: NodeJS.Signals | null = null,
+  ) {
+    super(message);
+  }
+}
 
 /** sharkd's answer was too long to read; sharkd was restarted. */
 export class SharkdTooLarge extends Error {}
@@ -66,6 +73,8 @@ export class Sharkd {
   private lastLoad: Record<string, unknown> | undefined;
   /** The file the last load was for, also while it is still loading. */
   private loadingFile = "";
+  /** The running process was asked to read a capture. */
+  private loadedHere = false;
   private readonly prefs = new Map<string, string>();
   /** Processes stopped on purpose: their exit is no crash. */
   private readonly stopped = new WeakSet<ChildProcessWithoutNullStreams>();
@@ -98,6 +107,7 @@ export class Sharkd {
     // sharkd reads stdin without "-" too; "-C <profile> -" is refused
     const args = this.profile ? ["-C", this.profile] : ["-"];
     this.startedWith = this.generation();
+    this.loadedHere = false;
     const proc = spawn(this.bin, args, { stdio: ["pipe", "pipe", "pipe"], env: this.env() });
     let ready: (report: LuaReport | null) => void = () => {};
     this.luaReady = new Promise((done) => (ready = done));
@@ -161,7 +171,7 @@ export class Sharkd {
       const message = `sharkd exited (${signal ?? code})${detail ? ": " + detail : ""}`;
       // Still current: it died by itself, not by close() or a timeout kill
       if (this.proc === proc && !blamed) this.onFailure(message);
-      this.fail(proc, new SharkdExit(message));
+      this.fail(proc, new SharkdExit(message, signal));
     });
     this.proc = proc;
     return proc;
@@ -250,7 +260,10 @@ export class Sharkd {
       // Not for a preference: a load follows it anyway
       if (method !== "load" && method !== "setconf" && this.lastLoad) this.call("load", this.lastLoad).catch(() => {});
     }
-    if (method === "load") this.loadingFile = String(params?.file ?? "");
+    if (method === "load") {
+      this.loadingFile = String(params?.file ?? "");
+      this.loadedHere = true;
+    }
     const result = new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -299,6 +312,11 @@ export class Sharkd {
   /** Process id of the running sharkd, or null. */
   get pid(): number | null {
     return this.proc?.pid ?? null;
+  }
+
+  /** The running sharkd read a capture: its Cumulative Bytes (%B) of the next one count on from that one's. */
+  get loaded(): boolean {
+    return this.proc !== null && this.loadedHere;
   }
 
   /** Running with an environment older than the current one. */

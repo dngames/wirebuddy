@@ -16,8 +16,10 @@
  * from 1: rows and details are renumbered to the file's frame numbers.
  */
 
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { unlink } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { FrameStore } from "./framestore.ts";
 import { FlowIndex, HEAD_BYTES } from "./flows.ts";
@@ -40,7 +42,7 @@ const MAX_CACHED_ROWS = 100_000;
 const READ_BATCH = 500;
 /** Slices worked out, kept by chunk. */
 const MAX_SLICES = 16;
-/** Folders of slices start with this, then the server's process id. */
+/** Folders of slices start with this, then the machine's tag (see machineTag) and the server's process id. */
 const DIR_PREFIX = ".wirebuddy-slices-";
 /** sharkd's ftype of frame-number fields (FT_FRAMENUM). */
 export const FT_FRAMENUM = 35;
@@ -98,7 +100,7 @@ export function toLocal(s: Slice, frame: number): number {
   return s.extras.length + frame - s.c0 + 1;
 }
 
-/** Which columns of a row show frame numbers, and which are numbered within a slice. */
+/** Which columns of a row show frame numbers, and which are numbered or counted within a slice. */
 export interface Numbering {
   /** No. and frame-number fields (frame.number, tcp.reassembled_in, ...). */
   frames: number[];
@@ -106,16 +108,20 @@ export interface Numbering {
   info: number;
   /** Fields numbered within a slice (stream indices): left empty. */
   blank: number[];
+  /** Cumulative Bytes (%B): the bytes of the file's packets up to the row's. */
+  bytes?: number[];
 }
 
-/** Renumbers a row read from slice `s` and marks it provisional. */
-export function renumberRow(row: PacketRow, s: Slice, n: Numbering): PacketRow {
+/** Renumbers a row read from slice `s` and marks it provisional; `bytes` gives a frame's Cumulative Bytes. */
+export function renumberRow(row: PacketRow, s: Slice, n: Numbering, bytes?: (frame: number) => number): PacketRow {
   const g = (m: string): string => String(toGlobal(s, Number(m)));
+  const num = toGlobal(s, row.num);
   const c = row.c.slice();
   for (const j of n.frames) if (c[j]) c[j] = c[j].replace(/\d+/g, g);
   if (n.info >= 0 && c[n.info]) c[n.info] = renumberInfo(c[n.info], (m) => toGlobal(s, m));
   for (const j of n.blank) if (j < c.length) c[j] = "";
-  return { num: toGlobal(s, row.num), c, bg: row.bg, fg: row.fg, p: true };
+  for (const j of n.bytes ?? []) if (j < c.length) c[j] = bytes ? String(bytes(num)) : "";
+  return { num, c, bg: row.bg, fg: row.fg, p: true };
 }
 
 /**
@@ -222,6 +228,8 @@ export class LiveTail {
   readonly file: string;
   readonly store: FrameStore;
   private readonly flows = new FlowIndex();
+  /** Per frame: the bytes of frames 1..it, as Wireshark counts Cumulative Bytes (32 bits). */
+  private cumBytes = new Uint32Array(4096);
   /** First frames of the chunks so far; the last chunk may still grow. */
   private readonly starts: number[] = [1];
   /** Frames 1..base are read in full; the tail is base+1..count. */
@@ -277,12 +285,24 @@ export class LiveTail {
     const index = async (): Promise<void> => {
       await this.store.update();
       if (this.store.count > this.flows.count) {
-        await this.store.readHeads(this.flows.count + 1, this.store.count, HEAD_BYTES, (frame, _time, _len, link, data) => this.flows.feed(frame, link, data));
+        await this.store.readHeads(this.flows.count + 1, this.store.count, HEAD_BYTES, (frame, _time, len, link, data) => {
+          this.flows.feed(frame, link, data);
+          this.addBytes(frame, len);
+        });
         this.cut();
       }
     };
     this.indexing = this.indexing.then(index, index);
     return this.indexing;
+  }
+
+  private addBytes(frame: number, len: number): void {
+    if (frame > this.cumBytes.length) {
+      const grown = new Uint32Array(this.cumBytes.length * 2);
+      grown.set(this.cumBytes);
+      this.cumBytes = grown;
+    }
+    this.cumBytes[frame - 1] = (frame > 1 ? this.cumBytes[frame - 2] : 0) + len;
   }
 
   /** A full read covers frames 1..frames now. */
@@ -453,7 +473,7 @@ export class LiveTail {
     }
     const rows = new Map<number, PacketRow>();
     const fetch = async (params: Record<string, unknown>): Promise<void> => {
-      for (const r of await view.fetch(engine.sharkd, params)) rows.set(toGlobal(s, r.num), renumberRow(r, s, view.numbering));
+      for (const r of await view.fetch(engine.sharkd, params)) rows.set(toGlobal(s, r.num), renumberRow(r, s, view.numbering, (f) => this.cumBytes[f - 1]));
     };
     for (const [first, n] of runs(byMatch)) await fetch({ filter, ...(first ? { skip: first } : {}), limit: n });
     for (const [first, n] of runs(byFrame)) await fetch({ ...(first > 1 ? { skip: first - 1 } : {}), limit: n });
@@ -559,12 +579,14 @@ export class LiveTail {
     try {
       if (this.folder) rmSync(this.folder, { recursive: true, force: true });
     } catch {
-      // made unwritable meanwhile: a later server removes it
+      // made unwritable meanwhile: a later server on this machine removes it
     }
     this.folder = null;
   }
 
   private newEngine(): Engine {
+    // Closed: nobody would close its sharkd
+    if (this.closed) throw new Superseded("the live view moved on");
     return new Engine(this.opts.sharkd());
   }
 
@@ -601,8 +623,8 @@ export class LiveTail {
   private dir(): string {
     if (this.folder && !existsSync(this.folder)) this.folder = null;
     if (!this.folder) {
-      removeStale(this.opts.dir);
-      this.folder = mkdtempSync(join(this.opts.dir, `${DIR_PREFIX}${process.pid}-`));
+      removeStaleSlices(this.opts.dir);
+      this.folder = mkdtempSync(join(this.opts.dir, slicesPrefix()));
     }
     return this.folder;
   }
@@ -687,16 +709,55 @@ function runs(xs: number[]): [number, number][] {
   return out;
 }
 
-/** Removes folders of slices that servers no longer running left behind. */
-function removeStale(dir: string): void {
-  try {
-    for (const name of readdirSync(dir)) {
-      const pid = Number(/^\.wirebuddy-slices-(\d+)-/.exec(name)?.[1]);
-      if (!pid || pid === process.pid || alive(pid)) continue;
-      rmSync(join(dir, name), { recursive: true, force: true });
+/**
+ * Tells the processes a pid can be checked against: the same host, boot and
+ * pid namespace. Another container, or another host sharing the folder, has
+ * pids of its own.
+ */
+function machineTag(): string {
+  const read = (get: () => string): string => {
+    try {
+      return get().trim();
+    } catch {
+      return "";
     }
+  };
+  const boot = read(() => readFileSync("/proc/sys/kernel/random/boot_id", "utf8"));
+  const pids = read(() => readlinkSync("/proc/self/ns/pid"));
+  return createHash("sha256").update([hostname(), boot, pids].join("\0")).digest("hex").slice(0, 8);
+}
+const MACHINE = machineTag();
+
+/** How the name of a folder of slices of the server `pid` on this machine starts. */
+export function slicesPrefix(pid = process.pid): string {
+  return `${DIR_PREFIX}${MACHINE}-${pid}-`;
+}
+
+/**
+ * Removes the folders of slices the user's servers on this machine left
+ * behind (killed, or the folder was made unwritable): ones whose server is
+ * gone. Links, others' folders and folders of servers elsewhere stay.
+ */
+export function removeStaleSlices(dir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
   } catch {
-    // nothing to clean
+    return;
+  }
+  for (const name of names) {
+    const m = /^\.wirebuddy-slices-([0-9a-f]{8})-(\d+)-/.exec(name);
+    const pid = Number(m?.[2]);
+    if (!m || m[1] !== MACHINE || !pid || pid === process.pid || alive(pid)) continue;
+    const path = join(dir, name);
+    try {
+      const st = lstatSync(path);
+      if (!st.isDirectory() || st.uid !== process.getuid?.()) continue;
+      if ((st.mode & 0o700) !== 0o700) chmodSync(path, 0o700);
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      // the others still go
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 // Unit checks of the panel data's parts (frame sets, the layer finder, raw matches, the page format, sharkd's answer limit),
-// export runs, saved objects and the event log.
+// export runs, saved objects, the event log and the cleanup of slice folders.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -15,10 +15,10 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions } =
+const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
   await import(join(out, "units.mjs"));
 
 let failures = 0;
@@ -395,6 +395,48 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 3300));
     assert.equal(log.watched(), false);
     assert.deepEqual(watching, [true, false, true, false]);
+  });
+
+  await check("slice folders: the user's own ones of servers gone from this machine go, past ones that can't; links, running servers' and other machines' stay", () => {
+    const dir = join(out, "captures");
+    mkdirSync(dir);
+    // Above any pid_max: no such process
+    const dead = (i) => 99_999_000 + i;
+    const made = (name, sub = "") => {
+      mkdirSync(join(dir, name, sub), { recursive: true });
+      writeFileSync(join(dir, name, sub, "1.pcapng"), "x");
+      return name;
+    };
+    const gone = [];
+    const stuck = [];
+    for (let i = 0; i < 6; i++) {
+      gone.push(made(`${slicesPrefix(dead(i))}ok${i}`));
+      // Made unwritable, as close() leaves it then
+      const ro = made(`${slicesPrefix(dead(10 + i))}ro${i}`);
+      chmodSync(join(dir, ro), 0o500);
+      gone.push(ro);
+      // A folder in it can't be emptied: whatever comes after it still goes
+      const deep = made(`${slicesPrefix(dead(20 + i))}deep${i}`, "sub");
+      chmodSync(join(dir, deep, "sub"), 0o500);
+      stuck.push(deep);
+    }
+    const target = join(out, "elsewhere");
+    mkdirSync(target);
+    writeFileSync(join(target, "keep"), "x");
+    const link = `${slicesPrefix(dead(30))}link`;
+    symlinkSync(target, join(dir, link));
+    const tag = slicesPrefix().split("-")[2];
+    const kept = [link, made(`${slicesPrefix()}mine`), made(`${slicesPrefix(process.ppid)}running`), made(`.wirebuddy-slices-${tag === "00000000" ? "11111111" : "00000000"}-${dead(31)}-other`)];
+    try {
+      removeStaleSlices(dir);
+      const left = new Set(readdirSync(dir));
+      assert.deepEqual(gone.filter((n) => left.has(n)), []);
+      assert.deepEqual(kept.filter((n) => !left.has(n)), []);
+      assert.ok(existsSync(join(target, "keep")));
+    } finally {
+      for (const n of [...gone, ...stuck]) if (existsSync(join(dir, n))) chmodSync(join(dir, n), 0o700);
+      for (const n of stuck) if (existsSync(join(dir, n, "sub"))) chmodSync(join(dir, n, "sub"), 0o700);
+    }
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

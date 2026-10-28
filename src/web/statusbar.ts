@@ -3,7 +3,7 @@
 import type { ExpertItem, ExpertSeverity, PanelOffer, ViewState } from "../shared/api.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
-import { agentName, app, bus, captureActive, knownFrames } from "./app.ts";
+import { agentName, app, bus, knownFrames } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
 import { maxItemSeverity, openExpertDialog } from "./dialogs/expert.ts";
 import { openExtensionsDialog } from "./dialogs/extensions.ts";
@@ -125,7 +125,12 @@ export function createStatusBar(): HTMLElement {
     liveSeg.classList.toggle("paused", !!tail?.paused);
     if (tail?.frames) {
       const secs = Math.max(1, Math.round(tail.readMs / 1000));
-      const when = !tail.paused ? `exact after the next full read (≈${secs} s)` : captureActive(s) ? "exact once the capture stops" : "exact once read in full (View › Reload)";
+      const when = {
+        read: `exact after the next full read (≈${secs} s)`,
+        stop: "exact once the capture stops",
+        reading: "exact once the full read under way finishes",
+        reload: "exact once read in full (View › Reload)",
+      }[tail.exactAfter];
       const unfiltered = tail.unfiltered ? ` · ${fmtInt(tail.unfiltered)} not filtered yet` : "";
       setText(liveSeg, `${fmtInt(tail.frames)} provisional · ${when}${unfiltered}`);
       const held = tail.held ? `\nThe display filter lists them only once read in full: ${tail.held}.` : "";

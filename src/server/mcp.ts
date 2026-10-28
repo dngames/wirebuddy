@@ -30,7 +30,7 @@ You and the user look at the same view: the open capture, display filter, select
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
 - start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
-- Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say how many newer packets are still provisional.
+- Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say which frames those are and how many newer packets the user's list shows provisionally.
 - When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
 - To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
 }
@@ -42,21 +42,29 @@ const MAX_SELECTION_FILTER = 2000;
 /** While no viewer is open, how often tool results repeat the reminder to open one. */
 const VIEWER_HINT_MS = 5 * 60_000;
 
+/**
+ * What a tool result says about a live capture's packets after the last
+ * full read: which frames it covers and what the user's list shows ("read",
+ * results read from the full read), only the latter ("view", tools that act
+ * on the view or the file), or nothing (it tells them itself).
+ */
+type Live = "read" | "view" | "none";
+
 /** Appended to successful tool results; set by startMcp. */
-let footer: () => string = () => "";
+let footer: (live: Live) => string = () => "";
 
 type Text = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
 
 /** What a tool answers: text, or text with images. */
 type Answer = string | { text: string; images: { data: string; mimeType: string }[] };
 
-/** Wraps a tool body so thrown errors reach the agent as tool errors; `remind` adds the open-the-viewer reminder. */
-function tool<A>(fn: (args: A) => Promise<Answer> | Answer, remind = true): (args: A) => Promise<Text> {
+/** Wraps a tool body so thrown errors reach the agent as tool errors; `remind` adds the footer (events, the open-the-viewer reminder, the `live` note). */
+function tool<A>(fn: (args: A) => Promise<Answer> | Answer, remind = true, live: Live = "read"): (args: A) => Promise<Text> {
   return async (args: A) => {
     try {
       const a = await fn(args);
       const images = typeof a === "string" ? [] : a.images.map((i) => ({ type: "image" as const, ...i }));
-      return { content: [{ type: "text", text: (typeof a === "string" ? a : a.text) + (remind ? footer() : "") }, ...images] };
+      return { content: [{ type: "text", text: (typeof a === "string" ? a : a.text) + (remind ? footer(live) : "") }, ...images] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
     }
@@ -205,21 +213,33 @@ function seconds(ms: number): string {
   return `${Math.max(1, Math.round(ms / 1000))} s`;
 }
 
-/** When the agent's tools see provisional packets: `running` while the capture runs. */
-function whenRead(t: ProvisionalTail, running: boolean): string {
-  if (!t.paused) return `with the next full read, in about ${seconds(t.readMs)}`;
-  return `once ${running ? "the capture stops" : "a full read succeeds (View › Reload)"} (full reads wait: ${t.paused})`;
+/** When the agent's tools see provisional packets. */
+function whenRead(t: ProvisionalTail): string {
+  return {
+    read: `with the next full read, in about ${seconds(t.readMs)}`,
+    stop: `once the capture stops (full reads wait: ${t.paused})`,
+    reading: "once the full read under way finishes",
+    reload: `once a full read succeeds (View › Reload)${t.paused ? ` (${t.paused})` : ""}`,
+  }[t.exactAfter];
 }
 
-/** What get_view_state says about the packets after the last full read. */
-function tailLine(read: number, t: ProvisionalTail, running: boolean): string {
-  const range = `${read + 1}-${read + t.frames}`;
-  const filter = t.held
-    ? `; with this display filter they wait for a full read (${t.held})`
-    : t.displayed !== t.frames || t.unfiltered
-      ? `; ${t.displayed} of them match the display filter provisionally${t.unfiltered ? `, ${t.unfiltered} not checked yet` : ""}`
-      : "";
-  return `Live capture: ${t.frames} newer packets (${range}) are in the user's list provisionally${filter}; your tools see them ${whenRead(t, running)}`;
+/** How many of the packets after the last full read the user's list shows. */
+function listedText(t: ProvisionalTail): string {
+  if (t.held) return `the user's list shows none of them: with this display filter they wait for a full read (${t.held})`;
+  if (t.displayed === t.frames) return "the user's list shows all of them provisionally";
+  return `the user's list shows the ${t.displayed} of them that match the display filter provisionally${t.unfiltered ? `; ${t.unfiltered} are not checked against it yet` : ""}`;
+}
+
+/**
+ * What get_view_state and tool results say about the packets after the last
+ * full read (frames 1-`read`); `covers`: the result was read from the full
+ * read.
+ */
+function tailLine(read: number, t: ProvisionalTail, covers = false): string {
+  const newer = !read
+    ? `none of the capture's ${t.frames} packets is read in full${covers ? ", so these results cover none" : ""}`
+    : `${covers ? `these results cover frames 1-${read}, read in full; ` : ""}${t.frames} newer packets (${read + 1}-${read + t.frames}) arrived after the last full read`;
+  return `Live capture: ${newer}; ${listedText(t)}; your tools see them ${whenRead(t)}`;
 }
 
 /** Stream index field per follow protocol (others are followed from a frame). */
@@ -264,14 +284,13 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     return lines.length ? `\n\n[WireBuddy events ${tag} since your last call (problems the user ran into, what they did, questions they ask you):\n${lines.join("\n")}]` : "";
   };
   // Results come from the packets read in full; the user's list may show newer ones
-  const liveNote = (): string => {
+  const liveNote = (live: Live): string => {
     const s = viewer.state;
     const t = s.tail;
-    if (!t?.frames) return "";
-    const covered = s.totalFrames ? `these results cover frames 1-${s.totalFrames}, read in full` : "no packet is read in full, so these results cover none";
-    return `\n\n[Live capture: ${covered}; ${t.frames} newer packets are provisional in the user's list; your tools see them ${whenRead(t, viewer.capture.running)}]`;
+    if (!t?.frames || live === "none") return "";
+    return `\n\n[${tailLine(s.totalFrames, t, live === "read")}]`;
   };
-  footer = () => liveNote() + events() + viewerHint();
+  footer = (live) => liveNote(live) + events() + viewerHint();
 
   server.registerTool(
     "viewer_url",
@@ -293,7 +312,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       viewer.notice(`Opened ${basename(path)}`);
       const s = viewer.state;
       return `Opened ${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s${s.filter ? `, filter "${s.filter}" shows ${s.displayedFrames}` : ""}`;
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -315,7 +334,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       else {
         lines.push(`File: ${s.file} (${s.fileSize} bytes)`);
         lines.push(`Frames: ${s.totalFrames}${s.tail ? " read in full" : ""}, displayed: ${s.displayedFrames}, duration: ${s.duration.toFixed(3)} s`);
-        if (s.tail?.frames) lines.push(tailLine(s.totalFrames, s.tail, viewer.capture.running));
+        if (s.tail?.frames) lines.push(tailLine(s.totalFrames, s.tail));
         lines.push(`Display filter: ${s.filter || "(none)"}`);
         if (s.customColumns.length) lines.push(`Custom columns: ${s.customColumns.map((c) => `${c.title} (${c.field})`).join(", ")}`);
         if (s.selected !== null && s.selected > s.totalFrames) lines.push(`Selected frame (by ${s.selectedBy}): ${s.selected} (provisional: not read in full yet)`);
@@ -344,7 +363,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         if (active && c.currentFile && s.file !== c.currentFile) lines.push("  (the view shows a different file, not the live capture)");
       }
       return lines.join("\n");
-    }),
+    }, true, "none"),
   );
 
   server.registerTool(
@@ -522,7 +541,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ filter }) => {
       const r = await viewer.checkFilter(filter);
       return r.ok ? (r.warning ? `Valid, with warning: ${r.warning}` : "Valid") : `Invalid: ${r.error}`;
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -549,7 +568,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       viewer.select(frame, "agent");
       const s = viewer.state;
       return s.selectedIndex < 0 ? `Selected frame ${frame}, but it is ${viewer.unlisted(frame)}` : `Selected frame ${frame} (row ${s.selectedIndex + 1} of ${s.displayedFrames + (s.tail?.displayed ?? 0)})`;
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -568,7 +587,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const known = viewer.state.totalFrames + (viewer.state.tail?.frames ?? 0);
       const skipped = ignored.length ? `; ignored ${ignored.length} frame(s) beyond the ${known} in the capture: ${ignored.slice(0, 20).join(", ")}${ignored.length > 20 ? ", ..." : ""}` : "";
       return `Marked ${marked.length} frame(s)${skipped}; ${viewer.state.marks.length} marked in total`;
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -583,7 +602,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const removed = before - viewer.state.marks.length;
       if (removed) viewer.notice(frames ? `Unmarked ${removed} frame${removed === 1 ? "" : "s"}` : "Cleared all marks");
       return `${viewer.state.marks.length} marks left`;
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -599,7 +618,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       if (!r.ok) throw new Error(r.error);
       const s = viewer.state;
       return s.customColumns.length ? `Columns now: ${s.columns.join(" | ")}` : "Removed the custom columns";
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -701,8 +720,9 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const r = await viewer.exportPackets({ path, which, range, overwrite, markComments: mark_comments, ...(filter !== undefined ? { filter } : {}) }, "agent");
       const comments = r.comments ? `, ${r.comments} mark${r.comments === 1 ? "" : "s"} as packet comments` : "";
       const left = r.leftOut ? `; ${r.leftOut} newer packet${r.leftOut === 1 ? "" : "s"} of the live capture, not read in full yet, were left out` : "";
-      return `Wrote ${r.frames} packet${r.frames === 1 ? "" : "s"} (${r.size} bytes${comments}) to ${r.path}${left}`;
-    }),
+      const newer = r.provisional ? `; ${r.provisional} of them ${r.provisional === 1 ? "is a newer packet" : "are newer packets"} of the live capture, not read in full yet (written as captured)` : "";
+      return `Wrote ${r.frames} packet${r.frames === 1 ? "" : "s"} (${r.size} bytes${comments}) to ${r.path}${newer}${left}`;
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -758,7 +778,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const lines = list.map((i) => `${i.name}${i.description ? ` (${i.description})` : ""}${i.loopback ? " [loopback]" : ""}${i.addresses.length ? `: ${i.addresses.join(", ")}` : ""}${rate(i.name)}`);
       if (activity.error) lines.push(`(traffic statistics unavailable: ${activity.error})`);
       return lines.join("\n");
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -806,7 +826,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
           viewer.notice(`Closed the panel "${name}"`);
           return `Closed the panel "${name}".`;
       }
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -841,7 +861,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       if (c.status === "starting") return `The capture on ${how} is starting; get_view_state shows when it runs.`;
       if (c.status === "idle") return `The capture on ${how} already ended: ${c.packets} packets in ${c.currentFile ?? "no file"}.`;
       return `Capturing on ${how} into ${c.currentFile}. The view follows it live; stop_capture ends it.`;
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -854,7 +874,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       viewer.capture.stop();
       viewer.notice("Stopped the capture");
       return "Stopping the capture";
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -866,7 +886,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ frame }) => {
       await viewer.openInWireshark(frame ?? null);
       return "Wireshark is starting";
-    }),
+    }, true, "view"),
   );
 
   server.registerTool(
@@ -919,7 +939,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
           return listing();
         }
       }
-    }),
+    }, true, "view"),
   );
 
   await server.connect(new StdioServerTransport());

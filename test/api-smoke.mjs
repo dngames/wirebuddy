@@ -699,6 +699,41 @@ try {
     assert.equal(empty.code, "running", empty.text);
     assert.match(empty.text, /token=[0-9a-f]{32}\b/);
   });
+  await check("a profile's Cumulative Bytes count from the first packet, also once the capture is read again", async () => {
+    const profile = join(home, ".config/wireshark/profiles/cumbytes");
+    mkdirSync(profile, { recursive: true });
+    writeFileSync(join(profile, "preferences"), `gui.column.format:\n\t"No.", "%m",\n\t"Length", "%L",\n\t"Bytes", "%B"\n`);
+    const t = "cumbytes-test-token";
+    const p = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", t, "--profile", "cumbytes"], { stdio: ["ignore", "pipe", "ignore"], env });
+    try {
+      const url = await new Promise((resolve, reject) => {
+        p.stdout.setEncoding("utf8");
+        p.stdout.on("data", (d) => {
+          const m = /UI at (http:\/\/[^/]+)\//.exec(d);
+          if (m) resolve(m[1]);
+        });
+        p.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
+      });
+      const call = async (path, body) => {
+        const res = await fetch(url + path, { method: body ? "POST" : "GET", headers: { "X-WireBuddy-Token": t, "content-type": "application/json" }, body: body && JSON.stringify(body) });
+        const json = await res.json();
+        assert.equal(res.status, 200, JSON.stringify(json));
+        return json;
+      };
+      // Each engine reads the file twice, the last one a third time
+      for (const step of ["open", "reload", "reload", "open", "reload"]) {
+        await call(`/api/${step}`, step === "open" ? { path: fixture } : {});
+        const s = await call("/api/state");
+        const [len, bytes] = ["Length", "Bytes"].map((c) => s.columns.indexOf(c));
+        const { rows } = await call(`/api/rows?gen=${s.generation}&start=0&count=${s.totalFrames}`);
+        let sum = 0;
+        const wrong = rows.filter((r) => r.c[bytes] !== String((sum += Number(r.c[len]))));
+        assert.deepEqual(wrong.slice(0, 3).map((r) => `${step}: ${r.num} ${r.c[bytes]}`), []);
+      }
+    } finally {
+      p.kill();
+    }
+  });
   await check("files and recent", async () => {
     const dir = (await api("/api/files?dir=" + encodeURIComponent(dirname(fixture)))).json;
     assert.ok(dir.entries.some((e) => e.name === "http.pcapng"));
