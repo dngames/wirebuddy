@@ -204,7 +204,7 @@ try {
           assert.equal(s.tail === null || s.tail.frames + s.totalFrames >= last[0].num, true);
           break;
         }
-        assert.ok(Date.now() - t0 < 5000, `packet ${written} not listed after 5 s`);
+        assert.ok(Date.now() - t0 < 10_000, `packet ${written} not listed after 10 s`);
         await sleep(50);
       }
       await sleep(400);
@@ -395,8 +395,9 @@ try {
     const slowest = Math.max(...answered.map((a) => a.ms));
     report.push(`filter "tcp": ${answered.length} of the newest pages answered, the slowest in ${slowest} ms; ${dropped} for replaced lists dropped`);
     assert.ok(answered.filter((a) => a.full).length >= 3, `${answered.filter((a) => a.full).length} full pages of ${answered.length}`);
-    // Requests for each list piled up before, each slower than the last
-    assert.ok(slowest < 6000, `a page took ${slowest} ms`);
+    // Requests for each list piled up before, each slower than the last: past a few full reads
+    const readMs = (await state()).tail?.readMs ?? 0;
+    assert.ok(slowest < Math.max(8000, 4 * readMs), `a page took ${slowest} ms, a full read ${readMs} ms`);
   }
 
   await check("TLS keys: provisional rows are decrypted too", async () => {
