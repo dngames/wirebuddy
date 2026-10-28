@@ -309,6 +309,14 @@ the questions you asked it.
 - One server process holds the view state; the UI and the MCP tools share it.
 - During a live capture, one `sharkd` answers requests while the other re-reads the growing
   file; then they swap, so the UI never waits for a reload.
+- Once such a re-read takes a second or more, the packets that arrived since are listed within
+  about a second anyway, in italics, until the next re-read replaces them: two more `sharkd` read
+  them from slices of the file (about 64 MiB at most) that also hold the packets before them, the
+  start of their connections and the messages under way, so they nearly always read as the full
+  read will. Display filters on stream indices or frame numbers, statistics, Follow Stream, Find
+  and the agent's queries wait for the full read. When another full read would need more memory
+  than is free, full reads wait until the capture stops, and a reload reads the file in place of
+  the copy there is.
 - The packet list is virtualized and pages rows from `sharkd`, so large captures stay smooth.
 
 ## Security
@@ -339,7 +347,8 @@ the questions you asked it.
 - Open only accepts files whose content is a capture (pcap, pcapng, snoop, Network Monitor; also
   gzip- or zstd-compressed), whatever their name, so it can't be used to read other files.
 - Live captures, exports and saved objects are readable only by you (files `0600`, folders
-  `0700`).
+  `0700`), and so are the slices of big live captures, written to a hidden folder next to the
+  capture and removed once it is read in full.
 - Extensions are Lua code that runs as you inside `sharkd` and the Wireshark WireBuddy opens. The
   MCP tools can test, reload and switch extensions, not write them: an agent writes them with its
   own file tools, so it needs file access anyway. Extensions another user could have changed are
@@ -351,10 +360,10 @@ the questions you asked it.
 
 ```bash
 npm run build
-npm test               # unit checks, the capture file reader, the HTTP API, MCP tools and panels
+npm test               # unit checks, the capture file reader, live slices against full reads, the HTTP API, MCP tools and panels
 npm run test:browser   # panels and the examples in headless Chrome (skipped without Chrome)
 npm run test:examples  # the robot-arm investigation's bug and its fix, over loopback without a capture
-npm run test:live      # live captures on loopback: pings 127.0.0.1, a local HTTPS server, the robot arm
+npm run test:live      # live captures on loopback: pings 127.0.0.1, a local HTTPS server, the robot arm; then a big generated one
 ```
 
 The tests run their servers with an empty home folder, so your own Wireshark preferences and
@@ -363,8 +372,12 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
 
 ## Limitations
 
-- A live capture re-reads the whole current file on every update, so very long or busy captures
-  get slower to refresh; use a ring buffer or a capture filter for those.
+- In a big live capture the newest packets stay provisional until the next full read of the file,
+  which takes longer the bigger the file gets (about 10 s at a million packets, more with a
+  display filter). A ring buffer or a capture filter keeps files small. Provisional packets of a
+  TLS connection that carried other requests before (HTTP/2, keep-alive) can't be decrypted, and
+  ones of a message that ends more than about 10,000 of its connection's packets later don't say
+  where it is reassembled.
 - Packet comments can't be added or edited in the viewer (marks go into pcapng exports as
   comments), and there are no time references yet.
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until

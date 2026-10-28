@@ -68,6 +68,11 @@ export function agentName(): string {
   return app.state?.agent.name ?? "Agent";
 }
 
+/** Frames the view knows: read in full, then a live capture's provisional ones. */
+export function knownFrames(s: ViewState | null = app.state): number {
+  return (s?.totalFrames ?? 0) + (s?.tail?.frames ?? 0);
+}
+
 export function captureActive(s: ViewState | null = app.state): boolean {
   const st = s?.capture.status;
   return st === "starting" || st === "running" || st === "stopping";

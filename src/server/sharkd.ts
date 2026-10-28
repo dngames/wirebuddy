@@ -70,6 +70,8 @@ export class Sharkd {
   /** Processes stopped on purpose: their exit is no crash. */
   private readonly stopped = new WeakSet<ChildProcessWithoutNullStreams>();
   private restartWhenIdle = false;
+  /** Closed for good: calls fail instead of starting it again. */
+  private disposed = false;
   private idleWaiters: (() => void)[] = [];
   private lua: LuaLog | null = null;
   /** The environment generation the running process started with. */
@@ -232,6 +234,7 @@ export class Sharkd {
   }
 
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    if (this.disposed) return Promise.reject(new SharkdExit("sharkd was closed"));
     const id = this.nextId++;
     const request = JSON.stringify({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });
     if (Buffer.byteLength(request) >= MAX_REQUEST_BYTES) {
@@ -293,6 +296,11 @@ export class Sharkd {
     this.lastLoad = undefined;
   }
 
+  /** Process id of the running sharkd, or null. */
+  get pid(): number | null {
+    return this.proc?.pid ?? null;
+  }
+
   /** Running with an environment older than the current one. */
   outdated(): boolean {
     return this.proc !== null && this.startedWith !== this.generation();
@@ -314,6 +322,12 @@ export class Sharkd {
     if (!proc) return;
     this.stop(proc, "sharkd closed");
     proc.stdin.end();
+  }
+
+  /** Closes it for good: later calls fail instead of starting sharkd again. */
+  dispose(): void {
+    this.disposed = true;
+    this.close();
   }
 }
 

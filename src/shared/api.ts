@@ -15,6 +15,11 @@
  * with a plain frame names another file or filter, the server answers 409
  * and keeps its selection.
  *
+ * `GET /api/rows` answers for any generation since `rowsSince`, with the
+ * rows as they read now; an older one gets 409, and so does one that isn't
+ * the newest when provisional rows would have to be read for it. Fewer rows
+ * than asked for: provisional ones couldn't be read now; ask again.
+ *
  * Endpoints:
  *
  * | Method | Path                          | Body / query                         | Response               |
@@ -88,7 +93,8 @@ export interface ViewState {
   loadError: string | null;
   /**
    * Bumps whenever the displayed rows change: file opened, live reload,
-   * filter applied. Rows fetched for an older generation are stale.
+   * filter applied, provisional rows added. Rows fetched for an older
+   * generation may be outdated.
    */
   generation: number;
   /** Random id of the server process; a new value means the server restarted. */
@@ -123,9 +129,9 @@ export interface ViewState {
   /** Number of rows in {@link selectedRows}. */
   selectedCount: number;
   /**
-   * Generation since which row indices show the same frames. It changes when
-   * the displayed list is rebuilt (file, filter, a re-read that is not just a
-   * live capture growing), not when it only grows.
+   * Generation since which row indices show the same frames, provisional rows
+   * included. It changes when the displayed list is rebuilt (file, filter, a
+   * re-read that is not just a live capture growing), not when it only grows.
    */
   rowsSince: number;
   /** Frames the agent (or the user) marked, keyed by frame number. */
@@ -168,6 +174,35 @@ export interface ViewState {
    * when a live capture only grows.
    */
   epoch: number;
+  /**
+   * Packets of a live capture that arrived after the last full read of the
+   * file, once full reads take a second or more. The packet list shows them
+   * after the exact rows (row indices from displayedFrames on), dissected
+   * provisionally ({@link PacketRow.p}); the next full read makes them exact.
+   * totalFrames and displayedFrames count only packets read in full. null
+   * otherwise, and once the capture stopped and was read in full.
+   */
+  tail: ProvisionalTail | null;
+}
+
+/** See {@link ViewState.tail}. */
+export interface ProvisionalTail {
+  /** Packets after the last full read: frames totalFrames+1 .. totalFrames+frames. */
+  frames: number;
+  /** Rows they add to the list: all of them, or with a display filter its provisional matches. */
+  displayed: number;
+  /** Of `frames`, the newest ones the display filter wasn't checked against yet. */
+  unfiltered: number;
+  /** Why newer packets wait for a full read with this display filter (it uses stream indices or frame numbers), else null. */
+  held: string | null;
+  /** How long a full read of the file takes now, in ms: provisional packets turn exact with the next one. */
+  readMs: number;
+  /**
+   * Why full reads wait (not enough memory for another copy, or a read in
+   * place of the only copy failed), else null; the capture is read in full
+   * once it stops, or after a failed read once one is asked for.
+   */
+  paused: string | null;
 }
 
 /** A panel window: an extension's web page in a sandboxed frame of its own. */
@@ -256,6 +291,12 @@ export interface PacketRow {
   /** Coloring-rule background and foreground, hex without "#", e.g. "daeeff". */
   bg?: string;
   fg?: string;
+  /**
+   * Provisional: a live capture's packet the last full read of the file
+   * didn't cover yet, dissected from a slice of the newest packets (see
+   * {@link ViewState.tail}). Its number, time, length and bytes are exact.
+   */
+  p?: true;
 }
 
 export interface RowsResponse {
@@ -306,6 +347,8 @@ export interface FrameDetail {
   followers: [string, string][];
   /** Summary row of this frame. */
   row: PacketRow | null;
+  /** A live capture's packet the last full read didn't cover: dissected from a slice of the newest packets, see {@link ViewState.tail}. */
+  provisional?: true;
 }
 
 export interface FilterCheck {
@@ -519,6 +562,8 @@ export interface ExportResult {
   size: number;
   /** Marks written as packet comments. */
   comments: number;
+  /** Newer packets of a live capture left out because they weren't read in full yet (export by display filter). */
+  leftOut?: number;
 }
 
 export type ServerEvent =

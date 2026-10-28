@@ -1,7 +1,7 @@
 /** "Go to Packet" dialog (Ctrl+G). */
 
 import * as act from "../actions.ts";
-import { app } from "../app.ts";
+import { app, knownFrames } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import { fmtInt, h } from "../util.ts";
 
@@ -16,12 +16,12 @@ export function openGotoDialog(): void {
   const err = h("div", { class: "of-err", hidden: true });
   d.body.append(
     h("div", { class: "dlg-field" }, h("label", null, "Packet number:", input)),
-    h("div", { class: "goto-hint" }, `1 – ${fmtInt(s.totalFrames)}`),
+    h("div", { class: "goto-hint" }, `1 – ${fmtInt(knownFrames(s))}`),
     err,
   );
   const go = (): void => {
     const n = Number(input.value.trim());
-    const total = app.state?.totalFrames ?? 0;
+    const total = knownFrames();
     if (!Number.isInteger(n) || n < 1 || (total > 0 && n > total)) {
       err.textContent = `Enter a packet number between 1 and ${fmtInt(total)}`;
       err.hidden = false;

@@ -1,7 +1,7 @@
 // FrameStore and the layer parser: pcap and pcapng read straight from the file, checked against sharkd.
 // Usage: node test/framestore.mjs   (bundles the sources itself; needs sharkd)
 import { build } from "esbuild";
-import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -254,6 +254,52 @@ try {
       Buffer.allocUnsafe = alloc;
     }
     assert.ok(largest < 64 * 1024, `read ${largest} bytes for one small packet`);
+  });
+
+  await check("slices: header and chosen records, as sharkd reads them; heads; what can't be sliced", async () => {
+    const recsOf = async (store) => (await records(store)).map((r) => ({ time: r.time, len: r.len, data: r.data.toString("hex") }));
+    const pick = (all, frames) => frames.map((f) => all[f - 1]);
+    const ng = (n, extra = () => []) => {
+      const blocks = [g.shb(), g.idb(1, { tsresol: 9 }), g.nrb()];
+      for (let i = 1; i <= n; i++) blocks.push(g.epb(0, 1700000000000000000n + BigInt(i) * 1000n, g.udpFrame(i, { size: 20 + (i % 9) })), ...extra(i));
+      return Buffer.concat(blocks);
+    };
+    const pc = Buffer.concat([g.pcapHeader({ nano: true }), ...Array.from({ length: 50 }, (_, i) => g.pcapRecord(1700000000, i, g.udpFrame(i + 1)))]);
+    // Interface statistics between records don't stop slicing
+    for (const [name, bytes] of [["pcapng", ng(50, (i) => (i % 7 ? [] : [g.isb(0)]))], ["pcap", pc]]) {
+      const file = write(bytes);
+      const store = await indexed(file);
+      assert.equal(store.sliceable(), null, name);
+      const all = await recsOf(store);
+      for (const frames of [[1, ...Array.from({ length: 11 }, (_, i) => 20 + i)], [1, 2, 3, 9, 30, 31, 50], [50]]) {
+        const slice = join(out, `slice-${++fileNo}.${name}`);
+        await store.writeSlice(frames, slice);
+        assert.equal(statSync(slice).mode & 0o777, 0o600, name);
+        const sliced = await indexed(slice);
+        assert.deepEqual(await recsOf(sliced), pick(all, frames), `${name} ${frames}`);
+        assert.equal((await sharkdView(slice)).frames, frames.length);
+        // Never over an existing file
+        await assert.rejects(store.writeSlice(frames, slice), /EEXIST/);
+      }
+      await assert.rejects(store.writeSlice([51], join(out, `slice-${++fileNo}`)), /no such frames/);
+      const heads = [];
+      await store.readHeads(3, 5, 16, (frame, time, len, link, data) => heads.push([frame, len, data.length, link]));
+      assert.deepEqual(heads, [3, 4, 5].map((f) => [f, g.udpFrame(f, { size: name === "pcap" ? 32 : 20 + (f % 9) }).length, 16, "eth"]));
+    }
+    // A file that grows: new records slice too
+    const growing = write(ng(10));
+    const store = await indexed(growing);
+    appendFileSync(growing, Buffer.concat([11, 12].map((i) => g.epb(0, BigInt(i), g.udpFrame(i)))));
+    await store.update();
+    const grownSlice = join(out, `slice-${++fileNo}`);
+    await store.writeSlice([1, 12], grownSlice);
+    assert.deepEqual((await records(await indexed(grownSlice))).map((r) => r.data.readUInt32BE(42)), [1, 12]);
+    // Several sections, or interfaces after the first packet: no slices
+    const twoSections = await indexed(write(Buffer.concat([g.shb(), g.idb(1), g.epb(0, 1n, g.udpFrame(1)), g.shb(), g.idb(1), g.epb(0, 2n, g.udpFrame(2))])));
+    assert.match(twoSections.sliceable(), /sections/);
+    const lateIdb = await indexed(write(Buffer.concat([g.shb(), g.idb(1), g.epb(0, 1n, g.udpFrame(1)), g.idb(101), g.epb(1, 2n, g.ip4(17, g.udp(1, 2, Buffer.from("raw"))))])));
+    assert.match(lateIdb.sliceable(), /after its first packet/);
+    assert.match((await indexed(write(gzipSync(pc)))).sliceable(), /compressed/);
   });
 
   await check("a replaced or cut file is noticed", async () => {

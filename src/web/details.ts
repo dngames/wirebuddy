@@ -14,6 +14,8 @@ const INDENT = 16;
 const CHAR_W = 7.4;
 
 let vl: VList;
+/** Says when the shown packet is provisional. */
+let banner: HTMLDivElement;
 let fd: FrameDetail | null = null;
 let vis: TreeNode[] = [];
 let sel: TreeNode | null = null;
@@ -325,6 +327,7 @@ function nodeFromEvent(e: Event): TreeNode | null {
 
 export function setDetailsFrame(frame: FrameDetail | null): void {
   fd = frame;
+  banner.hidden = !frame?.provisional;
   expandedNode = new WeakSet();
   sel = null;
   rebuild();
@@ -336,6 +339,11 @@ export function setDetailsFrame(frame: FrameDetail | null): void {
 
 export function createDetailsPane(opts: { onSelect: (n: TreeNode | null) => void }): HTMLElement {
   onSelect = opts.onSelect;
+  banner = h(
+    "div",
+    { class: "dt-prov", hidden: true, role: "note" },
+    "Provisional: read from the newest packets of the live capture, before WireBuddy read the whole file again. Stream indices are unknown until then; the details reload once it has.",
+  );
   vl = new VList(RH, renderRow, "dt");
   vl.el.setAttribute("role", "tree");
   vl.el.setAttribute("aria-label", "Packet details");
@@ -384,5 +392,5 @@ export function createDetailsPane(opts: { onSelect: (n: TreeNode | null) => void
     nodeMenu(n, x, y);
   });
   vl.el.addEventListener("keydown", onKey);
-  return vl.el;
+  return h("div", { class: "dt-pane" }, banner, vl.el);
 }

@@ -1,6 +1,7 @@
 /**
- * FrameStore: panels' raw packets read straight from the open file, without
- * sharkd, when it is an uncompressed pcap or pcapng file. It keeps only where
+ * FrameStore: raw packets read straight from the open file, without sharkd,
+ * for panels and the live view's slices, when it is an uncompressed pcap or
+ * pcapng file. It keeps only where
  * each record starts (8 bytes a packet); times, lengths and bytes are read
  * with the record. Indexing stops at the first incomplete or broken block and
  * looks there again when the file grows. Nothing in the file is trusted: no
@@ -28,6 +29,7 @@ const SHB = 0x0a0d0d0a;
 const IDB = 1;
 const OPB = 2;
 const SPB = 3;
+const ISB = 5;
 const EPB = 6;
 
 /** A record: time in epoch seconds (NaN unknown), length on the wire, captured bytes (a view of its own read). */
@@ -71,6 +73,8 @@ export class FrameStore {
   private readonly sections: Section[] = [];
   /** The file's size when indexing ran into a block that isn't one: it looks again once the file grew. */
   private stuckAt = -1;
+  /** A block other than a record or interface statistics came after the first record. */
+  private lateBlocks = false;
   private running: Promise<void> | null = null;
   private next: Promise<void> | null = null;
   /** Reads in flight: the file closes after them. */
@@ -129,7 +133,12 @@ export class FrameStore {
     return this.read(frames.length, (i) => frames[i], each);
   }
 
-  private async read(n: number, frameAt: (i: number) => number, each: Each): Promise<void> {
+  /** Like readRange, with at most the first `n` bytes of each packet. */
+  readHeads(first: number, last: number, n: number, each: Each): Promise<void> {
+    return this.read(Math.max(0, last - first + 1), (i) => first + i, each, n);
+  }
+
+  private async read(n: number, frameAt: (i: number) => number, each: Each, head = Infinity): Promise<void> {
     await this.use(async () => {
       for (let i = 0; i < n && this.fh; ) {
         const start = this.offsets[frameAt(i) - 1];
@@ -145,10 +154,66 @@ export class FrameStore {
         const buf = Buffer.allocUnsafe(stop - start);
         const { bytesRead } = await this.fh.read(buf, 0, buf.length, start);
         const got = buf.subarray(0, bytesRead);
-        for (let k = i; k <= j; k++) this.record(got, start, frameAt(k), each);
+        for (let k = i; k <= j; k++) this.record(got, start, frameAt(k), each, head);
         i = j + 1;
       }
     });
+  }
+
+  /** Why the file can't be cut into slices for sharkd, or null. */
+  sliceable(): string | null {
+    if (this.off) return this.off;
+    if (this.changed) return "it changed";
+    if (this.sections.length > 1) return "it has several sections";
+    if (this.lateBlocks) return "it has interface or other blocks after its first packet";
+    return null;
+  }
+
+  /**
+   * Writes a capture file of the given frames (ascending, 1..count) to `path`,
+   * readable only by the user: the file's header (pcapng: the blocks before
+   * the first record), then the frames' records as they are in the file.
+   */
+  async writeSlice(frames: ArrayLike<number>, path: string): Promise<void> {
+    const n = frames.length;
+    if (!n || frames[0] < 1 || frames[n - 1] > this.count) throw new Error("no such frames");
+    const done = await this.use(async () => {
+      const out = await open(path, "wx", 0o600);
+      try {
+        const copy = async (start: number, stop: number): Promise<void> => {
+          for (let at = start; at < stop; at += SPAN) {
+            const buf = Buffer.allocUnsafe(Math.min(SPAN, stop - at));
+            const { bytesRead } = await this.fh!.read(buf, 0, buf.length, at);
+            if (bytesRead !== buf.length) throw new Error("the file is shorter than indexed");
+            await out.write(buf);
+          }
+        };
+        await copy(0, this.offsets[0]);
+        for (let i = 0; i < n; ) {
+          const start = this.offsets[frames[i] - 1];
+          let stop = this.recordEnd(frames[i]);
+          let j = i;
+          // Records next to each other in the file go in one piece
+          while (j + 1 < n && this.offsets[frames[j + 1] - 1] === stop && this.recordEnd(frames[j + 1]) - start <= SPAN) stop = this.recordEnd(frames[++j]);
+          await copy(start, stop);
+          i = j + 1;
+        }
+        return true;
+      } finally {
+        await out.close();
+      }
+    });
+    if (!done) throw new Error("the capture file is closed");
+  }
+
+  /** Bytes of the file from the record of `first` to the end of the one of `last` (1..count). */
+  bytes(first: number, last: number): number {
+    return this.recordEnd(last) - this.offsets[first - 1];
+  }
+
+  /** Bytes of the record of `frame` (1..count). */
+  size(frame: number): number {
+    return this.sizes[frame - 1];
   }
 
   /** Where the record's block ends: other blocks between two records are not read with it. */
@@ -161,14 +226,14 @@ export class FrameStore {
     return this.format === "pcap" ? this.link === null : this.sections.some((s) => s.ifaces.some((i) => i.link === null));
   }
 
-  /** Reads the record of `frame` from `buf` (the file from `base` on). */
-  private record(buf: Buffer, base: number, frame: number, each: Each): void {
+  /** Reads the record of `frame` from `buf` (the file from `base` on), at most `head` bytes of the packet. */
+  private record(buf: Buffer, base: number, frame: number, each: Each, head = Infinity): void {
     const p = this.offsets[frame - 1] - base;
     if (this.format === "pcap") {
       if (p + 16 > buf.length) return each(frame, NaN, 0, this.link, EMPTY);
       const u32 = (i: number): number => (this.little ? buf.readUInt32LE(i) : buf.readUInt32BE(i));
       const time = u32(p) + u32(p + 4) / (this.nano ? 1e9 : 1e6);
-      const cap = Math.min(u32(p + 8), buf.length - p - 16);
+      const cap = Math.min(u32(p + 8), buf.length - p - 16, head);
       return each(frame, time, u32(p + 12), this.link, buf.subarray(p + 16, p + 16 + cap));
     }
     const section = this.sectionAt(base + p);
@@ -180,13 +245,13 @@ export class FrameStore {
     if (type === SPB) {
       const iface = section.ifaces[0];
       const orig = u32(p + 8);
-      const cap = Math.max(0, Math.min(orig, blockLen - 16, iface?.snaplen || Infinity, buf.length - p - 12));
+      const cap = Math.max(0, Math.min(orig, blockLen - 16, iface?.snaplen || Infinity, buf.length - p - 12, head));
       return each(frame, NaN, orig, iface?.link ?? null, buf.subarray(p + 12, p + 12 + cap));
     }
     if (p + 28 > buf.length) return each(frame, NaN, 0, null, EMPTY);
     const iface = section.ifaces[type === OPB ? (little ? buf.readUInt16LE(p + 8) : buf.readUInt16BE(p + 8)) : u32(p + 8)];
     const time = iface ? ifaceTime(iface, u32(p + 12), u32(p + 16)) : NaN;
-    const cap = Math.max(0, Math.min(u32(p + 20), blockLen - 32, buf.length - p - 28));
+    const cap = Math.max(0, Math.min(u32(p + 20), blockLen - 32, buf.length - p - 28, head));
     each(frame, time, u32(p + 24), iface?.link ?? null, buf.subarray(p + 28, p + 28 + cap));
   }
 
@@ -352,6 +417,7 @@ export class FrameStore {
       if (trailer !== len) return stuck();
       const type = u32(p);
       const section = this.sections[this.sections.length - 1];
+      if (this.count && type !== EPB && type !== OPB && type !== SPB && type !== ISB) this.lateBlocks = true;
       if (type === SHB) {
         if (len < 28) return stuck();
         this.sections.push({ start: pos, little, ifaces: [] });

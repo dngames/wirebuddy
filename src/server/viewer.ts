@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { closeSync, createReadStream, openSync, readSync, statSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { closeSync, createReadStream, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import type { Transform } from "node:stream";
 import { createGunzip, createZstdDecompress } from "node:zlib";
 import { matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
@@ -9,6 +9,7 @@ import { Capture } from "./capture.ts";
 import { checkTarget, exportFrames, parseRange, toRanges } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
+import { FT_FRAMENUM, heldReason, LiveTail, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
 import { Panels } from "./panels.ts";
@@ -38,6 +39,7 @@ import type {
   PanelOffer,
   PanelView,
   PhsNode,
+  ProvisionalTail,
   RowsResponse,
   TreeNode,
   ViewState,
@@ -73,6 +75,8 @@ interface SharkdStatus {
   duration?: number;
   filesize?: number;
   columns: string[];
+  /** Column formats: %m the number, %i Info, %Cus:<field>:... a field. */
+  column_info?: { format: string }[];
 }
 
 interface SharkdFrame {
@@ -126,6 +130,16 @@ const MAX_CRASH_RETRIES = 10;
 const RESTART_WAIT_MS = 10_000;
 /** Live reloads that fail in a row before they pause. */
 const MAX_LIVE_FAILURES = 3;
+/** Once a live full read takes this long, newer packets are listed provisionally until it lands. */
+const TAIL_AFTER_MS = 1000;
+/** What a sharkd holds before it reads a file. */
+const SHARKD_BASE_BYTES = 160 * 1024 * 1024;
+/** Memory a full read must leave free. */
+const MEMORY_MARGIN = 512 * 1024 * 1024;
+/** Between two reports of failing provisional rows. */
+const TAIL_PROBLEM_MS = 60_000;
+/** Provisional rows, details or filter passes that fail in a row before the tail is turned off. */
+const MAX_TAIL_FAILURES = 3;
 /** How often unmatched panel offers are checked again during a live capture. */
 const OFFER_LIVE_MS = 30_000;
 
@@ -134,7 +148,9 @@ const OFFER_LIVE_MS = 30_000;
  * selection, marks and the live capture. Emits "state" on every change.
  *
  * Two sharkd instances alternate during a live capture: one answers queries
- * while the other reloads the growing file, then they swap.
+ * while the other reloads the growing file, then they swap. Once such a full
+ * read takes a second or more, the packets that arrived after it are listed
+ * provisionally from slices of the file (LiveTail) until the next one lands.
  */
 export class Viewer extends EventEmitter {
   private engines: [Sharkd, Sharkd];
@@ -184,6 +200,32 @@ export class Viewer extends EventEmitter {
   private readonly mergecap: string;
   /** Columns sharkd reports for the open file, before custom ones. */
   private baseColumns: string[] = [];
+  /** Their formats (%m the number, %i Info). */
+  private columnFormats: string[] = [];
+  /** sharkd ftypes of fields, null when unknown. */
+  private readonly fieldTypes = new Map<string, number | null>();
+  /** The live capture's packets after the last full read, listed from slices once it is active. */
+  private tail: LiveTail | null = null;
+  private tailTimer: NodeJS.Timeout | null = null;
+  private tailBusy = false;
+  private tailFiltering = false;
+  /** A live file whose tail was turned off: it gets none again. */
+  private tailOff: string | null = null;
+  private tailProblemAt = 0;
+  /** When the full read in flight started, 0 for none. */
+  private readStartedAt = 0;
+  /** How long the last full read took. */
+  private lastReadMs = 0;
+  /** Full reads applied: the active engine's answers are of this one. */
+  private loads = 0;
+  /** Why live full reads wait, or null. */
+  private paused: string | null = null;
+  /** Why the last full read, in place, failed: the view lists the file from slices until one succeeds. */
+  private readFailed: string | null = null;
+  /** Marks and the selection on frames up to here stay although the tail that listed them closed. */
+  private keptFrames = 0;
+  /** Provisional rows, details or filter passes that failed in a row. */
+  private tailFailures = 0;
   readonly capture: Capture;
   readonly recent: string[] = [];
 
@@ -281,6 +323,7 @@ export class Viewer extends EventEmitter {
       panels: [],
       panelOffers: [],
       epoch: 1,
+      tail: null,
     };
     this.capture.on("change", (capture: CaptureState) => {
       if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
@@ -292,11 +335,15 @@ export class Viewer extends EventEmitter {
       if (files.length > 1 && !this.followingCapture(files[files.length - 2])) return;
       this.open(file).catch((err) => this.problem(`Live view: ${(err as Error).message}`));
       this.scheduleReload();
+      this.tailTimer ??= setInterval(() => void this.tailTick(), LIVE_RELOAD_MS);
     });
     this.capture.on("stopped", () => {
       if (this.reloadTimer) clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
-      if (this.followingCapture()) this.reload(true).then(() => this.checkOffers(false), () => {});
+      if (!this.followingCapture()) return;
+      // The last packets show while the final full read runs
+      void this.tailTick();
+      this.reload(true).then(() => this.checkOffers(false), () => {});
     });
   }
 
@@ -356,8 +403,27 @@ export class Viewer extends EventEmitter {
     return next;
   }
 
+  /** The tail when the view lists it. */
+  private get listedTail(): LiveTail | null {
+    return this.tail?.active ? this.tail : null;
+  }
+
+  /** Frames the view knows: read in full, then provisional ones. */
+  private known(): number {
+    return this.state.totalFrames + (this.listedTail?.frames ?? 0);
+  }
+
+  /** Rows of the list: exact ones, then provisional ones. */
+  private listLength(): number {
+    return this.state.displayedFrames + (this.listedTail?.listed() ?? 0);
+  }
+
   private indexOf(frame: number | null): number {
     if (frame === null) return -1;
+    if (frame > this.state.totalFrames) {
+      const i = this.listedTail?.indexOf(frame) ?? -1;
+      return i < 0 ? -1 : this.state.displayedFrames + i;
+    }
     if (!this.displayed) return frame >= 1 && frame <= this.state.totalFrames ? frame - 1 : -1;
     let lo = 0;
     let hi = this.displayed.length - 1;
@@ -442,22 +508,39 @@ export class Viewer extends EventEmitter {
     engine.restart();
   }
 
+  /**
+   * Shows what a full read found. `changed`: why packets read differently
+   * now (panels start over); `redissected`: TLS keys or extensions changed,
+   * so the tail checks its filter again; `untrusted`: the tail doesn't line
+   * up with the read and goes.
+   */
   private applyLoad(
     file: string,
     filter: string,
     { status, displayed }: { status: SharkdStatus; displayed: Int32Array | null },
     keepSelection: boolean,
-    changed: string | null = null,
+    { changed = null, redissected = false, untrusted = false }: { changed?: string | null; redissected?: boolean; untrusted?: boolean } = {},
   ): void {
     // Opened, or not just grown: what panels read is outdated
     const why = !keepSelection ? "file" : (changed ?? (status.frames < this.state.totalFrames ? "rewritten" : null));
     const epoch = why ? this.newEpoch(why) : this.state.epoch;
-    // A shorter file is a rewritten one, filtered or not
-    const keepRows = keepSelection && status.frames >= this.state.totalFrames && appendedOnly(this.displayed, displayed);
+    const before = this.rowFrames();
+    if (this.tail && (this.tail.file !== file || why === "rewritten" || untrusted)) this.dropTail();
+    this.tail?.rebase(status.frames);
+    if (redissected || why === "extensions") this.tail?.setFilter(this.tail.filter, this.tail.held);
+    // Read in full after the capture stopped: nothing provisional is left
+    if (this.tail && !this.capture.running && this.tail.count <= status.frames) this.dropTail();
+    if (!this.listedTail) this.paused = null;
+    this.readFailed = null;
     this.displayed = displayed;
     this.baseColumns = status.columns;
+    this.columnFormats = (status.column_info ?? []).map((c) => c.format);
+    this.loads++;
     const totalFrames = status.frames;
-    const selected = keepSelection && this.state.selected !== null && this.state.selected <= totalFrames ? this.state.selected : null;
+    // Marks and the selection on packets listed before stay until a read covers them
+    if (why === "file" || why === "rewritten" || totalFrames >= this.keptFrames) this.keptFrames = 0;
+    const known = Math.max(totalFrames + (this.listedTail?.frames ?? 0), this.keptFrames);
+    const selected = keepSelection && this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
     this.state = {
       ...this.state,
       file,
@@ -467,17 +550,31 @@ export class Viewer extends EventEmitter {
       columns: [...status.columns, ...this.state.customColumns.map((c) => c.title)],
       totalFrames,
       displayedFrames: displayed ? displayed.length : totalFrames,
-      marks: this.state.marks.filter((m) => m.frame <= totalFrames),
+      marks: this.state.marks.filter((m) => m.frame <= known),
       duration: status.duration ?? 0,
       filter,
       selected,
       selectedBy: selected === null ? null : this.state.selectedBy,
       generation: this.state.generation + 1,
       epoch,
+      tail: this.tailState(),
     };
+    // A shorter file is a rewritten one, filtered or not
+    const keepRows = keepSelection && status.frames >= before.exact && startsWith(this.rowFrames(), before);
     const selectedIndex = this.indexOf(selected);
-    const rows = keepRows ? clipRanges(this.state.selectedRows, this.state.displayedFrames) : rowOf(selectedIndex);
+    const rows = keepRows ? clipRanges(this.state.selectedRows, this.listLength()) : rowOf(selectedIndex);
     this.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
+  }
+
+  /** The list's rows as frame numbers, copied: exact rows (of `exact` frames read in full), then provisional ones. */
+  private rowFrames(): { exact: number; length: number; at: (i: number) => number } {
+    const displayed = this.displayed;
+    const n = this.state.displayedFrames;
+    const tail = this.listedTail;
+    const listed = tail?.listed() ?? 0;
+    const matches = tail?.filter ? Int32Array.from({ length: listed }, (_, i) => tail.frameAt(i)) : null;
+    const base = this.state.totalFrames;
+    return { exact: base, length: n + listed, at: (i) => (i < n ? (displayed ? displayed[i] : i + 1) : matches ? matches[i - n] : base + 1 + i - n) };
   }
 
   /**
@@ -499,6 +596,9 @@ export class Viewer extends EventEmitter {
         const result = await this.loadInto(this.engines[standby], file, filter, true);
         filter = result.filter;
         this.active = standby;
+        this.lastReadMs = 0;
+        this.paused = null;
+        this.tailOff = null;
         this.loadedSize = st.size;
         this.loadedIno = st.ino;
         this.loadedHead = fileHead(file);
@@ -516,31 +616,57 @@ export class Viewer extends EventEmitter {
 
   /** Re-reads the open file into the standby engine, then swaps engines. */
   reload(force = false): Promise<void> {
-    return this.exclusive(async () => {
-      await this.reloadNow(force);
-    });
+    return this.exclusive(() => this.reloadNow(force).then(() => {}));
   }
 
-  /** `dropped`: the display filter didn't apply any more (only with `fallback`); `rolledBack`: extensions crashed sharkd. */
-  private async reloadNow(force: boolean, fallback = false): Promise<{ dropped: boolean; rolledBack: RollBack }> {
+  /**
+   * `dropped`: the display filter didn't apply any more (only with
+   * `fallback`); `rolledBack`: extensions crashed sharkd. `redissect`: TLS
+   * keys or extensions changed. While full reads wait for memory, the read
+   * replaces the active engine's copy if there is no room for a second one.
+   */
+  private async reloadNow(force: boolean, fallback = false, redissect = false): Promise<{ dropped: boolean; rolledBack: RollBack }> {
     const file = this.state.file;
     if (!file) return { dropped: false, rolledBack: false };
     const size = safeSize(file);
     if (!force && size === this.loadedSize) return { dropped: false, rolledBack: false };
-    const standby = 1 - this.active;
-    const result = await this.loadInto(this.engines[standby], file, this.state.filter, fallback);
+    const inPlace = this.readInPlace();
+    const target = inPlace ? this.active : 1 - this.active;
+    if (inPlace) {
+      const text = `Not enough free memory for a second copy of ${basename(file)}: WireBuddy reads it again in place of the one it has, so the packet list waits until it has`;
+      this.events.add("WARNING", text);
+      this.emit("toast", "info", text);
+      this.engines[target].restart();
+      this.set({ loading: true });
+    }
+    const started = Date.now();
+    this.readStartedAt = started;
+    let result: Awaited<ReturnType<Viewer["loadInto"]>>;
+    try {
+      result = await this.loadInto(this.engines[target], file, this.state.filter, fallback);
+    } catch (err) {
+      if (inPlace) await this.inPlaceFailed(file, err as Error);
+      throw err;
+    } finally {
+      this.readStartedAt = 0;
+      if (inPlace) this.set({ loading: false });
+    }
     if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
+    this.lastReadMs = Date.now() - started;
     const dropped = result.filter !== this.state.filter;
     const ino = statSync(file, { throwIfNoEntry: false })?.ino ?? 0;
     const head = fileHead(file);
     const n = Math.min(head.length, this.loadedHead.length);
     const rewritten = ino !== this.loadedIno || !head.subarray(0, n).equals(this.loadedHead.subarray(0, n));
-    this.active = standby;
+    const untrusted = !rewritten && !(await this.checkTail(this.engines[target], file, result));
+    if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
+    this.active = target;
     this.loadedSize = size;
     // Read without some extensions now: packets dissect differently
-    this.applyLoad(file, result.filter, result, true, result.rolledBack ? "extensions" : rewritten ? "rewritten" : null);
+    this.applyLoad(file, result.filter, result, true, { changed: result.rolledBack ? "extensions" : rewritten ? "rewritten" : null, redissected: redissect, untrusted });
     this.loadedIno = ino;
     this.loadedHead = head;
+    if (redissect || result.rolledBack) void this.filterTail();
     if (result.rolledBack) {
       this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
       this.refreshExtensions();
@@ -548,11 +674,62 @@ export class Viewer extends EventEmitter {
     return { dropped, rolledBack: result.rolledBack };
   }
 
+  /**
+   * Whether a full read must replace the active engine's copy: full reads
+   * wait for memory, or would need to, and even without the standby's copy
+   * there is no room for another one.
+   */
+  private readInPlace(): boolean {
+    if (!this.paused && !(this.listedTail && this.memoryShort())) return false;
+    // A standby holds on to the memory of its last read until it restarts
+    this.engines[1 - this.active].restart();
+    return this.memoryShort();
+  }
+
+  /**
+   * A read in place failed: the active engine holds nothing of the file now
+   * and mustn't read it again by itself. The view lists all of its packets
+   * provisionally from slices, and live full reads wait, until a read
+   * succeeds (View › Reload, or the capture's end).
+   */
+  private async inPlaceFailed(file: string, err: Error): Promise<void> {
+    this.engine.forgetFile();
+    // The packets the capture wrote last, too
+    await this.listedTail?.update();
+    if (this.state.file !== file) return;
+    const tail = this.listedTail;
+    tail?.rebase(0);
+    this.readFailed = `reading ${basename(file)} in full failed (${printable(err.message)}), perhaps for lack of memory`;
+    this.paused = this.readFailed;
+    this.displayed = this.state.filter ? new Int32Array(0) : null;
+    this.loads++;
+    const known = tail?.count ?? 0;
+    const selected = this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
+    const generation = this.state.generation + 1;
+    this.state = {
+      ...this.state,
+      loading: false,
+      loadError: `${this.readFailed[0].toUpperCase()}${this.readFailed.slice(1)}${tail ? "; its packets are listed provisionally from slices of the file" : ""}. View › Reload tries again`,
+      totalFrames: 0,
+      displayedFrames: 0,
+      marks: this.state.marks.filter((m) => m.frame <= known),
+      selected,
+      selectedBy: selected === null ? null : this.state.selectedBy,
+      generation,
+      rowsSince: generation,
+      tail: this.tailState(),
+    };
+    const selectedIndex = this.indexOf(selected);
+    this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+    this.events.add("ERROR", this.state.loadError!);
+    void this.filterTail();
+  }
+
   private scheduleReload(): void {
     if (this.reloadTimer) clearTimeout(this.reloadTimer);
     this.reloadTimer = setTimeout(async () => {
       try {
-        if (this.followingCapture()) await this.reload();
+        if (this.followingCapture() && !this.waitForMemory()) await this.reload();
         this.liveFailures = 0;
       } catch (err) {
         // Once, not every second; after a few in a row the live view waits for the capture's end
@@ -569,10 +746,251 @@ export class Viewer extends EventEmitter {
     }, LIVE_RELOAD_MS);
   }
 
+  /**
+   * While the provisional tail is listed: whether another full read would
+   * need more memory than is free. Then live full reads wait (the tail keeps
+   * the list current) until there is, or the capture stops.
+   */
+  private waitForMemory(): boolean {
+    const was = this.paused;
+    this.paused = this.listedTail ? (this.readFailed ?? (this.memoryShort() ? "not enough free memory for another full read" : null)) : null;
+    if (this.paused && !was) this.events.add("WARNING", `Live view: full reads of ${basename(this.state.file ?? "")} wait: ${this.paused}; newer packets stay provisional until the capture stops (a ring buffer keeps files small)`);
+    if (this.paused !== was) this.publishTail();
+    return this.paused !== null;
+  }
+
+  /** Whether sharkd reading the live file again would need more memory than is free, judged by what the active one needs per frame. */
+  private memoryShort(): boolean {
+    const activeBytes = rssBytes(this.engine.pid);
+    const available = availableBytes();
+    if (activeBytes === null || available === null) return false;
+    return memoryShort({
+      activeBytes,
+      frames: this.state.totalFrames,
+      standbyBytes: rssBytes(this.engines[1 - this.active].pid) ?? 0,
+      next: Math.max(this.tail?.count ?? 0, this.state.totalFrames),
+      available,
+    });
+  }
+
+  /**
+   * Indexes what the live file gained, and once full reads have become slow
+   * lists the packets after the last one; with a display filter, checks them
+   * against it.
+   */
+  private async tailTick(): Promise<void> {
+    if (this.tailBusy) return;
+    this.tailBusy = true;
+    try {
+      const file = this.state.file;
+      if (!file || !this.followingCapture() || file === this.tailOff) return this.closeTail();
+      if (this.tail && this.tail.file !== file) this.closeTail();
+      if (!this.tail) this.tailFailures = 0;
+      const tail = (this.tail ??= new LiveTail({ file, dir: dirname(file), sharkd: () => this.tailEngine() }));
+      await tail.update();
+      if (this.tail !== tail) return;
+      const broken = tail.broken();
+      if (broken) {
+        if (tail.active) this.events.add("WARNING", `Live view: newer packets of ${basename(file)} are listed only once read in full: ${broken}`);
+        this.tailOff = file;
+        // Their numbers still name the same packets, unless the file changed
+        return this.closeTail(tail.store.changed ? this.state.totalFrames : tail.count);
+      }
+      const slow = this.lastReadMs >= TAIL_AFTER_MS || (this.readStartedAt > 0 && Date.now() - this.readStartedAt >= TAIL_AFTER_MS);
+      if (!tail.active && slow && this.capture.running) {
+        const filter = this.state.filter;
+        const held = await this.heldReason(filter);
+        // Another filter meanwhile: the next tick starts with that one
+        if (this.tail !== tail || this.state.filter !== filter) return;
+        tail.rebase(this.state.totalFrames);
+        tail.setFilter(filter, held);
+        tail.active = true;
+      }
+      if (!tail.active) return;
+      this.publishTail();
+      void this.filterTail();
+    } catch (err) {
+      if (this.tail) this.tailFailed(this.tail, err as Error);
+    } finally {
+      this.tailBusy = false;
+      if (!this.capture.running && this.tailTimer) {
+        clearInterval(this.tailTimer);
+        this.tailTimer = null;
+      }
+    }
+  }
+
+  /** Checks newer packets against the display filter: whole chunks back to back, the newest once a tick. */
+  private async filterTail(): Promise<void> {
+    const tail = this.listedTail;
+    if (!tail || this.tailFiltering) return;
+    this.tailFiltering = true;
+    try {
+      for (let more = true; more && this.tail === tail; ) {
+        more = await tail.filterPass();
+        this.tailWorked(tail);
+        this.publishTail();
+      }
+    } catch (err) {
+      if (!(err instanceof Superseded)) this.tailFailed(tail, err as Error);
+    } finally {
+      this.tailFiltering = false;
+    }
+  }
+
+  /** What the view tells about the tail, null while it isn't listed. */
+  private tailState(): ProvisionalTail | null {
+    const tail = this.listedTail;
+    if (!tail) return null;
+    const readMs = this.lastReadMs || (this.readStartedAt ? Date.now() - this.readStartedAt : 0);
+    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, paused: this.paused };
+  }
+
+  /** Publishes the tail as it is now; the list's generation moves when its rows grew. */
+  private publishTail(): void {
+    const tail = this.tailState();
+    const was = this.state.tail;
+    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused) return;
+    const grew = (tail?.displayed ?? 0) !== (was?.displayed ?? 0);
+    this.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}) });
+  }
+
+  /**
+   * Closes the tail; the view forgets its packets until a full read covers
+   * them. Marks and the selection stay on frames up to `keep` meanwhile.
+   */
+  private closeTail(keep = this.state.totalFrames): void {
+    this.dropTail();
+    const s = this.state;
+    if (!s.tail) return;
+    this.keptFrames = keep > s.totalFrames ? keep : 0;
+    const generation = s.generation + 1;
+    const selected = s.selected !== null && s.selected <= keep ? s.selected : null;
+    this.state = {
+      ...s,
+      tail: null,
+      generation,
+      rowsSince: s.tail.displayed ? generation : s.rowsSince,
+      selected,
+      selectedBy: selected === null ? null : s.selectedBy,
+      marks: s.marks.filter((m) => m.frame <= keep),
+    };
+    this.set({ selectedIndex: this.indexOf(selected), ...rowSelection(clipRanges(s.selectedRows, s.displayedFrames)) });
+  }
+
+  /** Provisional rows, details or a filter pass failed: a warning now and then; after a few in a row the tail is turned off. */
+  private tailFailed(tail: LiveTail, err: Error): void {
+    if (this.tail !== tail) return;
+    this.tailProblem(err.message);
+    if (++this.tailFailures < MAX_TAIL_FAILURES) return;
+    if (tail.active) this.events.add("WARNING", `Live view: newer packets of ${basename(tail.file)} are listed only once read in full: reading them from slices failed ${this.tailFailures} times in a row (${printable(err.message)})`);
+    this.tailOff = tail.file;
+    this.closeTail(tail.store.changed ? this.state.totalFrames : tail.count);
+  }
+
+  private tailWorked(tail: LiveTail): void {
+    if (this.tail === tail) this.tailFailures = 0;
+  }
+
+  /** Closes the tail without telling: the state set next does. */
+  private dropTail(): void {
+    const tail = this.tail;
+    this.tail = null;
+    tail?.close();
+  }
+
+  /**
+   * Before a full read lands: the tail must count the file's packets as
+   * sharkd does (count, time of the last one read), else it goes with the
+   * read (false). The tail takes a filter the read dropped.
+   */
+  private async checkTail(engine: Sharkd, file: string, result: { status: SharkdStatus; filter: string }): Promise<boolean> {
+    const tail = this.tail;
+    if (!tail || tail.file !== file) return true;
+    const frames = result.status.frames;
+    await tail.update();
+    let ok = tail.count >= frames;
+    if (ok && frames > 0) {
+      const [row] = await engine.call<PacketRow[]>("frames", { ...page(frames - 1, 1), column0: "frame.time_epoch:0" });
+      let time = NaN;
+      await tail.store.readFrames([frames], (_frame, t) => (time = t));
+      ok = !!row && Math.abs(Number(row.c[0]) - time) < 2e-6;
+    }
+    if (this.tail !== tail) return true;
+    if (!ok) {
+      if (tail.active) this.events.add("WARNING", `Live view: the newest packets of ${basename(file)} don't line up with its full read, so they are listed only once read in full`);
+      this.tailOff = file;
+      return false;
+    }
+    if (tail.active && result.filter !== tail.filter) tail.setFilter(result.filter, await this.heldReason(result.filter));
+    return true;
+  }
+
+  /** A sharkd for slices: like the view's, its Lua reports aside. */
+  private tailEngine(): Sharkd {
+    const engine = new Sharkd(this.sharkdBin, this.profile, () => this.extensions.env(), () => this.extensions.generation);
+    engine.onFailure = (message) => this.tailProblem(message);
+    if (this.state.tlsKeylog) engine.setPref("tls.keylog_file", this.state.tlsKeylog).catch(() => {});
+    return engine;
+  }
+
+  /** Failing provisional rows: a warning now and then, not every second. */
+  private tailProblem(message: string): void {
+    if (Date.now() - this.tailProblemAt < TAIL_PROBLEM_MS) return;
+    this.tailProblemAt = Date.now();
+    this.events.add("WARNING", `Live view: newer packets could not be read provisionally: ${printable(message)}`);
+  }
+
+  /** Why the tail can't check `filter`, or null. */
+  private heldReason(filter: string): Promise<string | null> {
+    return filter ? heldReason(filter, (field) => this.fieldType(field)) : Promise.resolve(null);
+  }
+
+  /** sharkd's ftype of a field, or null. */
+  private async fieldType(field: string): Promise<number | null> {
+    if (this.fieldTypes.has(field)) return this.fieldTypes.get(field)!;
+    let type: number | null = null;
+    try {
+      const r = await this.engine.call<{ field?: { f: string; t?: number }[] }>("complete", { field });
+      type = r.field?.find((x) => x.f === field)?.t ?? null;
+    } catch {
+      // unknown: treated as an ordinary field
+    }
+    this.fieldTypes.set(field, type);
+    return type;
+  }
+
+  /** How provisional rows read: like the exact ones, renumbered. */
+  private rowView(): RowView {
+    const { epoch, columns, customColumns } = this.state;
+    return {
+      numbering: this.numbering(),
+      fetch: (engine, params) => this.framesWithColumns(engine, params),
+      key: [epoch, ...columns, ...customColumns.map((c) => c.field)].join("\u0001"),
+    };
+  }
+
+  /** Which columns of the view's rows show frame numbers, and which slices can't fill. */
+  private numbering(): Numbering {
+    const out: Numbering = { frames: [], info: -1, blank: [] };
+    const classify = (j: number, field: string): void => {
+      if (field === "frame.number" || this.fieldTypes.get(field) === FT_FRAMENUM) out.frames.push(j);
+      else if (streamNumbered(field)) out.blank.push(j);
+    };
+    this.columnFormats.forEach((format, j) => {
+      if (format === "%m") out.frames.push(j);
+      else if (format === "%i") out.info = j;
+      else if (format.startsWith("%Cus:")) classify(j, format.split(":")[1]);
+    });
+    this.state.customColumns.forEach((c, k) => classify(this.baseColumns.length + k, c.field));
+    return out;
+  }
+
   close(): Promise<void> {
     return this.exclusive(async () => {
       // A restarted sharkd needn't read the closed file again
       for (const e of this.engines) e.forgetFile();
+      this.dropTail();
       this.displayed = null;
       this.set({
         file: null,
@@ -591,6 +1009,7 @@ export class Viewer extends EventEmitter {
         generation: this.state.generation + 1,
         rowsSince: this.state.generation + 1,
         epoch: this.newEpoch("closed"),
+        tail: null,
       });
       void this.checkOffers(true);
     });
@@ -614,15 +1033,19 @@ export class Viewer extends EventEmitter {
       if (!check.ok) return check;
       if (this.state.file) {
         const displayed = filter ? await matchingFrames(this.engine, filter) : null;
+        const held = this.listedTail ? await this.heldReason(filter) : null;
         this.displayed = displayed;
+        this.listedTail?.setFilter(filter, held);
         this.state = {
           ...this.state,
           filter,
           displayedFrames: displayed ? displayed.length : this.state.totalFrames,
           generation: this.state.generation + 1,
+          tail: this.tailState(),
         };
         const selectedIndex = this.indexOf(this.state.selected);
         this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)), rowsSince: this.state.generation });
+        void this.filterTail();
       } else {
         this.set({ filter });
       }
@@ -637,21 +1060,52 @@ export class Viewer extends EventEmitter {
     return (r.field ?? []).slice(0, 50).map(({ f, n }) => ({ f, n }));
   }
 
+  /**
+   * Rows of the list as they read now, for `generation` or an older one of
+   * the same list (since rowsSince): its rows are still where they were.
+   * Rows from displayedFrames on are the tail's, provisional.
+   */
   async rows(generation: number, start: number, count: number): Promise<RowsResponse> {
-    if (generation !== this.state.generation) throw new StaleGenerationError("stale generation");
-    const engine = this.engine;
-    const filter = this.state.filter;
-    count = Math.max(0, Math.min(count, 500, this.state.displayedFrames - start));
+    const { rowsSince, displayedFrames, filter } = this.state;
+    if (generation > this.state.generation || generation < rowsSince) throw new StaleGenerationError("stale generation");
+    const tail = this.listedTail;
+    count = Math.max(0, Math.min(count, 500, this.listLength() - start));
     if (count === 0 || start < 0) return { generation, start, rows: [] };
-    const params = page(start, count);
+    const exact = Math.max(0, Math.min(count, displayedFrames - start));
+    const params = page(start, exact);
     if (filter) params.filter = filter;
-    const rows = await this.framesWithColumns(engine, params);
-    if (generation !== this.state.generation) throw new StaleGenerationError("stale generation");
-    return { generation, start, rows };
+    const [head, rest] = await Promise.all([
+      exact ? this.framesWithColumns(this.engine, params) : [],
+      tail && count > exact ? this.tailRows(tail, generation, start + exact - displayedFrames, count - exact) : [],
+    ]);
+    if (this.state.rowsSince !== rowsSince) throw new StaleGenerationError("stale generation");
+    return { generation, start, rows: [...head, ...rest] };
+  }
+
+  /**
+   * Provisional rows of the list of `generation`: slices are read only while
+   * it is the newest (the client asks for the newest one's rows anyway).
+   * None when they can't be read now: the client asks again.
+   */
+  private async tailRows(tail: LiveTail, generation: number, i0: number, n: number): Promise<PacketRow[]> {
+    try {
+      const rows = await tail.rows(i0, n, this.rowView(), () => generation === this.state.generation);
+      this.tailWorked(tail);
+      return rows;
+    } catch (err) {
+      // Closed meanwhile (read in full, another file), or asked for again since
+      if (this.tail !== tail || err instanceof Superseded) throw new StaleGenerationError("the live view moved on");
+      this.tailFailed(tail, err as Error);
+      return [];
+    }
   }
 
   /** Summary row of one frame, regardless of the display filter. */
   async row(num: number): Promise<PacketRow | null> {
+    if (num > this.state.totalFrames && this.listedTail && num <= this.known()) {
+      const [r] = await this.listedTail.rowsOf([num], this.rowView());
+      return r ?? null;
+    }
     if (num < 1 || num > this.state.totalFrames) return null;
     const rows = await this.framesWithColumns(this.engine, page(num - 1, 1));
     const r = rows[0];
@@ -710,6 +1164,8 @@ export class Viewer extends EventEmitter {
       for (const c of columns) {
         const title = String(c.title ?? "").trim().slice(0, 60) || (await this.fieldName(c.field));
         customColumns.push({ field: c.field, title });
+        // Provisional rows renumber frame-number fields
+        await this.fieldType(c.field);
       }
       this.set({
         customColumns,
@@ -731,23 +1187,50 @@ export class Viewer extends EventEmitter {
     }
   }
 
-  async frame(num: number): Promise<FrameDetail> {
+  /**
+   * Details of a frame. A live capture's frame after the last full read only
+   * with `provisional` (the packet list's), dissected from its slice.
+   */
+  async frame(num: number, provisional = false): Promise<FrameDetail> {
     this.requireFile();
+    const tail = this.listedTail;
+    if (Number.isInteger(num) && num > this.state.totalFrames && tail && num <= this.known()) {
+      if (!provisional) throw new Error(this.notReadYet(num));
+      return this.tailFrame(tail, num);
+    }
     if (!Number.isInteger(num) || num < 1 || num > this.state.totalFrames) throw new Error(`no frame ${num}`);
-    const [f, row] = await Promise.all([
-      this.engine.call<SharkdFrame>("frame", { frame: num, proto: true, bytes: true }),
-      this.row(num),
-    ]);
-    return {
-      num,
-      tree: f.tree,
-      bytes: f.bytes ?? "",
-      ds: f.ds ?? [],
-      followers: (f.followers ?? (f.fol ?? []).map(([protocol, filter]) => ({ protocol, filter })))
-        .filter((x) => x.filter)
-        .map((x) => [x.protocol, x.filter!] as [string, string]),
-      row,
-    };
+    const [f, row] = await Promise.all([this.engine.call<SharkdFrame>("frame", { frame: num, proto: true, bytes: true }), this.row(num)]);
+    return { num, tree: f.tree, bytes: f.bytes ?? "", ds: f.ds ?? [], followers: followersOf(f), row };
+  }
+
+  /**
+   * A provisional frame's details. Its streams are followed in what was read
+   * in full, by the stream filters of its flow's first packet when that was.
+   */
+  private async tailFrame(tail: LiveTail, num: number): Promise<FrameDetail> {
+    let f: Awaited<ReturnType<LiveTail["frame"]>>;
+    let row: PacketRow | null;
+    try {
+      [f, row] = await Promise.all([tail.frame(num), this.row(num)]);
+      this.tailWorked(tail);
+    } catch (err) {
+      // Closed meanwhile, most likely read in full now
+      if (this.tail !== tail) return this.frame(num, true);
+      this.tailFailed(tail, err as Error);
+      throw err;
+    }
+    let followers: [string, string][] = [];
+    if (f.first !== null && f.first <= this.state.totalFrames) followers = followersOf(await this.engine.call<SharkdFrame>("frame", { frame: f.first, proto: false }));
+    return { num, tree: f.tree, bytes: f.bytes, ds: f.ds, followers, row, provisional: true };
+  }
+
+  /** Why a frame after the last full read can't be read exactly yet. */
+  private notReadYet(num: number): string {
+    const t = this.tailState();
+    const wait = t?.paused
+      ? `it is read in full once ${this.capture.running ? "the capture stops" : "a full read succeeds (View › Reload)"} (full reads wait: ${t.paused})`
+      : `the next full read covers it, in about ${Math.ceil(((t?.readMs ?? 0) + LIVE_RELOAD_MS) / 1000)} s`;
+    return `frame ${num} arrived after the last full read of the live capture (frames 1-${this.state.totalFrames}): ${wait}`;
   }
 
   /** Rows for an arbitrary filter, without touching what the UI shows. */
@@ -762,17 +1245,18 @@ export class Viewer extends EventEmitter {
     return { total, rows };
   }
 
-  private countCache: { generation: number; filter: string; total: number } | null = null;
+  private countCache: { loads: number; filter: string; total: number } | null = null;
 
-  /** Frames matching `filter`, reusing the view's count and earlier results. */
+  /** Frames read in full matching `filter`, reusing the view's count and earlier results. */
   private async countMatching(filter: string): Promise<number> {
     if (!filter) return this.state.totalFrames;
     if (filter === this.state.filter) return this.state.displayedFrames;
-    const { generation } = this.state;
+    // Provisional rows bump the generation, not what the engine read
+    const { loads } = this;
     const c = this.countCache;
-    if (c && c.generation === generation && c.filter === filter) return c.total;
+    if (c && c.loads === loads && c.filter === filter) return c.total;
     const total = (await matchingFrames(this.engine, filter)).length;
-    this.countCache = { generation, filter, total };
+    this.countCache = { loads, filter, total };
     return total;
   }
 
@@ -786,7 +1270,7 @@ export class Viewer extends EventEmitter {
     if (view && (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince)) {
       throw new StaleGenerationError("the selection belongs to another view");
     }
-    if (frame !== null && (!Number.isInteger(frame) || frame < 1 || frame > this.state.totalFrames)) {
+    if (frame !== null && (!Number.isInteger(frame) || frame < 1 || frame > this.known())) {
       throw new Error(`no frame ${frame}`);
     }
     const selectedIndex = this.indexOf(frame);
@@ -799,15 +1283,25 @@ export class Viewer extends EventEmitter {
       ...rowSelection(selectedRows),
     });
     if (by === "agent" && frame !== null) {
-      const hidden = this.state.selectedIndex < 0 ? " (hidden by the current display filter)" : "";
+      const hidden = this.state.selectedIndex < 0 ? ` (${this.unlisted(frame)})` : "";
       this.notice(`Selected frame ${frame}${hidden}`);
     }
+  }
+
+  /** Why the list has no row for `frame`, a frame the view knows: "hidden by the current display filter", or why it isn't listed yet. */
+  unlisted(frame: number): string {
+    const tail = this.listedTail;
+    if (tail && frame > this.state.totalFrames) {
+      if (tail.held) return `listed once read in full, as ${tail.held}`;
+      if (tail.unchecked(frame)) return "not checked against the display filter yet";
+    }
+    return "hidden by the current display filter";
   }
 
   /** Checks row ranges against the displayed list and merges them. */
   private checkRows(rows: Ranges): Ranges {
     if (rows.length > MAX_ROW_RANGES) throw new Error(`at most ${MAX_ROW_RANGES} row ranges can be selected`);
-    const n = this.state.displayedFrames;
+    const n = this.listLength();
     for (const [a, b] of rows) {
       if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || a > b || b >= n) throw new Error(`invalid row range [${a}, ${b}] (${n} rows are displayed)`);
     }
@@ -816,17 +1310,20 @@ export class Viewer extends EventEmitter {
 
   /** Frame ranges of the user's selected rows. */
   selectedFrames(): Ranges {
-    return this.framesOfRows(clipRanges(this.state.selectedRows, this.state.displayedFrames));
+    return this.framesOfRows(clipRanges(this.state.selectedRows, this.listLength()));
   }
 
-  /** Frame ranges of displayed rows. */
+  /** Frame ranges of displayed rows, provisional ones too. */
   private framesOfRows(rows: Ranges): Ranges {
     const displayed = this.displayed;
-    if (!displayed) return rows.map(([a, b]) => [a + 1, b + 1]);
+    const n = this.state.displayedFrames;
+    const tail = this.listedTail;
+    // Without a filter, row i is frame i + 1 throughout
+    if (!displayed && !tail?.filter) return rows.map(([a, b]) => [a + 1, b + 1]);
     const out: Ranges = [];
     for (const [a, b] of rows) {
       for (let i = a; i <= b; i++) {
-        const frame = displayed[i];
+        const frame = i < n ? (displayed ? displayed[i] : i + 1) : tail!.frameAt(i - n);
         const last = out[out.length - 1];
         if (last && frame === last[1] + 1) last[1] = frame;
         else out.push([frame, frame]);
@@ -847,7 +1344,8 @@ export class Viewer extends EventEmitter {
     this.requireFile();
     // Notes become packet comments on export, where editcap takes no control characters
     note = printable(note).slice(0, MAX_NOTE);
-    const valid = [...new Set(frames)].filter((f) => Number.isInteger(f) && f >= 1 && f <= this.state.totalFrames);
+    const known = this.known();
+    const valid = [...new Set(frames)].filter((f) => Number.isInteger(f) && f >= 1 && f <= known);
     const marked = new Set(valid);
     const keep = this.state.marks.filter((m) => !marked.has(m.frame));
     if (keep.length + valid.length > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
@@ -886,13 +1384,12 @@ export class Viewer extends EventEmitter {
       this.set({ marks: marks.filter((m) => !shown(m)) });
       return;
     }
-    const n = this.state.displayedFrames;
+    const n = this.listLength();
     if (marks.length + n - marks.filter(shown).length > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
     const had = new Set(marks.map((m) => m.frame));
     const added: Mark[] = [];
-    for (let i = 0; i < n; i++) {
-      const frame = this.displayed ? this.displayed[i] : i + 1;
-      if (!had.has(frame)) added.push({ frame, note: "", by });
+    for (const [a, b] of n ? this.framesOfRows([[0, n - 1]]) : []) {
+      for (let frame = a; frame <= b; frame++) if (!had.has(frame)) added.push({ frame, note: "", by });
     }
     this.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
   }
@@ -920,7 +1417,7 @@ export class Viewer extends EventEmitter {
       }
       if (rows?.length) frames = this.framesOfRows(this.checkRows(rows));
       else if (frame !== null) {
-        if (!Number.isInteger(frame) || frame < 1 || frame > this.state.totalFrames) throw new Error(`no frame ${frame}`);
+        if (!Number.isInteger(frame) || frame < 1 || frame > this.known()) throw new Error(`no frame ${frame}`);
         frames = [[frame, frame]];
       }
     } else if (this.state.file) frames = this.selectedOrCurrent();
@@ -1104,9 +1601,10 @@ export class Viewer extends EventEmitter {
       this.panelData.hold(true);
       try {
         await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
+        this.tail?.setTlsKeylog(path);
         this.panelData.setTlsKeylog(path);
         this.set({ tlsKeylog: path });
-        await this.reloadNow(true);
+        await this.reloadNow(true, false, true);
       } finally {
         this.set({ epoch: this.newEpoch("tls") });
         this.panelData.hold(false);
@@ -1124,17 +1622,25 @@ export class Viewer extends EventEmitter {
     const input = this.state.file!;
     const format = checkTarget(String(req.path ?? ""), [input, ...this.capture.state.files], !!req.overwrite);
     // Always explicit frames: a live capture may have written more than the view knows
-    const everything: Ranges = this.state.totalFrames ? [[1, this.state.totalFrames]] : [];
+    const known = this.known();
+    const everything: Ranges = known ? [[1, known]] : [];
+    // Filters match exactly only what was read in full
+    let leftOut = 0;
     let ranges: Ranges;
-    if (req.filter !== undefined) {
+    if (req.filter !== undefined && req.filter.trim()) {
       const check = await this.checkFilter(req.filter);
       if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-      ranges = req.filter.trim() ? toRanges(await matchingFrames(this.engine, req.filter.trim())) : everything;
-    } else if (req.which === "all") ranges = everything;
-    else if (req.which === "displayed") ranges = this.displayed ? toRanges(this.displayed) : everything;
-    else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
+      ranges = toRanges(await matchingFrames(this.engine, req.filter.trim()));
+      leftOut = known - this.state.totalFrames;
+    } else if (req.filter !== undefined || req.which === "all") ranges = everything;
+    else if (req.which === "displayed") {
+      ranges = this.displayed ? toRanges(this.displayed) : everything;
+      // Its provisional matches, and newer packets not checked against it
+      const tail = this.listedTail;
+      if (this.displayed && tail) leftOut = tail.held ? tail.frames : tail.listed() + tail.unfiltered();
+    } else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
     else if (req.which === "selected") ranges = this.selectedOrCurrent();
-    else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), this.state.totalFrames);
+    else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), known);
     else throw new Error(`unknown selection "${req.which}"`);
     if (!ranges.length) throw new Error("no packets to export");
     const frames = countRanges(ranges);
@@ -1150,7 +1656,7 @@ export class Viewer extends EventEmitter {
       this.agentExports.add(resolve(req.path));
       this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
     }
-    return { path: req.path, frames, size, comments: comments.size };
+    return { path: req.path, frames, size, comments: comments.size, ...(leftOut ? { leftOut } : {}) };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
@@ -1395,7 +1901,7 @@ export class Viewer extends EventEmitter {
     if (m !== "select" && m !== "setFilter") throw new ApiError(400, "bad-args", "a panel can only select a frame or set the display filter");
     const title = this.panels.allow(name, label, m, clicked === true);
     if (m === "select") {
-      if (typeof a !== "number" || !Number.isInteger(a) || a < 1 || a > this.state.totalFrames) throw new ApiError(400, "bad-args", `wb.select: no frame ${printable(String(a)).slice(0, 40)} in this capture`);
+      if (typeof a !== "number" || !Number.isInteger(a) || a < 1 || a > this.known()) throw new ApiError(400, "bad-args", `wb.select: no frame ${printable(String(a)).slice(0, 40)} in this capture`);
       this.select(a, "user");
       // The packet list scrolls to it, as to the agent's selections
       this.set({ selectSeq: this.state.selectSeq + 1 });
@@ -1444,7 +1950,7 @@ export class Viewer extends EventEmitter {
       let rolledBack: RollBack = false;
       try {
         if (this.state.file) {
-          const r = await this.reloadNow(true, true);
+          const r = await this.reloadNow(true, true, true);
           rolledBack = r.rolledBack;
           // A filter on a protocol whose extension is gone now
           if (r.dropped) this.events.add("WARNING", `The display filter "${filter}" doesn't apply with the extensions as they are now and was cleared`);
@@ -1591,6 +2097,8 @@ export class Viewer extends EventEmitter {
   shutdown(): void {
     this.capture.stop();
     this.capture.stopActivity();
+    if (this.tailTimer) clearInterval(this.tailTimer);
+    this.dropTail();
     for (const e of this.engines) e.close();
     this.panelData.close();
     this.extensions.close();
@@ -1608,6 +2116,13 @@ async function luaErrors(engine: Sharkd): Promise<{ frame: number; message: stri
     out.push({ frame: d.f, message: printable(d.m.replace(/^Lua Error: /, "")) });
   }
   return out.sort((a, b) => a.frame - b.frame);
+}
+
+/** A frame's streams as [protocol, filter]. */
+function followersOf(f: SharkdFrame): [string, string][] {
+  return (f.followers ?? (f.fol ?? []).map(([protocol, filter]) => ({ protocol, filter })))
+    .filter((x) => x.filter)
+    .map((x) => [x.protocol, x.filter!] as [string, string]);
 }
 
 /** sharkd custom columns: column0..N as "<field>:0" (all occurrences). */
@@ -1662,11 +2177,44 @@ function clipRanges(ranges: Ranges, n: number): Ranges {
 }
 
 /** Whether every row of `before` shows the same frame in `after` (a growing live capture). */
-function appendedOnly(before: Int32Array | null, after: Int32Array | null): boolean {
-  if (!before || !after) return !before && !after;
+function startsWith(after: { length: number; at: (i: number) => number }, before: { length: number; at: (i: number) => number }): boolean {
   if (after.length < before.length) return false;
-  for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) return false;
+  for (let i = 0; i < before.length; i++) if (before.at(i) !== after.at(i)) return false;
   return true;
+}
+
+/**
+ * Whether a sharkd reading `next` frames needs more memory than is
+ * `available`, beyond what the standby holds already: as much a frame as the
+ * active one needs, which read `frames`.
+ */
+export function memoryShort(m: { activeBytes: number; frames: number; standbyBytes: number; next: number; available: number }): boolean {
+  if (!m.frames) return false;
+  const perFrame = Math.max(0, m.activeBytes - SHARKD_BASE_BYTES) / m.frames;
+  return SHARKD_BASE_BYTES + perFrame * m.next - m.standbyBytes > m.available - MEMORY_MARGIN;
+}
+
+/** Resident memory of a process (Linux), or null. */
+function rssBytes(pid: number | null): number | null {
+  if (!pid) return null;
+  try {
+    const kb = /^VmRSS:\s+(\d+) kB/m.exec(readFileSync(`/proc/${pid}/status`, "utf8"));
+    return kb ? Number(kb[1]) * 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Memory the system can still give out (Linux), or null; WIREBUDDY_MEM_AVAILABLE (bytes) stands in for it in tests. */
+function availableBytes(): number | null {
+  const fake = Number(process.env.WIREBUDDY_MEM_AVAILABLE);
+  if (fake > 0) return fake;
+  try {
+    const kb = /^MemAvailable:\s+(\d+) kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
+    return kb ? Number(kb[1]) * 1024 : null;
+  } catch {
+    return null;
+  }
 }
 
 export const CAPTURE_FILE = /\.(pcapng|pcap|cap|ntar|erf|snoop|trc|dmp)(\.(gz|zst|lz4))?$/i;

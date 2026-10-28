@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Big live captures list new packets within about a second, provisionally until the next full read
+
 ## [0.9.0] - 2026-10-27
 
 First public version.

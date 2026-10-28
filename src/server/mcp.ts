@@ -8,7 +8,7 @@ import type { HttpServer } from "./http.ts";
 import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
-import type { CaptureState, ExtensionInfo, PacketRow, PhsNode, TreeNode } from "../shared/api.ts";
+import type { CaptureState, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
 import { framesFilter, inRanges, type Ranges } from "../shared/ranges.ts";
 import { VERSION } from "../shared/version.ts";
 import { OBJECT_KINDS } from "./objects.ts";
@@ -30,6 +30,7 @@ You and the user look at the same view: the open capture, display filter, select
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
 - start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
+- Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say how many newer packets are still provisional.
 - When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
 - To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
 }
@@ -199,6 +200,28 @@ function testText(t: ExtensionTest): string {
   return out.join("\n");
 }
 
+/** "4 s" for a duration in ms. */
+function seconds(ms: number): string {
+  return `${Math.max(1, Math.round(ms / 1000))} s`;
+}
+
+/** When the agent's tools see provisional packets: `running` while the capture runs. */
+function whenRead(t: ProvisionalTail, running: boolean): string {
+  if (!t.paused) return `with the next full read, in about ${seconds(t.readMs)}`;
+  return `once ${running ? "the capture stops" : "a full read succeeds (View › Reload)"} (full reads wait: ${t.paused})`;
+}
+
+/** What get_view_state says about the packets after the last full read. */
+function tailLine(read: number, t: ProvisionalTail, running: boolean): string {
+  const range = `${read + 1}-${read + t.frames}`;
+  const filter = t.held
+    ? `; with this display filter they wait for a full read (${t.held})`
+    : t.displayed !== t.frames || t.unfiltered
+      ? `; ${t.displayed} of them match the display filter provisionally${t.unfiltered ? `, ${t.unfiltered} not checked yet` : ""}`
+      : "";
+  return `Live capture: ${t.frames} newer packets (${range}) are in the user's list provisionally${filter}; your tools see them ${whenRead(t, running)}`;
+}
+
 /** Stream index field per follow protocol (others are followed from a frame). */
 const STREAM_FIELDS: Record<string, string> = {
   TCP: "tcp.stream",
@@ -240,7 +263,15 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     const lines = eventLines(viewer.events.take());
     return lines.length ? `\n\n[WireBuddy events ${tag} since your last call (problems the user ran into, what they did, questions they ask you):\n${lines.join("\n")}]` : "";
   };
-  footer = () => events() + viewerHint();
+  // Results come from the packets read in full; the user's list may show newer ones
+  const liveNote = (): string => {
+    const s = viewer.state;
+    const t = s.tail;
+    if (!t?.frames) return "";
+    const covered = s.totalFrames ? `these results cover frames 1-${s.totalFrames}, read in full` : "no packet is read in full, so these results cover none";
+    return `\n\n[Live capture: ${covered}; ${t.frames} newer packets are provisional in the user's list; your tools see them ${whenRead(t, viewer.capture.running)}]`;
+  };
+  footer = () => liveNote() + events() + viewerHint();
 
   server.registerTool(
     "viewer_url",
@@ -283,10 +314,12 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       if (!s.file) lines.push("No capture is open.");
       else {
         lines.push(`File: ${s.file} (${s.fileSize} bytes)`);
-        lines.push(`Frames: ${s.totalFrames}, displayed: ${s.displayedFrames}, duration: ${s.duration.toFixed(3)} s`);
+        lines.push(`Frames: ${s.totalFrames}${s.tail ? " read in full" : ""}, displayed: ${s.displayedFrames}, duration: ${s.duration.toFixed(3)} s`);
+        if (s.tail?.frames) lines.push(tailLine(s.totalFrames, s.tail, viewer.capture.running));
         lines.push(`Display filter: ${s.filter || "(none)"}`);
         if (s.customColumns.length) lines.push(`Custom columns: ${s.customColumns.map((c) => `${c.title} (${c.field})`).join(", ")}`);
-        if (s.selected !== null) {
+        if (s.selected !== null && s.selected > s.totalFrames) lines.push(`Selected frame (by ${s.selectedBy}): ${s.selected} (provisional: not read in full yet)`);
+        else if (s.selected !== null) {
           const row = await viewer.row(s.selected);
           const hidden = s.selectedIndex < 0 ? " (hidden by the filter)" : "";
           lines.push(`Selected frame (by ${s.selectedBy}): ${s.selected}${hidden}`);
@@ -514,9 +547,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     },
     tool(({ frame }) => {
       viewer.select(frame, "agent");
-      return viewer.state.selectedIndex < 0
-        ? `Selected frame ${frame}, but the current display filter hides it`
-        : `Selected frame ${frame} (row ${viewer.state.selectedIndex + 1} of ${viewer.state.displayedFrames})`;
+      const s = viewer.state;
+      return s.selectedIndex < 0 ? `Selected frame ${frame}, but it is ${viewer.unlisted(frame)}` : `Selected frame ${frame} (row ${s.selectedIndex + 1} of ${s.displayedFrames + (s.tail?.displayed ?? 0)})`;
     }),
   );
 
@@ -533,7 +565,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const marked = viewer.mark(frames, note, "agent");
       const valid = new Set(marked);
       const ignored = [...new Set(frames)].filter((f) => !valid.has(f));
-      const skipped = ignored.length ? `; ignored ${ignored.length} frame(s) beyond the ${viewer.state.totalFrames} in the capture: ${ignored.slice(0, 20).join(", ")}${ignored.length > 20 ? ", ..." : ""}` : "";
+      const known = viewer.state.totalFrames + (viewer.state.tail?.frames ?? 0);
+      const skipped = ignored.length ? `; ignored ${ignored.length} frame(s) beyond the ${known} in the capture: ${ignored.slice(0, 20).join(", ")}${ignored.length > 20 ? ", ..." : ""}` : "";
       return `Marked ${marked.length} frame(s)${skipped}; ${viewer.state.marks.length} marked in total`;
     }),
   );
@@ -667,7 +700,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ path, filter, which, range, overwrite, mark_comments }) => {
       const r = await viewer.exportPackets({ path, which, range, overwrite, markComments: mark_comments, ...(filter !== undefined ? { filter } : {}) }, "agent");
       const comments = r.comments ? `, ${r.comments} mark${r.comments === 1 ? "" : "s"} as packet comments` : "";
-      return `Wrote ${r.frames} packet${r.frames === 1 ? "" : "s"} (${r.size} bytes${comments}) to ${r.path}`;
+      const left = r.leftOut ? `; ${r.leftOut} newer packet${r.leftOut === 1 ? "" : "s"} of the live capture, not read in full yet, were left out` : "";
+      return `Wrote ${r.frames} packet${r.frames === 1 ? "" : "s"} (${r.size} bytes${comments}) to ${r.path}${left}`;
     }),
   );
 

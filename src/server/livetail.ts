@@ -1,0 +1,710 @@
+/**
+ * LiveTail: the packets of a live capture that arrived after the last full
+ * read of the file, dissected provisionally. The full read stays the only
+ * exact source; until it covers them, newer packets are read from small
+ * slices of the file by sharkd processes of their own.
+ *
+ * The file is cut into chunks of CHUNK frames, fewer when they would take
+ * more than CHUNK_BYTES. A chunk's slice holds the chunk, the CONTEXT frames
+ * before and after it (later packets complete reassembled PDUs), and what
+ * FlowIndex finds the chunk's flows need from further away: frame 1 (the time
+ * reference), their first packets, their messages under way before the slice
+ * and their data under way after it. Every part has a byte budget too, so a
+ * slice takes about 64 MiB at most whatever the packet sizes. A chunk's rows
+ * always come from a slice of its own, so they read the same every time once
+ * nothing that comes later can change them. sharkd numbers a slice's frames
+ * from 1: rows and details are renumbered to the file's frame numbers.
+ */
+
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { FrameStore } from "./framestore.ts";
+import { FlowIndex, HEAD_BYTES } from "./flows.ts";
+import { matchingFrames, type Sharkd } from "./sharkd.ts";
+import type { PacketRow, TreeNode } from "../shared/api.ts";
+
+const MiB = 2 ** 20;
+/** Frames per chunk, and the bytes they may take. */
+export const CHUNK = 10_000;
+const CHUNK_BYTES = 32 * MiB;
+/** Frames before and after a chunk its slice holds, and the bytes they may take on each side. */
+export const CONTEXT = 2_000;
+const CONTEXT_BYTES = 4 * MiB;
+/** What a slice brings along for its flows from before the chunk's context, and from after it. */
+const BEFORE = { frames: 20_000, bytes: 16 * MiB };
+const AFTER = { frames: 10_000, bytes: 8 * MiB };
+/** Rows kept of chunks that read the same from now on. */
+const MAX_CACHED_ROWS = 100_000;
+/** A page of a chunk brings the chunk's other filter matches along when there are no more than this. */
+const READ_BATCH = 500;
+/** Slices worked out, kept by chunk. */
+const MAX_SLICES = 16;
+/** Folders of slices start with this, then the server's process id. */
+const DIR_PREFIX = ".wirebuddy-slices-";
+/** sharkd's ftype of frame-number fields (FT_FRAMENUM). */
+export const FT_FRAMENUM = 35;
+/** Fields counted over what sharkd read (stream indices): a slice counts them differently. */
+const STREAM_NUMBERED = /(^|\.)stream(\.|$)|^sctp\.assoc_index$|^quic\.connection\.number$/;
+/** Fields of frame numbers and displayed frames that filters on slices get wrong. */
+const FRAME_FIELDS = /^frame\.(number|time_delta_displayed|ref_time)$/;
+/** Frame numbers dissectors put into Info, after the words before them. */
+const INFO_FRAMES = /\b((?:reply|request|call|response) in|response to|reassembled in|reas:|duplicate of|retransmission of|continuation to)(:? ?(?:#|packet |frame )?)(\d+)/gi;
+
+/** The list changed since rows were asked for, or the tail closed: they are asked for again. */
+export class Superseded extends Error {}
+
+/** Whether a field is counted over what sharkd read, so slices can't tell its value. */
+export function streamNumbered(field: string): boolean {
+  return STREAM_NUMBERED.test(field);
+}
+
+/** The slice of chunk lo..end: frames `extras` (all before c0), c0..hi, then frames `after` (all after hi). */
+export interface Slice {
+  lo: number;
+  end: number;
+  hi: number;
+  c0: number;
+  extras: Int32Array;
+  after: Int32Array;
+  /** The chunk won't grow. */
+  complete: boolean;
+  /** Its rows read the same from now on: what comes later can't change them. */
+  final: boolean;
+}
+
+/** The slice's frames in its own order. */
+export function sliceFrames(s: Slice): Int32Array {
+  const n = s.hi - s.c0 + 1;
+  const out = new Int32Array(s.extras.length + n + s.after.length);
+  out.set(s.extras);
+  for (let i = 0; i < n; i++) out[s.extras.length + i] = s.c0 + i;
+  out.set(s.after, s.extras.length + n);
+  return out;
+}
+
+/** The file's frame number of the slice's frame `local`, or `local` itself when there is none. */
+export function toGlobal(s: Slice, local: number): number {
+  const k = s.extras.length;
+  const n = s.hi - s.c0 + 1;
+  if (local >= 1 && local <= k) return s.extras[local - 1];
+  if (local > k && local <= k + n) return s.c0 + local - k - 1;
+  if (local > k + n && local <= k + n + s.after.length) return s.after[local - k - n - 1];
+  return local;
+}
+
+/** The slice's frame number of the file's frame `frame` (c0..hi). */
+export function toLocal(s: Slice, frame: number): number {
+  return s.extras.length + frame - s.c0 + 1;
+}
+
+/** Which columns of a row show frame numbers, and which are numbered within a slice. */
+export interface Numbering {
+  /** No. and frame-number fields (frame.number, tcp.reassembled_in, ...). */
+  frames: number[];
+  /** The Info column, or -1. */
+  info: number;
+  /** Fields numbered within a slice (stream indices): left empty. */
+  blank: number[];
+}
+
+/** Renumbers a row read from slice `s` and marks it provisional. */
+export function renumberRow(row: PacketRow, s: Slice, n: Numbering): PacketRow {
+  const g = (m: string): string => String(toGlobal(s, Number(m)));
+  const c = row.c.slice();
+  for (const j of n.frames) if (c[j]) c[j] = c[j].replace(/\d+/g, g);
+  if (n.info >= 0 && c[n.info]) c[n.info] = renumberInfo(c[n.info], (m) => toGlobal(s, m));
+  for (const j of n.blank) if (j < c.length) c[j] = "";
+  return { num: toGlobal(s, row.num), c, bg: row.bg, fg: row.fg, p: true };
+}
+
+/**
+ * Frame numbers dissectors put into Info: "[TCP PDU reassembled in 12]",
+ * "[Reassembled in #12]", "(reply in 12)", "(request in 12)", "[RPC
+ * retransmission of #12]", "[TCP Dup ACK 12#1]" and the like.
+ */
+export function renumberInfo(info: string, map: (frame: number) => number): string {
+  return info
+    .replace(INFO_FRAMES, (_, words: string, sep: string, d: string) => words + sep + map(Number(d)))
+    .replace(/(Dup ACK )(\d+)(#)/g, (_, p: string, d: string, h: string) => p + map(Number(d)) + h);
+}
+
+/** Renumbers a details tree read from slice `s`; fields numbered within the slice lose their value. */
+export function renumberTree(nodes: TreeNode[], s: Slice): TreeNode[] {
+  const g = (n: number): number => toGlobal(s, n);
+  const word = (text: string, from: number, to: number): string => text.replace(new RegExp(`\\b${from}\\b`), String(to));
+  return nodes.map((n) => {
+    const out: TreeNode = { ...n };
+    if (n.t === "framenum" && n.fnum) {
+      out.fnum = g(n.fnum);
+      out.l = word(n.l, n.fnum, out.fnum);
+      if (n.f) out.f = word(n.f, n.fnum, out.fnum);
+    } else if (n.fn === "frame") out.l = n.l.replace(/^Frame (\d+):/, (_, d: string) => `Frame ${g(Number(d))}:`);
+    else if (n.fn === "frame.number") {
+      out.l = n.l.replace(/\d+$/, (d) => String(g(Number(d))));
+      if (n.f) out.f = n.f.replace(/\d+$/, (d) => String(g(Number(d))));
+    } else if (n.fn && STREAM_NUMBERED.test(n.fn)) {
+      out.l = n.l.replace(/:.*$/, ": unknown until read in full");
+      delete out.f;
+    }
+    // Lists of the frames a PDU was reassembled from: "#12(1448), #14(552)"
+    out.l = out.l.replace(/#(\d+)\(/g, (_, d: string) => `#${g(Number(d))}(`);
+    if (n.n) out.n = renumberTree(n.n, s);
+    return out;
+  });
+}
+
+/**
+ * Why a display filter can't be checked on slices, or null: it uses a field
+ * numbered within what sharkd read (stream indices, frame numbers), or a
+ * field reference or macro ("$"). `type` gives a field's sharkd ftype.
+ */
+export async function heldReason(filter: string, type: (field: string) => Promise<number | null>): Promise<string | null> {
+  if (filter.includes("$")) return "the filter uses a field reference or macro";
+  for (const token of new Set(filter.replace(/"(\\.|[^"\\])*"/g, " ").match(/[A-Za-z_][A-Za-z0-9_.-]*/g) ?? [])) {
+    if (STREAM_NUMBERED.test(token) || FRAME_FIELDS.test(token)) return `the filter uses ${token}`;
+    if (token.includes(".") && (await type(token)) === FT_FRAMENUM) return `the filter uses the frame number field ${token}`;
+  }
+  return null;
+}
+
+/** How the view's rows read. */
+export interface RowView {
+  numbering: Numbering;
+  /** Reads rows from a sharkd like the view's packet list does (its columns, custom ones too). */
+  fetch: (engine: Sharkd, params: Record<string, unknown>) => Promise<PacketRow[]>;
+  /** Changes whenever rows would read differently (columns, extensions, TLS keys). */
+  key: string;
+}
+
+/** A sharkd for slices, with the slice it holds; work on it runs one at a time. */
+class Engine {
+  /** The slice it holds, and its file. */
+  slice: Slice | null = null;
+  file = "";
+  /** The held slice's frames a filter matches, once asked for (sharkd keeps that filter's result too). */
+  matches: { filter: string; local: Int32Array } | null = null;
+  private pending = 0;
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(readonly sharkd: Sharkd) {}
+
+  /** Nothing queued or running on it. */
+  get idle(): boolean {
+    return this.pending === 0;
+  }
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    this.pending++;
+    const next = this.queue.then(fn, fn).finally(() => this.pending--);
+    this.queue = next.catch(() => {});
+    return next;
+  }
+
+  /** Whether frames of `s`'s chunk up to `last` can be read from the slice it holds: `s` itself, or while the chunk grows an earlier one. */
+  serves(s: Slice, last: number): boolean {
+    const held = this.slice;
+    if (!held || held.lo !== s.lo || last > held.end || this.sharkd.outdated()) return false;
+    return !s.complete || sliceKey(held) === sliceKey(s);
+  }
+}
+
+export interface TailOptions {
+  /** The live capture file. */
+  file: string;
+  /** Where the folder of slices goes: the capture's folder. */
+  dir: string;
+  /** A sharkd set up like the view's (profile, extensions, TLS keys). */
+  sharkd: () => Sharkd;
+}
+
+export class LiveTail {
+  readonly file: string;
+  readonly store: FrameStore;
+  private readonly flows = new FlowIndex();
+  /** First frames of the chunks so far; the last chunk may still grow. */
+  private readonly starts: number[] = [1];
+  /** Frames 1..base are read in full; the tail is base+1..count. */
+  base = 0;
+  /** Shown in the view: full reads have become slow. */
+  active = false;
+  filter = "";
+  /** Why newer packets wait for a full read with this filter, or null. */
+  held: string | null = null;
+  /** Provisional matches of the filter, ascending, after base. */
+  private matches: number[] = [];
+  /** Frames up to here were checked against the filter. */
+  private checked = 0;
+  /** When the newest chunk may be checked again. */
+  private growingAt = 0;
+  /** Changes with the filter and on close: passes started before are dropped. */
+  private seq = 0;
+  private folder: string | null = null;
+  private files = 0;
+  private rowsEngine: Engine | null = null;
+  private filterEngine: Engine | null = null;
+  private indexing: Promise<void> = Promise.resolve();
+  /** Slices worked out, by chunk, with the count they are for. */
+  private readonly slices = new Map<number, { count: number; slice: Slice }>();
+  /** Rows of final chunks, by chunk, the one used last at the end; for RowView.key. */
+  private readonly cache = new Map<number, Map<number, PacketRow>>();
+  private cachedRows = 0;
+  private cacheKey = "";
+  private closed = false;
+
+  constructor(private readonly opts: TailOptions) {
+    this.file = opts.file;
+    this.store = new FrameStore(opts.file);
+  }
+
+  /** Packets indexed: frames 1..count. */
+  get count(): number {
+    return this.flows.count;
+  }
+
+  /** Packets after the full read. */
+  get frames(): number {
+    return Math.max(0, this.count - this.base);
+  }
+
+  /** Why the tail can't go on, or null. */
+  broken(): string | null {
+    return this.store.sliceable();
+  }
+
+  /** Indexes what the file gained. */
+  update(): Promise<void> {
+    const index = async (): Promise<void> => {
+      await this.store.update();
+      if (this.store.count > this.flows.count) {
+        await this.store.readHeads(this.flows.count + 1, this.store.count, HEAD_BYTES, (frame, _time, _len, link, data) => this.flows.feed(frame, link, data));
+        this.cut();
+      }
+    };
+    this.indexing = this.indexing.then(index, index);
+    return this.indexing;
+  }
+
+  /** A full read covers frames 1..frames now. */
+  rebase(frames: number): void {
+    // Back to fewer (a read failed): all of them are checked against the filter again
+    if (frames < this.base) {
+      this.base = frames;
+      this.setFilter(this.filter, this.held);
+    }
+    this.base = frames;
+    let i = 0;
+    while (i < this.matches.length && this.matches[i] <= frames) i++;
+    if (i) this.matches = this.matches.slice(i);
+    this.checked = Math.max(this.checked, frames);
+    for (const [lo, rows] of this.cache) {
+      for (const f of rows.keys()) {
+        if (f > frames) continue;
+        rows.delete(f);
+        this.cachedRows--;
+      }
+      if (!rows.size) this.cache.delete(lo);
+    }
+  }
+
+  setFilter(filter: string, held: string | null): void {
+    this.filter = filter;
+    this.held = filter ? held : null;
+    this.matches = [];
+    this.checked = this.base;
+    this.growingAt = 0;
+    this.seq++;
+  }
+
+  /** Rows the tail adds to the view's list. */
+  listed(): number {
+    if (!this.filter) return this.frames;
+    return this.held ? 0 : this.matches.length;
+  }
+
+  /** Newer packets the filter wasn't checked against yet. */
+  unfiltered(): number {
+    return this.filter && !this.held ? Math.max(0, this.count - Math.max(this.checked, this.base)) : 0;
+  }
+
+  /** Whether the tail's `frame` wasn't checked against the filter yet. */
+  unchecked(frame: number): boolean {
+    return !!this.filter && !this.held && frame > Math.max(this.checked, this.base);
+  }
+
+  /** Frame of the tail's row `i`. */
+  frameAt(i: number): number {
+    return this.filter ? this.matches[i] : this.base + 1 + i;
+  }
+
+  /** The tail's row of `frame`, or -1. */
+  indexOf(frame: number): number {
+    if (frame <= this.base || frame > this.count) return -1;
+    if (!this.filter) return frame - this.base - 1;
+    let lo = 0;
+    let hi = this.matches.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.matches[mid] === frame) return mid;
+      if (this.matches[mid] < frame) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return -1;
+  }
+
+  /** The slice of the chunk that holds `frame`, as far as the file is indexed. */
+  slice(frame: number): Slice {
+    const { lo, end, complete } = this.chunk(frame);
+    const hit = this.slices.get(lo);
+    if (hit?.count === this.count) return hit.slice;
+    const size = (f: number): number => this.store.size(f);
+    const c0 = this.fitBack(Math.max(1, lo - CONTEXT), lo - 1, CONTEXT_BYTES);
+    const hi = this.fit(end + 1, Math.min(end + CONTEXT, this.count), CONTEXT_BYTES);
+    // Nothing more comes before hi once it holds CONTEXT frames, or stopped short of the newest one
+    const settled = complete && (hi === end + CONTEXT || hi < this.count);
+    const after = settled ? this.flows.after(lo, end, hi, { ...AFTER, size }) : { frames: new Int32Array(0), open: true };
+    const extras = this.flows.context(c0, end, { ...BEFORE, size });
+    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, complete, final: settled && !after.open };
+    this.slices.delete(lo);
+    this.slices.set(lo, { count: this.count, slice: s });
+    if (this.slices.size > MAX_SLICES) this.slices.delete(this.slices.keys().next().value!);
+    return s;
+  }
+
+  /** Rows i0..i0+n-1 of the tail, renumbered; slices are read only while `wanted` says so. */
+  rows(i0: number, n: number, view: RowView, wanted?: () => boolean): Promise<PacketRow[]> {
+    const frames: number[] = [];
+    for (let i = i0; i < i0 + n && i < this.listed(); i++) frames.push(this.frameAt(i));
+    return this.rowsOf(frames, view, wanted);
+  }
+
+  /** Rows of the given tail frames (ascending), whatever the filter; slices are read only while `wanted` says so. */
+  async rowsOf(frames: number[], view: RowView, wanted: () => boolean = () => true): Promise<PacketRow[]> {
+    if (view.key !== this.cacheKey) {
+      this.cache.clear();
+      this.cachedRows = 0;
+      this.cacheKey = view.key;
+    }
+    const got = new Map<number, PacketRow>();
+    for (let i = 0; i < frames.length; ) {
+      const { lo, end, complete } = this.chunk(frames[i]);
+      let j = i;
+      while (j + 1 < frames.length && frames[j + 1] <= end) j++;
+      const cached = this.cache.get(lo);
+      if (cached) {
+        this.cache.delete(lo);
+        this.cache.set(lo, cached);
+      }
+      let part = frames.slice(i, j + 1).filter((f) => {
+        const r = cached?.get(f);
+        if (r) got.set(f, r);
+        return !r;
+      });
+      // A filter's matches are sparse: pages around these ask for the chunk's others next, when they are few
+      if (part.length && complete && this.filter && !this.held) {
+        const more = this.matchesIn(lo, end).filter((f) => !cached?.has(f));
+        if (more.length <= READ_BATCH) part = [...new Set([...part, ...more])].sort((a, b) => a - b);
+      }
+      if (part.length) {
+        const { rows, final } = await this.readChunk(part, view, wanted);
+        for (const f of part) {
+          const row = rows.get(f);
+          got.set(f, row ?? { num: f, c: [], p: true });
+          if (final && row) this.keep(lo, f, row);
+        }
+      }
+      i = j + 1;
+    }
+    return frames.map((f) => got.get(f)!);
+  }
+
+  /** Rows of `frames` (ascending, of one chunk) from a slice of their chunk; `final`: they read the same from now on. */
+  private async readChunk(frames: number[], view: RowView, wanted: () => boolean): Promise<{ rows: Map<number, PacketRow>; final: boolean }> {
+    const last = frames[frames.length - 1];
+    // The filter's sharkd may hold the slice (the newest chunk, just checked), when it has nothing else to do
+    const filter = this.filterEngine;
+    if (filter?.idle && filter.serves(this.slice(last), last)) {
+      const got = await filter.run(async () => (filter.serves(this.slice(last), last) ? this.read(filter, frames, view) : null));
+      if (got) return got;
+    }
+    const engine = (this.rowsEngine ??= this.newEngine());
+    return engine.run(async () => {
+      // Asked for again since, for a list that grew: that request reads them
+      if (!wanted()) throw new Superseded("the list changed since");
+      const s = this.slice(last);
+      if (!engine.serves(s, last)) await this.load(engine, s);
+      return this.read(engine, frames, view);
+    });
+  }
+
+  /** Rows of `frames` (ascending, of the chunk) from the slice `engine` holds, renumbered. */
+  private async read(engine: Engine, frames: number[], view: RowView): Promise<{ rows: Map<number, PacketRow>; final: boolean }> {
+    const s = engine.slice!;
+    const filter = this.filter && !this.held ? this.filter : "";
+    const matched = filter ? await this.matchesOf(engine, filter) : null;
+    // A match by its place among the slice's, which sharkd keeps (no pass over the slice again); other frames by number
+    const byMatch: number[] = [];
+    const byFrame: number[] = [];
+    for (const f of frames) {
+      const local = toLocal(s, f);
+      const i = matched ? indexIn(matched, local) : -1;
+      if (i >= 0) byMatch.push(i);
+      else byFrame.push(local);
+    }
+    const rows = new Map<number, PacketRow>();
+    const fetch = async (params: Record<string, unknown>): Promise<void> => {
+      for (const r of await view.fetch(engine.sharkd, params)) rows.set(toGlobal(s, r.num), renumberRow(r, s, view.numbering));
+    };
+    for (const [first, n] of runs(byMatch)) await fetch({ filter, ...(first ? { skip: first } : {}), limit: n });
+    for (const [first, n] of runs(byFrame)) await fetch({ ...(first > 1 ? { skip: first - 1 } : {}), limit: n });
+    return { rows, final: s.final };
+  }
+
+  /** The frames of the slice `engine` holds that `filter` matches, by their numbers there. */
+  private async matchesOf(engine: Engine, filter: string): Promise<Int32Array> {
+    const known = engine.matches;
+    if (known?.filter === filter) return known.local;
+    const local = await matchingFrames(engine.sharkd, filter);
+    engine.matches = { filter, local };
+    return local;
+  }
+
+  /** The filter's provisional matches in lo..hi. */
+  private matchesIn(lo: number, hi: number): number[] {
+    let a = 0;
+    let b = this.matches.length;
+    while (a < b) {
+      const mid = (a + b) >> 1;
+      if (this.matches[mid] < lo) a = mid + 1;
+      else b = mid;
+    }
+    const out: number[] = [];
+    for (let i = a; i < this.matches.length && this.matches[i] <= hi; i++) out.push(this.matches[i]);
+    return out;
+  }
+
+  /** Keeps a row of a final chunk; the chunks used longest ago go first. */
+  private keep(lo: number, frame: number, row: PacketRow): void {
+    let rows = this.cache.get(lo);
+    if (!rows) this.cache.set(lo, (rows = new Map()));
+    if (!rows.has(frame)) this.cachedRows++;
+    rows.set(frame, row);
+    for (const [old, r] of this.cache) {
+      if (this.cachedRows <= MAX_CACHED_ROWS || old === lo) break;
+      this.cache.delete(old);
+      this.cachedRows -= r.size;
+    }
+  }
+
+  /** Details of a tail frame from a slice of its chunk, renumbered. */
+  frame(num: number): Promise<{ tree: TreeNode[]; bytes: string; ds: { name: string; bytes: string }[]; first: number | null }> {
+    const engine = (this.rowsEngine ??= this.newEngine());
+    return engine.run(async () => {
+      const s = this.slice(num);
+      if (!engine.serves(s, num)) await this.load(engine, s);
+      const held = engine.slice!;
+      const f = await engine.sharkd.call<{ tree: TreeNode[]; bytes?: string; ds?: { name: string; bytes: string }[] }>("frame", { frame: toLocal(held, num), proto: true, bytes: true });
+      return { tree: renumberTree(f.tree, held), bytes: f.bytes ?? "", ds: f.ds ?? [], first: this.flows.firstOf(num) };
+    });
+  }
+
+  /**
+   * Checks the next chunk of newer packets against the filter. True when it
+   * was a complete chunk and more wait: the newest chunk, still growing, is
+   * checked again once more packets came, and after a pause as long as the
+   * last check took (sharkd reads the whole slice for each).
+   */
+  async filterPass(): Promise<boolean> {
+    const { seq, filter } = this;
+    const from = Math.max(this.checked, this.base) + 1;
+    if (!filter || this.held || from > this.count || this.closed) return false;
+    if (!this.chunk(from).complete && Date.now() < this.growingAt) return false;
+    const engine = (this.filterEngine ??= this.newEngine());
+    return engine.run(async () => {
+      const started = Date.now();
+      const s = this.slice(from);
+      await this.load(engine, s);
+      const found = await this.matchesOf(engine, filter);
+      if (seq !== this.seq) return false;
+      const after = Math.max(this.checked, this.base);
+      const first = s.extras.length + 1;
+      const last = s.extras.length + s.hi - s.c0 + 1;
+      for (const local of found) {
+        const f = toGlobal(s, local);
+        if (local >= first && local <= last && f > after && f <= s.end) this.matches.push(f);
+      }
+      this.checked = Math.max(this.checked, s.end);
+      if (!s.complete) this.growingAt = 2 * Date.now() - started;
+      return s.complete && this.checked < this.count;
+    });
+  }
+
+  /** Slices must be read with the TLS keys now in use. */
+  setTlsKeylog(path: string | null): void {
+    for (const e of [this.rowsEngine, this.filterEngine]) {
+      if (!e) continue;
+      e.slice = null;
+      e.matches = null;
+      e.sharkd.setPref("tls.keylog_file", path ?? "").catch(() => {});
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    this.seq++;
+    // Work under way can't start them again
+    for (const e of [this.rowsEngine, this.filterEngine]) e?.sharkd.dispose();
+    this.rowsEngine = this.filterEngine = null;
+    this.store.close();
+    try {
+      if (this.folder) rmSync(this.folder, { recursive: true, force: true });
+    } catch {
+      // made unwritable meanwhile: a later server removes it
+    }
+    this.folder = null;
+  }
+
+  private newEngine(): Engine {
+    return new Engine(this.opts.sharkd());
+  }
+
+  /** Writes slice `s` and loads it into `engine`, unless it holds it already. */
+  private async load(engine: Engine, s: Slice): Promise<void> {
+    if (this.closed) throw new Superseded("the live view moved on");
+    // New extensions: a new process, which has no slice yet
+    if (engine.sharkd.outdated()) {
+      engine.sharkd.restart();
+      engine.slice = null;
+    }
+    if (engine.slice && sliceKey(engine.slice) === sliceKey(s)) return;
+    engine.slice = null;
+    engine.matches = null;
+    const frames = sliceFrames(s);
+    const path = join(this.dir(), `${++this.files}.pcapng`);
+    try {
+      await this.store.writeSlice(frames, path);
+      if (this.closed) throw new Superseded("the live view moved on");
+      const r = await engine.sharkd.call<{ status: string; err?: number }>("load", { file: path });
+      if (r.status !== "OK") throw new Error(`sharkd could not read a slice: ${r.status}`);
+      const status = await engine.sharkd.call<{ frames: number }>("status");
+      if (status.frames !== frames.length) throw new Error(`sharkd read ${status.frames} of a slice's ${frames.length} packets`);
+    } catch (err) {
+      unlink(path).catch(() => {});
+      throw err;
+    }
+    // sharkd closed the slice it held before
+    if (engine.file) unlink(engine.file).catch(() => {});
+    Object.assign(engine, { slice: s, file: path });
+  }
+
+  /** The folder of slices, only the user's, next to the capture; again if it was removed. */
+  private dir(): string {
+    if (this.folder && !existsSync(this.folder)) this.folder = null;
+    if (!this.folder) {
+      removeStale(this.opts.dir);
+      this.folder = mkdtempSync(join(this.opts.dir, `${DIR_PREFIX}${process.pid}-`));
+    }
+    return this.folder;
+  }
+
+  /** The chunk lo..end that holds `frame` (1..count). */
+  private chunk(frame: number): { lo: number; end: number; complete: boolean } {
+    let a = 0;
+    let b = this.starts.length - 1;
+    while (a < b) {
+      const mid = (a + b + 1) >> 1;
+      if (this.starts[mid] <= frame) a = mid;
+      else b = mid - 1;
+    }
+    const next = this.starts[a + 1];
+    return next === undefined ? { lo: this.starts[a], end: this.count, complete: false } : { lo: this.starts[a], end: next - 1, complete: true };
+  }
+
+  /** Cuts newly indexed frames into chunks: CHUNK frames, or fewer when the next one would take them past CHUNK_BYTES. */
+  private cut(): void {
+    for (;;) {
+      const lo = this.starts[this.starts.length - 1];
+      const end = this.fit(lo, Math.min(lo + CHUNK - 1, this.count), CHUNK_BYTES);
+      if (end < lo + CHUNK - 1 && end >= this.count) return;
+      this.starts.push(end + 1);
+    }
+  }
+
+  /** The last frame of lo..hi such that lo up to it take at most `bytes` (lo at least). */
+  private fit(lo: number, hi: number, bytes: number): number {
+    if (hi <= lo || this.store.bytes(lo, hi) <= bytes) return hi;
+    let a = lo;
+    let b = hi;
+    while (b - a > 1) {
+      const mid = (a + b) >> 1;
+      if (this.store.bytes(lo, mid) <= bytes) a = mid;
+      else b = mid;
+    }
+    return a;
+  }
+
+  /** The first frame of lo..hi such that it up to hi take at most `bytes` (hi at least). */
+  private fitBack(lo: number, hi: number, bytes: number): number {
+    if (hi <= lo || this.store.bytes(lo, hi) <= bytes) return lo;
+    let a = lo;
+    let b = hi;
+    while (b - a > 1) {
+      const mid = (a + b) >> 1;
+      if (this.store.bytes(mid, hi) <= bytes) b = mid;
+      else a = mid;
+    }
+    return b;
+  }
+}
+
+/** Which slice an engine holds. */
+function sliceKey(s: Slice): string {
+  return `${s.lo}-${s.end}-${s.hi}-${s.extras.length}-${s.after.length}`;
+}
+
+/** Where `v` is in the ascending `a`, or -1. */
+function indexIn(a: Int32Array, v: number): number {
+  let lo = 0;
+  let hi = a.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (a[mid] === v) return mid;
+    if (a[mid] < v) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** Runs of consecutive numbers in the ascending `xs`, as [first, length]. */
+function runs(xs: number[]): [number, number][] {
+  const out: [number, number][] = [];
+  for (let i = 0; i < xs.length; ) {
+    let j = i;
+    while (j + 1 < xs.length && xs[j + 1] === xs[j] + 1) j++;
+    out.push([xs[i], j - i + 1]);
+    i = j + 1;
+  }
+  return out;
+}
+
+/** Removes folders of slices that servers no longer running left behind. */
+function removeStale(dir: string): void {
+  try {
+    for (const name of readdirSync(dir)) {
+      const pid = Number(/^\.wirebuddy-slices-(\d+)-/.exec(name)?.[1]);
+      if (!pid || pid === process.pid || alive(pid)) continue;
+      rmSync(join(dir, name), { recursive: true, force: true });
+    }
+  } catch {
+    // nothing to clean
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}

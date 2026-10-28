@@ -1,7 +1,8 @@
 /**
  * Finds the IP packet, or the UDP/TCP payload, in a frame's bytes, for panels
- * that parse their protocol themselves, and what raw matches look at (link
- * type, VLAN ids, addresses, protocol, ports). Per packet, without reassembly:
+ * that parse their protocol themselves, and what raw matches and the live
+ * view's flows look at (link type, VLAN ids, addresses, protocol, ports, TCP
+ * flags). Per packet, without reassembly:
  * IP fragments and link types it doesn't know have no layer.
  */
 
@@ -62,6 +63,8 @@ export class Parsed {
   /** Of TCP, UDP, DCCP, SCTP and UDP-Lite; also in a first fragment. */
   srcport = -1;
   dstport = -1;
+  /** TCP flags (FIN 0x01, SYN 0x02, RST 0x04, ACK 0x10). */
+  tcpFlags = -1;
   /** UDP or TCP payload, not in fragments. */
   payloadStart = -1;
   payloadEnd = -1;
@@ -81,7 +84,7 @@ export function findLayer(b: Uint8Array, encap: string, layer: Layer): [number, 
 /** Parses `b`, a frame of `link`, into `out`. */
 export function parse(b: Uint8Array, link: Link, out: Parsed): Parsed {
   out.ip = 0;
-  out.ethertype = out.ipStart = out.ipEnd = out.src = out.dst = out.proto = out.srcport = out.dstport = out.payloadStart = out.payloadEnd = -1;
+  out.ethertype = out.ipStart = out.ipEnd = out.src = out.dst = out.proto = out.srcport = out.dstport = out.payloadStart = out.payloadEnd = out.tcpFlags = -1;
   out.vlans.length = 0;
   out.fragment = false;
   const at = ipStart(b, link, out);
@@ -177,6 +180,7 @@ function transport(b: Uint8Array, l4: number, end: number, first: boolean, out: 
     out.srcport = (b[l4] << 8) | b[l4 + 1];
     out.dstport = (b[l4 + 2] << 8) | b[l4 + 3];
   }
+  if (first && proto === 6 && l4 + 14 <= end) out.tcpFlags = b[l4 + 13];
   if (out.fragment) return;
   if (proto === 17) {
     if (l4 + 8 > end) return;

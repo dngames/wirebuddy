@@ -1,9 +1,9 @@
-/** Status bar: expert LED, file, field info, panel offers, packet counts, marks, capture, connection. */
+/** Status bar: expert LED, file, field info, panel offers, packet counts, provisional packets, marks, capture, connection. */
 
 import type { ExpertItem, ExpertSeverity, PanelOffer, ViewState } from "../shared/api.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
-import { agentName, app, bus } from "./app.ts";
+import { agentName, app, bus, captureActive, knownFrames } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
 import { maxItemSeverity, openExpertDialog } from "./dialogs/expert.ts";
 import { openExtensionsDialog } from "./dialogs/extensions.ts";
@@ -26,6 +26,7 @@ export function createStatusBar(): HTMLElement {
   const errSeg = h("span", { class: "sb-seg sb-err", hidden: true }, "Open failed");
   const fieldSeg = h("span", { class: "sb-seg sb-field" });
   const pktSeg = h("span", { class: "sb-seg sb-pkts" });
+  const liveSeg = h("span", { class: "sb-seg sb-live", hidden: true });
   const markSeg = h("span", { class: "sb-seg sb-marks" });
   const capSeg = h("span", { class: "sb-seg sb-cap" });
   const connSeg = h("button", { class: "sb-seg sb-conn", onclick: () => reconnectNow() });
@@ -106,10 +107,9 @@ export function createStatusBar(): HTMLElement {
     if (s?.file) {
       pktSeg.hidden = false;
       const nSel = countRanges(app.selRows);
-      setText(
-        pktSeg,
-        `Packets: ${fmtInt(s.totalFrames)} · Displayed: ${fmtInt(s.displayedFrames)} (${fmtPct(s.displayedFrames, s.totalFrames || 1)})${nSel > 1 ? ` · Selected: ${fmtInt(nSel)}` : ""}`,
-      );
+      const known = knownFrames(s);
+      const shown = s.displayedFrames + (s.tail?.displayed ?? 0);
+      setText(pktSeg, `Packets: ${fmtInt(known)} · Displayed: ${fmtInt(shown)} (${fmtPct(shown, known || 1)})${nSel > 1 ? ` · Selected: ${fmtInt(nSel)}` : ""}`);
       const agent = s.marks.filter((m) => m.by === "agent").length;
       markSeg.hidden = false;
       setText(markSeg, `Marked: ${fmtInt(s.marks.length)}${agent ? ` (${agent} by ${agentName()})` : ""}`);
@@ -117,6 +117,20 @@ export function createStatusBar(): HTMLElement {
       pktSeg.hidden = !s;
       setText(pktSeg, "No Packets");
       markSeg.hidden = true;
+    }
+
+    // A live capture's packets after the last full read
+    const tail = s?.file ? s.tail : null;
+    liveSeg.hidden = !tail?.frames;
+    liveSeg.classList.toggle("paused", !!tail?.paused);
+    if (tail?.frames) {
+      const secs = Math.max(1, Math.round(tail.readMs / 1000));
+      const when = !tail.paused ? `exact after the next full read (≈${secs} s)` : captureActive(s) ? "exact once the capture stops" : "exact once read in full (View › Reload)";
+      const unfiltered = tail.unfiltered ? ` · ${fmtInt(tail.unfiltered)} not filtered yet` : "";
+      setText(liveSeg, `${fmtInt(tail.frames)} provisional · ${when}${unfiltered}`);
+      const held = tail.held ? `\nThe display filter lists them only once read in full: ${tail.held}.` : "";
+      const paused = tail.paused ? `\nFull reads wait: ${tail.paused}.` : "";
+      setTitle(liveSeg, `Packets that arrived after WireBuddy last read the whole capture (it takes about ${secs} s), read from the newest packets with their connections' start. Shown in italics; the next full read makes them exact.${held}${paused}`);
     }
 
     // Panels whose offer matches the capture: a chip opens one, × hides it for this file
@@ -184,5 +198,5 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   update();
-  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), offersSeg, agentSeg, tlsSeg, extSeg, pktSeg, markSeg, capSeg, connSeg);
+  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), offersSeg, agentSeg, tlsSeg, extSeg, pktSeg, liveSeg, markSeg, capSeg, connSeg);
 }

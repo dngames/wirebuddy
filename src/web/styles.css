@@ -985,6 +985,25 @@ input[type="checkbox"] {
   }
 }
 
+/* Provisional rows of a live capture: read from slices until the next full read */
+.pl-row.prov .pl-cell {
+  font-style: italic;
+  opacity: 0.68;
+}
+
+.pl-row.prov.sel .pl-cell {
+  opacity: 0.88;
+}
+
+.pl-row.prov::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-left: 2px dashed var(--text-faint);
+}
+
 .pl-overlay {
   position: absolute;
   inset: 23px 0 0 0;
@@ -1023,6 +1042,22 @@ input[type="checkbox"] {
 }
 
 /* ---------------------------------------------------------- details tree */
+
+.dt-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.dt-prov {
+  flex: none;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--chrome-hi);
+  color: var(--text-dim);
+  font-style: italic;
+}
 
 .vl.dt {
   user-select: none;
@@ -1491,6 +1526,17 @@ input[type="checkbox"] {
 .sb-pkts,
 .sb-marks {
   flex: 0 0 auto;
+}
+
+.sb-live {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.sb-live.paused {
+  color: var(--warn);
 }
 
 .sb-cap {

@@ -54,7 +54,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
   const get: Record<string, Handler> = {
     "/api/state": () => viewer.state,
     "/api/rows": (q) => viewer.rows(num(q, "gen"), num(q, "start"), num(q, "count")),
-    "/api/frame": (q) => viewer.frame(num(q, "num")),
+    "/api/frame": (q) => viewer.frame(num(q, "num"), true),
     "/api/filter/check": (q) => viewer.checkFilter(q.get("filter") ?? ""),
     "/api/filter/complete": async (q) => ({ fields: await viewer.complete(q.get("field") ?? "") }),
     "/api/files": (q) => listDir(q.get("dir") || defaultDir(viewer), q.get("kind") === "any"),

@@ -1,5 +1,6 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
 // Generates its own ICMP traffic with ping, and TCP with the robot-arm example.
+// test/live-tail.mjs covers captures big enough for provisional packets.
 // Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
 import { createSocket } from "node:dgram";
@@ -95,6 +96,8 @@ try {
         seen.add(s.totalFrames);
         gens.add(s.generation);
       }
+      // Full reads of a small capture are quick: nothing is provisional
+      assert.equal(s.tail, null);
       if (!filtered && s.totalFrames > 4) {
         const r = await api("/api/filter", { filter: "icmp.type == 8" });
         assert.equal(r.ok, true);
@@ -109,6 +112,7 @@ try {
     await sleep(1200); // final reload after stop
     const end = await state();
     assert.equal(end.filter, "icmp.type == 8");
+    assert.equal(end.tail, null);
     assert.ok(end.totalFrames >= 30, `expected ~40 frames, got ${end.totalFrames}`);
     assert.ok(Math.abs(end.displayedFrames * 2 - end.totalFrames) <= 2, `requests should be half: ${end.displayedFrames}/${end.totalFrames}`);
     assert.ok(Math.abs(end.capture.packets - end.totalFrames) <= 2, `dumpcap count ${end.capture.packets} vs frames ${end.totalFrames}`);

@@ -4,7 +4,7 @@ import type { ExportRequest } from "../../shared/api.ts";
 import { countRanges, inRanges } from "../../shared/ranges.ts";
 import { errorText } from "../api.ts";
 import * as act from "../actions.ts";
-import { app } from "../app.ts";
+import { app, knownFrames } from "../app.ts";
 import { confirmDialog, Dialog } from "../dialog.ts";
 import { toast } from "../toast.ts";
 import { baseName, dirName, fmtInt, fmtSize, h } from "../util.ts";
@@ -99,8 +99,9 @@ export function openExportDialog(initial: Which = "displayed"): void {
       "fieldset",
       { class: "ex-group" },
       h("legend", null, "Packet range"),
-      option("all", `All captured (${fmtInt(s.totalFrames)})`),
-      option("displayed", `Displayed (${fmtInt(s.displayedFrames)})${s.filter ? "" : " — no display filter applied"}`),
+      option("all", `All captured (${fmtInt(knownFrames(s))})`),
+      // Provisional matches of a live capture's newest packets aren't exported
+      option("displayed", `Displayed (${fmtInt(s.filter ? s.displayedFrames : knownFrames(s))})${s.filter ? (s.tail?.displayed ? ` — ${fmtInt(s.tail.displayed)} provisional left out` : "") : " — no display filter applied"}`),
       option("marked", `Marked packets (${fmtInt(marked)})`, marked === 0),
       // The server exports the selected rows, which need not include the current packet
       nSel > 1 || (nSel === 1 && !inRanges(app.selRows, app.selIndex))
@@ -139,7 +140,8 @@ export function openExportDialog(initial: Which = "displayed"): void {
       const r = await act.exportPackets(req);
       d.close();
       const comments = r.comments ? `, ${fmtInt(r.comments)} mark${r.comments === 1 ? "" : "s"} as comments` : "";
-      toast("info", `Exported ${fmtInt(r.frames)} packet${r.frames === 1 ? "" : "s"} (${fmtSize(r.size)}${comments}) to ${baseName(r.path)}`, {
+      const left = r.leftOut ? `; ${fmtInt(r.leftOut)} provisional packet${r.leftOut === 1 ? "" : "s"} left out` : "";
+      toast("info", `Exported ${fmtInt(r.frames)} packet${r.frames === 1 ? "" : "s"} (${fmtSize(r.size)}${comments}) to ${baseName(r.path)}${left}`, {
         label: "Open",
         run: () =>
           void act.openFile(r.path).then((e) => {

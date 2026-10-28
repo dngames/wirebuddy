@@ -3,7 +3,7 @@
 import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
-import { app, bus, hooks } from "./app.ts";
+import { app, bus, hooks, knownFrames } from "./app.ts";
 import { toast, toastError } from "./toast.ts";
 import { save } from "./util.ts";
 
@@ -113,7 +113,9 @@ export function applyState(s: ViewState): void {
 
   bus.emit("state", s, prev);
   if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
-  if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
+  // A provisional packet read in full now: its exact details
+  if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) reloadFrame();
+  else if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
   if (reveal) bus.emit("reveal", reveal.index, reveal.flash);
 }
 
@@ -208,8 +210,9 @@ export function selectRow(index: number, frame: number, rows?: Ranges): void {
 export function jumpToFrame(n: number, checked = false): void {
   const s = app.state;
   if (!s || !s.file) return;
-  if (!Number.isInteger(n) || n < 1 || (s.totalFrames > 0 && n > s.totalFrames)) {
-    toast("error", `Packet ${n} doesn't exist (1 – ${s.totalFrames})`);
+  const known = knownFrames(s);
+  if (!Number.isInteger(n) || n < 1 || (known > 0 && n > known)) {
+    toast("error", `Packet ${n} doesn't exist (1 – ${known})`);
     return;
   }
   const idx = hooks.indexOfFrame(n);
@@ -470,7 +473,7 @@ export async function findPacket(filter: string, dir: 1 | -1): Promise<FindResul
   const before = view();
   const r = await get<FindResult>("api/find", { filter, from: app.selFrame ?? 0, dir });
   // A live capture may have found a packet the pushed state doesn't count yet
-  for (let k = 0; k < 3 && r.frame !== null && r.frame > (app.state?.totalFrames ?? 0); k++) await refreshState();
+  for (let k = 0; k < 3 && r.frame !== null && r.frame > knownFrames(); k++) await refreshState();
   if (view() !== before) throw new Error("the packet list changed, find again");
   if (r.frame !== null) {
     jumpToFrame(r.frame, true);

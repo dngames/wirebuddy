@@ -308,14 +308,30 @@ function want(first: number, last: number): void {
 
 async function fetchPage(p: number): Promise<void> {
   const g = gen;
+  const view = viewKey();
   const start = p * PAGE;
   const count = Math.min(PAGE, total - start);
   if (count <= 0) return;
   inflight.add(p);
   try {
     const r = await get<RowsResponse>("api/rows", { gen: g, start, count });
-    if (g !== gen || r.generation !== g) return;
     const rows = r.start === start ? r.rows : alignRows(r, start, count);
+    if (g !== gen) {
+      // The list only grew since (a live capture): show them until the page comes again
+      if (viewKey() === view && !pages.has(p)) {
+        stale.set(p, rows);
+        trimStale();
+      }
+      return;
+    }
+    if (r.generation !== g) return;
+    if (r.rows.length < count) {
+      // Provisional rows that couldn't be read now: the others show, the page comes again
+      stale.set(p, [...rows, ...(stale.get(p)?.slice(rows.length) ?? [])]);
+      failed.set(p, performance.now());
+      window.setTimeout(scheduleRender, 2600);
+      return;
+    }
     pages.set(p, rows);
     stale.delete(p);
     failed.delete(p);
@@ -431,10 +447,12 @@ function fillRow(r: RowEl, i: number, row: PacketRow | undefined, now: number): 
     const mark = app.marks.get(row.num);
     if (mark) cls += mark.by === "agent" ? " mark-agent" : " mark-user";
     if (sel && app.state?.selectedBy === "agent" && row.num === app.state.selected) cls += " agent-sel";
+    if (row.p) cls += " prov";
     const useColors = app.colorize && !sel && mark?.by !== "user";
     r.el.style.backgroundColor = useColors && row.bg ? `#${row.bg}` : "";
     r.el.style.color = useColors && row.fg ? `#${row.fg}` : "";
-    const title = mark ? `${mark.by === "agent" ? `Marked by ${agentName()}` : "Marked"}${mark.note ? `: ${mark.note}` : ""}` : "";
+    const marked = mark ? `${mark.by === "agent" ? `Marked by ${agentName()}` : "Marked"}${mark.note ? `: ${mark.note}` : ""}` : "";
+    const title = row.p ? [marked, provisionalTitle()].filter(Boolean).join("\n") : marked;
     if (r.el.title !== title) r.el.title = title;
   }
   if (r.el.className !== cls) r.el.className = cls;
@@ -463,9 +481,18 @@ function render(): void {
   want(first, first + count);
 }
 
+/** Tooltip of provisional rows. */
+function provisionalTitle(): string {
+  const t = app.state?.tail;
+  const when = !t?.paused ? `with the next full read of the capture (about ${Math.max(1, Math.round((t?.readMs ?? 0) / 1000))} s)` : captureActive() ? "once the capture stops" : "once read in full (View › Reload)";
+  return `Provisional: read from the newest packets, with their connections' start, before WireBuddy read the whole capture again. Exact ${when}.`;
+}
+
 function updateOverlay(s: ViewState): void {
   let msg = "";
   if (s.loading) msg = "Loading capture…";
+  else if (s.file && total === 0 && s.tail?.held) msg = `Newer packets wait for a full read: ${s.tail.held}`;
+  else if (s.file && total === 0 && s.tail?.unfiltered) msg = "Checking newer packets against the display filter…";
   else if (s.file && total === 0 && s.totalFrames > 0) msg = "No packets match the display filter";
   else if (s.file && total === 0 && captureActive(s)) msg = "Waiting for packets…";
   else if (s.file && total === 0 && !s.loadError) msg = "No packets";
@@ -791,7 +818,8 @@ export function createPacketList(): HTMLElement {
     const wasAtBottom = !prev?.loading && (total === 0 || isAtBottom());
     // The final reload after a stop arrives with the capture already idle
     const wasCapturing = !!prev && captureActive(prev);
-    total = s.file ? Math.max(0, s.displayedFrames) : 0;
+    // Provisional rows of a live capture follow the ones read in full
+    total = s.file ? Math.max(0, s.displayedFrames + (s.tail?.displayed ?? 0)) : 0;
     if (genChanged) {
       // Same file and filter: old rows stay as placeholders until refetched.
       stale = sameView ? new Map([...stale, ...pages]) : new Map();
