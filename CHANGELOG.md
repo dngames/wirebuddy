@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- The agent learns whether a panel it opens runs in a process of its own also when the panel is ready at once
+
 ## [0.10.0] - 2026-10-28
 
 - Big live captures list new packets within about a second, provisionally until the next full read

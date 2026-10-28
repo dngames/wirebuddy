@@ -191,7 +191,7 @@ try {
     assert.ok(guide.includes(`Examples to copy with your file tools: ${join(root, "examples/extensions")}/{http-gallery,rtp-video,lidar-wbpc}`), guide);
   });
   let cdpPort = 0;
-  for (let i = 0; i < 100 && !cdpPort; i++) {
+  for (let i = 0; i < 300 && !cdpPort; i++) {
     await sleep(100);
     try {
       cdpPort = Number(readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);

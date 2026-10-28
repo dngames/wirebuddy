@@ -48,6 +48,8 @@ const MAX_STORAGE_WRITES_PER_SECOND = 4;
 const MAX_SNAPSHOT = 1536 * 1024;
 const SNAPSHOT_SIDE = 1600;
 const SNAPSHOT_WAIT_MS = 5000;
+/** How long a panel that is ready may take the page to say whether it runs in a process of its own (it measures that as the panel starts). */
+const ISOLATION_WAIT_MS = 1000;
 
 type Health = "not-responding" | "responding" | "stopped" | "navigated" | "isolated" | "not-isolated" | "flooding";
 
@@ -312,18 +314,25 @@ export class Panels extends EventEmitter {
     this.tailTimer.unref();
   }
 
-  /** Waits until the panel is ready, failed, or `ms` passed; then what it reported. */
+  /**
+   * Waits until the panel is ready, failed, or `ms` passed, and once ready a
+   * little longer (ISOLATION_WAIT_MS) for the page to say whether it runs in
+   * a process of its own; then what it reported.
+   */
   async settle(name: string, ms: number): Promise<PanelReport> {
     const inst = this.open.get(name);
-    if (inst && inst.state === "starting" && !inst.errorCount) {
-      await new Promise<void>((done) => {
-        const timer = setTimeout(done, ms);
+    const until = Date.now() + ms;
+    const woken = (inst: Instance, wait: number): Promise<void> =>
+      new Promise<void>((done) => {
+        const timer = setTimeout(done, wait);
         inst.waiters.push(() => {
           clearTimeout(timer);
           done();
         });
       });
-    }
+    if (inst && inst.state === "starting" && !inst.errorCount) await woken(inst, ms);
+    const isolation = Math.min(until, Date.now() + ISOLATION_WAIT_MS);
+    while (inst && this.open.get(name) === inst && inst.state === "ready" && inst.isolated === null && Date.now() < isolation) await woken(inst, isolation - Date.now());
     return this.report(name);
   }
 

@@ -94,7 +94,7 @@ try {
     const file = join(profile, "DevToolsActivePort");
     if (existsSync(file)) port = readFileSync(file, "utf8").split("\n")[0];
     return port;
-  });
+  }, 30_000);
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
