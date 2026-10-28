@@ -26,7 +26,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { FrameStore } from "./framestore.ts";
 import { FlowIndex, HEAD_BYTES } from "./flows.ts";
-import { matchingFrames, type Sharkd } from "./sharkd.ts";
+import { matchingFrames, SharkdError, type Sharkd } from "./sharkd.ts";
 import type { PacketRow, TreeNode } from "../shared/api.ts";
 
 const MiB = 2 ** 20;
@@ -733,6 +733,57 @@ export class LiveTail {
       if (!--looks) break;
     }
     return 0;
+  }
+
+  /**
+   * Which of `filters` match a packet from `from` on (a frame, or one per
+   * filter), for panel offers: read from slices of the chunks there by the
+   * filter's sharkd, a chunk at a time between filter passes and while
+   * `wanted`, each chunk counting only its own packets. `to`: the frame
+   * before the first chunk that more packets may still change (read again
+   * next time), else the last one checked. Filters must not need what slices
+   * can't give (see heldReason); one sharkd refuses matches nothing.
+   */
+  async anyMatch(filters: string[], from: number | ((filter: string) => number), wanted: () => boolean = () => true): Promise<{ found: Set<string>; to: number }> {
+    await this.update();
+    const distinct = [...new Set(filters)];
+    const start = (f: string): number => (typeof from === "number" ? from : from(f));
+    const found = new Set<string>();
+    const until = this.count;
+    let to = Math.min(Math.min(...distinct.map(start)) - 1, until);
+    let again = 0;
+    const matching = (engine: Engine, filter: string): Promise<Int32Array | null> =>
+      matchingFrames(engine.sharkd, filter).catch((err) => {
+        if (err instanceof SharkdError) return null;
+        throw err;
+      });
+    while (to < until && found.size < distinct.length && wanted()) {
+      const engine = (this.filterEngine ??= this.newEngine());
+      to = await engine.run(async () => {
+        if (!wanted()) return to;
+        const s = this.slice(to + 1);
+        const left = distinct.filter((f) => !found.has(f) && start(f) <= s.end);
+        // None checked from here yet
+        if (!left.length) return s.end;
+        if (!s.settled && !again) again = s.lo;
+        await this.load(engine, s);
+        const first = s.extras.length + 1;
+        const last = s.extras.length + s.hi - s.c0 + 1;
+        const inChunk = (local: Int32Array | null): boolean =>
+          !!local?.some((l) => {
+            const f = toGlobal(s, l);
+            return l >= first && l <= last && f >= s.lo && f <= s.end;
+          });
+        // One pass for them all first: mostly none matches (refused, too long: each alone)
+        if (left.length > 1) {
+          const any = await matching(engine, left.map((f) => `(${f})`).join(" || "));
+          if (any && !inChunk(any)) return s.end;
+        }
+        for (const f of left) if (inChunk(await matching(engine, f))) found.add(f);
+        return s.end;
+      });
+    }
+    return { found, to: again ? Math.min(to, again - 1) : to };
   }
 
   /** Slices must be read with the TLS keys now in use. */

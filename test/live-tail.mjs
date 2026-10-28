@@ -8,9 +8,9 @@
 // requests in flight, and one killed for memory lists the file from slices without blaming an
 // extension. A full read that dies after the stop, with the final read still to come, leaves it to
 // that one (test/holding-sharkd.mjs holds and kills it). A server ends on SIGHUP as on SIGTERM,
-// also right as its URL is out, and removes slices killed ones left. dumpcap is
-// test/fake-dumpcap.mjs, which writes generated traffic. The packet list's marking is checked in
-// headless Chrome when there is one.
+// also right as its URL is out, and removes slices killed ones left. A panel offer that only later
+// packets match is checked from slices of them. dumpcap is test/fake-dumpcap.mjs, which writes
+// generated traffic. The packet list's marking is checked in headless Chrome when there is one.
 // Usage: node test/live-tail.mjs   (after npm run build; CHROME=<path> picks the browser)
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
@@ -442,6 +442,55 @@ try {
   browser?.close();
   browser = null;
   await wb.close();
+  servers.pop();
+
+  // A panel whose offer matches only packets that come later, and another panel, off at first
+  const offersHome = join(work, "offers-home");
+  const offersExt = join(offersHome, ".local/share/wirebuddy/extensions");
+  const panel = (name, offer) => {
+    mkdirSync(join(offersExt, name, "panel"), { recursive: true });
+    writeFileSync(join(offersExt, name, "extension.json"), JSON.stringify({ label: name, version: "1", panel: offer ? { offer } : {} }));
+    writeFileSync(join(offersExt, name, "panel/main.js"), "wb.ready();\n");
+  };
+  // 3,000 packets a second: frames 120,002-126,000 are the 2 s past 40 s, a few seconds after the burst
+  panel("later", { filter: "frame.time_relative > 40 && frame.time_relative < 42", text: "Show the later packets" });
+  panel("other");
+  writeFileSync(join(offersHome, ".local/share/wirebuddy/extensions-state.json"), JSON.stringify({ off: { other: "" } }));
+  const offers = await server("offers", {}, offersHome);
+  servers.push(offers);
+  await check("a panel offer that only later packets match: offered once they came, checked from slices of the newer packets, not by reading the file again, and kept as all offers are checked again", async () => {
+    await offers.api("/api/capture/start", { iface: "lo", filter: "burst 100000 rate 3000", autostop: {}, ring: null });
+    const started = Date.now();
+    let most = 0;
+    let s;
+    // Past the check as the file opens, before the live tail is there
+    const sample = (file) => {
+      if (Date.now() - started > 10_000 && file) most = Math.max(most, sharkdsReading(offers.pid, file).length);
+    };
+    for (;;) {
+      s = await offers.state();
+      sample(s.file);
+      if (s.panelOffers.some((o) => o.name === "later")) break;
+      assert.ok(Date.now() - started < 120_000, `not offered after 2 min: ${JSON.stringify({ packets: s.capture.packets, offers: s.panelOffers })}`);
+      await sleep(250);
+    }
+    assert.ok(Date.now() - started > 10_000, "offered by a later check");
+    const offered = Date.now() - started;
+    // Turning a panel on checks all offers again: the one shown stays
+    const on = await offers.tool("extensions", { action: "enable", name: "other" });
+    assert.equal(on.error, false, on.text);
+    for (const end = Date.now() + 20_000; Date.now() < end; await sleep(250)) {
+      const now = await offers.state();
+      sample(now.file);
+      assert.ok(now.panelOffers.some((o) => o.name === "later"), `the offer went as all offers were checked again, at ${now.capture.packets} packets`);
+    }
+    // The view's two sharkds read the file; the panels' one doesn't
+    assert.ok(most > 0 && most <= 2, `${most} sharkds had the capture open`);
+    const events = (await offers.api("/api/events?after=0")).events.map((e) => e.text);
+    assert.deepEqual(events.filter((t) => /offers failed/.test(t)), []);
+    report.push(`panel offer: offered after ${Math.round(offered / 1000)} s at ${s.capture.packets} packets, the capture open in at most ${most} sharkds`);
+  });
+  await offers.close();
   servers.pop();
 
   // The profile's own columns, and an extension whose field turns into a frame number

@@ -230,27 +230,29 @@ export class PanelData {
 
   /**
    * Which of `filters` match a packet of the view's file, read by the panel
-   * engine so the view's own sharkd never waits for it. Throws ApiError when
-   * the file changed meanwhile.
+   * engine so the view's own sharkd never waits for it, and how many packets
+   * it read. `release`: the next checks of a live capture won't need the file
+   * read. Throws ApiError when the file changed meanwhile.
    */
-  async anyMatch(filters: string[]): Promise<Map<string, boolean>> {
+  async anyMatch(filters: string[], release = false): Promise<{ matches: Map<string, boolean>; frames: number }> {
     this.offerChecks++;
     this.open.add(OFFERS);
     try {
       const loaded = await this.load(OFFERS, this.opts.source.epoch());
-      const out = new Map<string, boolean>();
+      const matches = new Map<string, boolean>();
       for (const filter of filters) {
         const rows = await this.run(OFFERS, (e) => e.call<{ num: number }[]>("frames", { filter, limit: 1, column0: "frame.number:0" }), CALL_BUDGET_MS, loaded).catch((err) => {
           if (err instanceof SharkdError) return [];
           throw err;
         });
-        out.set(filter, rows.length > 0);
+        matches.set(filter, rows.length > 0);
       }
-      return out;
+      return { matches, frames: loaded.frames };
     } finally {
       if (--this.offerChecks === 0) {
         this.open.delete(OFFERS);
-        this.idle();
+        if (release && !this.open.size && this.opts.source.live()) this.close();
+        else this.idle();
       }
     }
   }

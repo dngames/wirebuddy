@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format follows
 - WireBuddy shuts down cleanly when its terminal closes, as on Ctrl+C
 - Cumulative Bytes columns count from the first packet also when a capture is read again
 - Scrolling up with the mouse wheel in a live capture of over 400,000 packets turns auto-scroll off
+- Checking which panels to offer no longer reads a live capture again every 30 seconds
 
 ## [0.9.0] - 2026-10-27
 

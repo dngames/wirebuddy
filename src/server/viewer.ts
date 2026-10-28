@@ -177,6 +177,8 @@ export class Viewer extends EventEmitter {
   private offerSeq = 0;
   private offerRun: Promise<void> = Promise.resolve();
   private offerTimer: NodeJS.Timeout | null = null;
+  /** Offer filters that matched no packet of the file up to a frame, for the file and epoch they were checked with. */
+  private offerChecked = { file: "", epoch: -1, to: new Map<string, number>() };
   /** Inode and first bytes of the file read last: another file at the same path, or other first bytes, is a rewritten capture. */
   private loadedIno = 0;
   private loadedHead: Buffer = Buffer.alloc(0);
@@ -1950,8 +1952,8 @@ export class Viewer extends EventEmitter {
 
   /**
    * Checks the offers of enabled panels against the open capture (`all`: also
-   * the ones matched already): each filter is checked, then one iograph pass
-   * counts the packets of up to 10 of them. Matches show as panelOffers.
+   * the ones matched already): each filter is checked, then whether a packet
+   * matches it (see offerMatches). Matches show as panelOffers.
    */
   private checkOffers(all: boolean): Promise<void> {
     const seq = ++this.offerSeq;
@@ -1993,9 +1995,11 @@ export class Viewer extends EventEmitter {
       this.offerMatched.delete(o.name);
     }
     if (file && this.state.totalFrames > 0 && valid.length) {
-      const found = await this.panelData.anyMatch(valid.map((o) => o.filter));
+      const found = await this.offerMatches(file, valid.map((o) => o.filter), () => seq === this.offerSeq);
       if (seq !== this.offerSeq || this.state.file !== file) return;
       for (const o of valid) {
+        // Not checked this time: as it was
+        if (!found.has(o.filter)) continue;
         if (found.get(o.filter)) this.offerMatched.set(o.name, { offer: { name: o.name, label: o.label, text: o.text }, filter: o.filter });
         else this.offerMatched.delete(o.name);
       }
@@ -2009,6 +2013,50 @@ export class Viewer extends EventEmitter {
       }, OFFER_LIVE_MS);
       this.offerTimer.unref();
     }
+  }
+
+  /**
+   * Which of `filters` match a packet of `file`. Of a live capture, from
+   * slices of the live tail: each filter from the frame it was found in none
+   * up to on. Without a tail, and for filters slices can't check (see
+   * heldReason), by the panel engine reading the whole file, which waits
+   * while memory is short during a capture. Only while `wanted`.
+   */
+  private async offerMatches(file: string, filters: string[], wanted: () => boolean): Promise<Map<string, boolean>> {
+    const { epoch } = this.state;
+    if (this.offerChecked.file !== file || this.offerChecked.epoch !== epoch) this.offerChecked = { file, epoch, to: new Map() };
+    const checked = this.offerChecked.to;
+    const found = new Map<string, boolean>();
+    // Those found are checked from the start again: their match may lie before `to`
+    const advance = (fs: string[], to: number): void => {
+      if (this.offerChecked.to !== checked || !wanted()) return;
+      for (const f of fs) if (!found.get(f)) checked.set(f, Math.max(checked.get(f) ?? 0, to));
+    };
+    const held = new Set<string>();
+    for (const f of filters) if (await this.heldReason(f)) held.add(f);
+    const tail = this.tail?.file === file && !this.tail.broken() ? this.tail : null;
+    const sliced = tail ? filters.filter((f) => !held.has(f)) : [];
+    if (tail && sliced.length) {
+      try {
+        const r = await tail.anyMatch(sliced, (f) => (checked.get(f) ?? 0) + 1, wanted);
+        this.tailWorked(tail);
+        if (!wanted()) return found;
+        for (const f of sliced) found.set(f, r.found.has(f));
+        advance(sliced, r.to);
+      } catch (err) {
+        // The live tail went, broke or failed: the whole file says
+        if (!(err instanceof Superseded)) this.tailFailed(tail, err as Error);
+      }
+    }
+    const whole = filters.filter((f) => !found.has(f));
+    if (whole.length && wanted() && !(this.capture.running && this.memoryShort())) {
+      // Slices check them next time: the panel engine needn't keep the file
+      const release = this.capture.running && whole.every((f) => !held.has(f));
+      const { matches, frames } = await this.panelData.anyMatch(whole, release);
+      for (const f of whole) found.set(f, matches.get(f) ?? false);
+      advance(whole, frames);
+    }
+    return found;
   }
 
   /** The matched offers the user sees: not of open panels, not dismissed. */

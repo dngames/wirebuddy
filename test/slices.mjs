@@ -715,6 +715,41 @@ try {
     }
   });
 
+  await check("panel offers: which filters match a packet from a frame on, read from the slices of the chunks there, each counting its own packets", async () => {
+    const file = await cutAt(40_000);
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      // 10,000 packets a second: frames after 35,001 are past 3.5 s; chunk 30,001-40,000 has nothing after it yet, so is read again next time
+      const all = await tail.anyMatch(["frame.time_relative > 3.5", "dns", "dicom"], 1);
+      assert.deepEqual([[...all.found].sort(), all.to], [["dns", "frame.time_relative > 3.5"], 30_000]);
+      // From chunk 20,001-30,000 on: frame 1, the flows' first packets and the context before the chunk come along, but don't count
+      assert.deepEqual(await tail.anyMatch(["frame.time_relative < 0.5"], 20_001), { found: new Set(), to: 30_000 });
+      assert.deepEqual(await tail.anyMatch(["frame.time_relative >= 1.9 && frame.time_relative < 2.0"], 20_001), { found: new Set(), to: 30_000 });
+      // Nor the context after it: frames 20,002-21,001 count for the chunk after
+      const after = "frame.time_relative >= 2.0 && frame.time_relative < 2.1";
+      assert.deepEqual(await tail.anyMatch([after], 10_001), { found: new Set([after]), to: 30_000 });
+      // Done once all are found: the chunks after aren't read
+      assert.deepEqual(await tail.anyMatch(["dns"], 1), { found: new Set(["dns"]), to: 10_000 });
+      assert.deepEqual(await tail.anyMatch(["dns"], 40_001), { found: new Set(), to: 40_000 });
+      // The same filter twice: done once found
+      assert.deepEqual(await tail.anyMatch(["dns", "dns"], 1), { found: new Set(["dns"]), to: 10_000 });
+      // Each filter from its own frame on: matches before it don't count
+      assert.deepEqual(await tail.anyMatch(["dns", "frame.time_relative < 0.5"], (f) => (f === "dns" ? 1 : 20_001)), { found: new Set(["dns"]), to: 30_000 });
+      // Too long together for one sharkd request: each alone
+      const long = (n) => Array.from({ length: n }, () => "frame.len > 0").join(" && ");
+      assert.deepEqual(await tail.anyMatch([long(400), long(401)], 1), { found: new Set([long(400), long(401)]), to: 10_000 });
+      // The file grows: the newer packets are checked, and the chunk read early again
+      const more = join(out, "more.pcapng");
+      rmSync(more, { force: true });
+      await bigStore.writeSlice(Int32Array.from({ length: 10_000 }, (_, i) => 40_001 + i), more);
+      appendFileSync(file, readFileSync(more).subarray(header().length));
+      assert.deepEqual(await tail.anyMatch(["frame.time_relative > 4.5", "dicom"], 40_001), { found: new Set(["frame.time_relative > 4.5"]), to: 40_000 });
+      assert.deepEqual(await tail.anyMatch(["dicom"], 30_001), { found: new Set(), to: 40_000 });
+    } finally {
+      tail.close();
+    }
+  });
+
   await check("rows kept while their chunk grew read as sharkd reads the file once it grew", async () => {
     const [cut, later, base] = [25_000, 31_000, 20_000];
     const file = await cutAt(cut);
