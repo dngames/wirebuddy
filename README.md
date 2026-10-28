@@ -96,13 +96,19 @@ WireBuddy is for working on a capture together with the agent:
 Developed on Ubuntu 22.04 with Wireshark 4.6.6; CI runs on Ubuntu 24.04 with the current stable
 Wireshark from the PPA. Other Linux distributions should work; macOS and Windows are untested.
 
-## Build and run
+## Install and run
 
 ```bash
-npm install
-npm run build
-npm start                      # prints the UI URL, e.g. http://127.0.0.1:8765/?token=…
-node dist/server/main.js path/to/capture.pcapng   # open a file right away
+npm install -g wirebuddy
+wirebuddy                      # prints the UI URL, e.g. http://127.0.0.1:8765/?token=…
+wirebuddy path/to/capture.pcapng   # open a file right away
+```
+
+`npx wirebuddy` runs it without installing. From a clone of the repository:
+
+```bash
+npm install && npm run build
+npm start
 ```
 
 Options (`--help` shows the same):
@@ -208,13 +214,20 @@ plugin, use Analyze › Reload Lua Plugins; restart WireBuddy after adding a C p
 Register the MCP server (it also starts the web UI):
 
 ```bash
-claude mcp add wirebuddy -- "$(command -v node)" /path/to/wirebuddy/dist/server/main.js --mcp
+claude mcp add wirebuddy -- npx -y wirebuddy --mcp
 ```
 
-(`$(command -v node)` stores the full path of your `node`, so it is found even when Claude Code
-starts the server with a different `PATH`.)
+That needs `node` on the `PATH` Claude Code starts MCP servers with. Where it isn't (Node from
+nvm or a folder of your own, Claude Code started from the desktop), install WireBuddy and register
+it with full paths:
 
-To see what the agent side looks like without Claude, `node test/agent-demo.mjs` plays a short
+```bash
+npm install -g wirebuddy
+claude mcp add wirebuddy -- "$(command -v node)" "$(npm root -g)/wirebuddy/dist/server/main.js" --mcp
+```
+
+From a clone of the repository, use its `dist/server/main.js` the same way. There,
+`node test/agent-demo.mjs` shows what the agent side looks like without Claude: it plays a short
 scripted session (filter, mark, select) against the fixture; open the URL it prints.
 
 Claude opens the viewer in the browser pane next to the chat by itself as soon as it starts
@@ -263,7 +276,9 @@ As in the demo above, the agent:
 5. names the cause, fixes the app and captures again to show the fix.
 
 The example's [README](examples/investigations/robot-arm/README.md) has the setup and, at its
-end, the solution; `solution/armc` is a dissector and a panel as the agent might write them.
+end, the solution; `solution/armc` is a dissector and a panel as the agent might write them. The
+commands there assume a clone of the repository; the npm package has the examples too, in
+`$(npm root -g)/wirebuddy/examples` after a global install.
 
 ### Example: a CT archive that loses slices
 
@@ -391,6 +406,7 @@ npm run build
 npm test               # unit checks, the capture file reader, live slices against full reads, the HTTP API, MCP tools and panels
 npm run test:browser   # panels and the examples in headless Chrome (skipped without Chrome)
 npm run test:examples  # the investigations' bugs and their fixes, over loopback without a capture
+npm run test:package   # the npm package installed as users get it, run over MCP
 npm run test:live      # live captures on loopback: pings, a local HTTPS server, the investigations; then big generated ones, followed in headless Chrome
 ```
 

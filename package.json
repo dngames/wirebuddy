@@ -24,16 +24,18 @@
   },
   "license": "MIT",
   "author": "Michael Haar",
-  "private": true,
   "type": "module",
   "bin": {
     "wirebuddy": "dist/server/main.js"
   },
   "files": [
     "dist",
+    "!dist/**/*.map",
     "examples",
+    "CHANGELOG.md",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "SECURITY.md"
   ],
   "engines": {
     "node": ">=22"
@@ -47,10 +49,12 @@
     "test:live": "node test/live-smoke.mjs && node test/live-tail.mjs && node test/live-follow.mjs",
     "test:browser": "node test/browser.mjs && node test/browser-control.mjs",
     "test:examples": "node test/investigation.mjs",
+    "test:package": "node test/package.mjs",
     "demo": "node test/agent-demo.mjs",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "pretest:browser": "npm run build"
+    "pretest:browser": "npm run build",
+    "pretest:package": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

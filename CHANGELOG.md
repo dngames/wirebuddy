@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Install from npm: `npm install -g wirebuddy`, or `claude mcp add wirebuddy -- npx -y wirebuddy --mcp`
+
 ## [0.10.1] - 2026-10-28
 
 - The agent learns whether a panel it opens runs in a process of its own also when the panel is ready at once
