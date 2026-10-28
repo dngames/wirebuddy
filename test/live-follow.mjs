@@ -94,8 +94,13 @@ async function openBrowser(url, name) {
   const profile = join(work, `chrome-${name}`);
   const chrome = spawn(chromeBin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"], { stdio: "ignore" });
   let port;
-  for (const end = Date.now() + 10_000; !port && Date.now() < end; await sleep(100)) {
+  // A busy machine may take a while to start it
+  for (const end = Date.now() + 30_000; !port && Date.now() < end; await sleep(100)) {
     if (existsSync(join(profile, "DevToolsActivePort"))) port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
+  }
+  if (!port) {
+    chrome.kill();
+    throw new Error("Chrome did not start its DevTools server in 30 s");
   }
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);

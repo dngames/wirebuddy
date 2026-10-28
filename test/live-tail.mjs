@@ -118,11 +118,16 @@ function sharkdsReading(pid, file) {
 async function openBrowser(url) {
   const bin = process.env.CHROME ?? "/usr/bin/google-chrome";
   if (!existsSync(bin)) return null;
-  const profile = join(work, "chrome");
+  const profile = mkdtempSync(join(work, "chrome-"));
   const chrome = spawn(bin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"], { stdio: "ignore" });
   let port;
-  for (const end = Date.now() + 10_000; !port && Date.now() < end; await sleep(100)) {
+  // A busy machine may take a while to start it
+  for (const end = Date.now() + 30_000; !port && Date.now() < end; await sleep(100)) {
     if (existsSync(join(profile, "DevToolsActivePort"))) port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
+  }
+  if (!port) {
+    chrome.kill();
+    throw new Error("Chrome did not start its DevTools server in 30 s");
   }
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
@@ -180,6 +185,7 @@ try {
   const seen = new Map();
   let knownThen = 0;
   let marked = 0;
+  let markedBytes = "";
   await check("a big capture: newer packets show within about 2 s while full reads lag", async () => {
     await api("/api/capture/start", { iface: "lo", filter: "burst 300000 rate 2000", autostop: {}, ring: null });
     await until("provisional packets", 30_000, (s) => s.tail !== null && s.tail.frames > 0 && s.totalFrames > 0);
@@ -206,34 +212,55 @@ try {
     latencies.sort((a, b) => a - b);
     const s = await state();
     report.push(`newest packet listed after ${latencies.join(", ")} ms at ${s.capture.packets} packets; ${provisional} of 8 provisional; a full read takes ${s.tail?.readMs} ms`);
-    assert.ok(latencies[latencies.length - 2] <= 2000, `latencies ${latencies}`);
-    assert.ok(provisional >= 5, `only ${provisional} of 8 newest packets were listed before a full read covered them`);
-    // A page of provisional rows, kept to compare
+    // A page of provisional rows, kept to compare (also when the timing below fails)
     const { s: at, rows: page } = await wb.rows((s) => s.displayedFrames, 400);
     assert.ok(page.length > 0 && page.every((r) => r.p === true), `${page.length} rows, ${page.filter((r) => r.p).length} provisional, tail ${JSON.stringify(at.tail)}`);
     for (const r of page) seen.set(r.num, r);
     knownThen = at.totalFrames + at.tail.frames;
+    assert.ok(latencies[latencies.length - 2] <= 2000, `latencies ${latencies}`);
+    assert.ok(provisional >= 5, `only ${provisional} of 8 newest packets were listed before a full read covered them`);
   });
 
   await check("a provisional packet: details from its slice, selected and marked like any other", async () => {
-    const [num] = [...seen.keys()].slice(-50);
+    // A full read may cover the packet while this runs: then again with a newer one
+    for (let attempt = 1; ; attempt++) {
+      // Right after a full read lands nothing is provisional until the next tail tick
+      const s = await until("newer packets", 10_000, (s) => s.tail?.frames > 10);
+      const num = s.totalFrames + s.tail.frames - 10;
+      try {
+        await provisionalPacket(num);
+        return;
+      } catch (err) {
+        if (attempt >= 5 || !err.overtaken) throw err;
+      }
+    }
+  });
+
+  /** Throws `message` unless `ok`; one a full read covering `num` by now explains may be tried again. */
+  async function stillProvisional(num, ok, message) {
+    if (ok) return;
+    throw Object.assign(new Error(message), { overtaken: (await state()).totalFrames >= num });
+  }
+
+  /** Details, selection, marks, the agent's tools and export of `num`, while it is provisional. */
+  async function provisionalPacket(num) {
     const d = await api(`/api/frame?num=${num}`);
-    assert.equal(d.provisional, true);
+    await stillProvisional(num, d.provisional === true, `frame ${num} is not provisional`);
     assert.equal(d.num, num);
     assert.match(d.tree[0].l, new RegExp(`^Frame ${num}:`));
     assert.ok(Buffer.from(d.bytes, "base64").length > 40);
-    seen.get(num).bytes = d.bytes;
     await api("/api/select", { frame: num });
     await api("/api/marks", { frames: [num], note: "provisional" });
+    marked = num;
+    markedBytes = d.bytes;
     const s = await state();
     assert.equal(s.selected, num);
     assert.equal(s.selectedIndex, s.displayedFrames + (num - s.totalFrames - 1));
-    marked = num;
     // The agent: exact data only, and told what is still provisional
     const view = await tool("get_view_state");
-    assert.match(view.text, /newer packets .* provisional/i);
+    await stillProvisional(num, /newer packets .* provisional/i.test(view.text), view.text);
     const inspect = await tool("inspect_frame", { frame: num });
-    assert.ok(inspect.error && /arrived after the last full read/.test(inspect.text), inspect.text);
+    await stillProvisional(num, inspect.error && /arrived after the last full read/.test(inspect.text), inspect.text);
     const go = await tool("goto_frame", { frame: num });
     const at = await state();
     assert.match(go.text, new RegExp(`^Selected frame ${num} \\(row \\d+ of \\d+\\)`));
@@ -243,18 +270,19 @@ try {
     assert.doesNotMatch(go.text, /these results cover/);
     // Right after a full read lands nothing may be provisional for a moment
     let query;
-    for (let k = 0; k < 10 && !/provisional/.test(query?.text ?? ""); k++) query = await tool("query_packets", { filter: "dns", limit: 1 });
+    for (let k = 0; k < 20 && !/provisional/.test(query?.text ?? ""); k++, await sleep(100)) query = await tool("query_packets", { filter: "dns", limit: 1 });
     assert.match(liveLine(query.text), /^Live capture: these results cover frames 1-\d+, read in full; \d+ newer packets \(\d+-\d+\) arrived after the last full read; the user's list shows all of them provisionally; your tools see them with the next full read/);
     // An export writes provisional packets as captured, and says how many
     let exported;
-    for (let k = 0; k < 10 && !/; 2 of them are newer packets/.test(exported?.text ?? ""); k++) {
+    for (let k = 0; k < 30 && !/; 2 of them are newer packets/.test(exported?.text ?? ""); k++, await sleep(100)) {
       const s = await state();
+      if ((s.tail?.frames ?? 0) < 2) continue;
       rmSync(join(work, "across.pcapng"), { force: true });
       exported = await tool("export_packets", { path: join(work, "across.pcapng"), which: "range", range: `${s.totalFrames - 1}-${s.totalFrames + 2}` });
     }
-    assert.match(exported.text, /^Wrote 4 packets .*; 2 of them are newer packets of the live capture, not read in full yet/);
+    assert.match(exported?.text ?? "", /^Wrote 4 packets .*; 2 of them are newer packets of the live capture, not read in full yet/);
     assert.doesNotMatch(exported.text, /these results cover/);
-  });
+  }
 
   await check("with no list showing its end, the rows it gains aren't read ahead: no slices are written", async () => {
     /** The number of the newest slice written so far. */
@@ -266,9 +294,14 @@ try {
     await sleep(5000);
     const before = newest();
     let after = before;
-    for (const end = Date.now() + 4000; Date.now() < end; await sleep(50)) after = Math.max(after, newest());
-    const s = await state();
-    assert.ok(s.tail?.displayed > 0 && s.capture.status === "running", JSON.stringify({ tail: s.tail, capture: s.capture.status }));
+    // Full reads may catch up for a moment: newer packets must have come meanwhile
+    let waiting = 0;
+    for (const end = Date.now() + 4000; Date.now() < end; await sleep(50)) {
+      after = Math.max(after, newest());
+      const s = await state();
+      if (s.capture.status === "running") waiting = Math.max(waiting, s.tail?.displayed ?? 0);
+    }
+    assert.ok(waiting > 0, "no newer packets listed while it watched");
     assert.equal(after - before, 0, `${after - before} slices written`);
   });
 
@@ -289,7 +322,7 @@ try {
     } finally {
       await api("/api/filter", { filter: "" });
       // goto_frame moved it
-      await api("/api/select", { frame: marked });
+      if (marked) await api("/api/select", { frame: marked });
     }
   });
   async function heldFilters() {
@@ -433,7 +466,7 @@ try {
     assert.equal(diff, 0, examples.join("\n"));
     const d = await api(`/api/frame?num=${marked}`);
     assert.equal(d.provisional, undefined);
-    assert.equal(d.bytes, seen.get(marked).bytes);
+    assert.equal(d.bytes, markedBytes);
     if (!browser) return;
     let left;
     for (const end = Date.now() + 10_000; left !== 0 && Date.now() < end; await sleep(200)) left = await browser.evaluate("document.querySelectorAll('.pl-row.prov').length + (document.querySelector('.sb-live').hidden ? 0 : 1)");
