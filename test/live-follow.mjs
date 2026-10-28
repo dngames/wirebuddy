@@ -131,12 +131,17 @@ async function openBrowser(url, name) {
     /** Go to Packet (Ctrl+G) `n`; the newest toast after it. */
     async goTo(n) {
       await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
-      await key("g", "KeyG", 71, 2);
-      for (let k = 0; k < 20 && !(await evaluate("!!document.querySelector('.goto-in')")); k++) await sleep(50);
+      // A busy page may open the dialog late: asked again
+      for (let tries = 0; !(await evaluate("!!document.querySelector('.goto-in')")); tries++) {
+        if (tries === 3) throw new Error("Go to Packet did not open");
+        await key("g", "KeyG", 71, 2);
+        for (let k = 0; k < 40 && !(await evaluate("!!document.querySelector('.goto-in')")); k++) await sleep(50);
+      }
       await evaluate(`document.querySelector('.goto-in').value = '${n}'`);
       await key("Enter", "Enter", 13);
       let text = null;
-      for (const end = Date.now() + 5000; !text && Date.now() < end; await sleep(100)) text = await evaluate("document.querySelector('.toast .toast-text')?.textContent ?? null");
+      // Its own toast, not another notice that came meanwhile
+      for (const end = Date.now() + 10_000; !text && Date.now() < end; await sleep(100)) text = await evaluate("[...document.querySelectorAll('.toast .toast-text')].map((t) => t.textContent).find((t) => t.startsWith('Packet ')) ?? null");
       return text;
     },
     close: () => (ws.close(), chrome.kill()),
