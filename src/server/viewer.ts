@@ -140,6 +140,10 @@ const MEMORY_MARGIN = 512 * 1024 * 1024;
 const TAIL_PROBLEM_MS = 60_000;
 /** Provisional rows, details or filter passes that fail in a row before the tail is turned off. */
 const MAX_TAIL_FAILURES = 3;
+/** Most new provisional rows read before the list shows them: what a page request asks for at most. */
+const WARM_ROWS = 500;
+/** How long after a client last asked for the list's newest rows the rows it gains are still read ahead. */
+const FOLLOWED_MS = 3000;
 /** How often unmatched panel offers are checked again during a live capture. */
 const OFFER_LIVE_MS = 30_000;
 
@@ -209,6 +213,10 @@ export class Viewer extends EventEmitter {
   private tail: LiveTail | null = null;
   private tailTimer: NodeJS.Timeout | null = null;
   private tailBusy = false;
+  /** The capture stopped during a tail tick: one more takes its last packets. */
+  private tailLast = false;
+  /** When a client last asked for the list's newest rows. */
+  private newestAskedAt = 0;
   private tailFiltering = false;
   /** A filter pass was asked for while one ran: the running one goes on. */
   private filterAgain = false;
@@ -350,7 +358,7 @@ export class Viewer extends EventEmitter {
       if (!this.followingCapture()) return;
       // The last packets show while the final full read runs
       this.finalRead = true;
-      void this.tailTick();
+      void this.tailTick(true);
       this.exclusive(() => this.reloadNow(true, false, false, true))
         .finally(() => {
           this.finalRead = false;
@@ -819,10 +827,13 @@ export class Viewer extends EventEmitter {
   /**
    * Indexes what the live file gained, and once full reads have become slow
    * lists the packets after the last one; with a display filter, checks them
-   * against it.
+   * against it. `last`: the capture stopped; a tick under way runs once more.
    */
-  private async tailTick(): Promise<void> {
-    if (this.tailBusy) return;
+  private async tailTick(last = false): Promise<void> {
+    if (this.tailBusy) {
+      this.tailLast ||= last;
+      return;
+    }
     this.tailBusy = true;
     try {
       const file = this.state.file;
@@ -850,6 +861,8 @@ export class Viewer extends EventEmitter {
         tail.active = true;
       }
       if (!tail.active) return;
+      // Only for a list that shows its end; with a filter, its passes list newer packets
+      if (!tail.filter && this.followed()) await this.warmTail(tail);
       this.publishTail();
       void this.filterTail();
     } catch (err) {
@@ -859,6 +872,10 @@ export class Viewer extends EventEmitter {
       if (!this.capture.running && this.tailTimer) {
         clearInterval(this.tailTimer);
         this.tailTimer = null;
+      }
+      if (this.tailLast) {
+        this.tailLast = false;
+        void this.tailTick();
       }
     }
   }
@@ -880,7 +897,7 @@ export class Viewer extends EventEmitter {
       for (let more = true; more && this.tail === tail; ) {
         const revision = tail.revision;
         this.filterAgain = false;
-        more = (await tail.filterPass()) || this.filterAgain;
+        more = (await tail.filterPass(this.followed() ? await this.rowView() : undefined, WARM_ROWS)) || this.filterAgain;
         this.tailWorked(tail);
         if (tail.revision !== revision && this.listedTail === tail) this.tailRevised();
         else this.publishTail();
@@ -892,6 +909,23 @@ export class Viewer extends EventEmitter {
     }
     // Asked for by a tail that came meanwhile
     if (this.filterAgain && this.listedTail && this.listedTail !== tail) void this.filterTail();
+  }
+
+  /** Whether a client showed the list's newest rows lately: the rows the list gains are read ahead for it. */
+  private followed(): boolean {
+    return Date.now() - this.newestAskedAt < FOLLOWED_MS;
+  }
+
+  /** Before the list grows without a filter: reads the provisional rows it gains, so the followed end shows them at once. */
+  private async warmTail(tail: LiveTail): Promise<void> {
+    const gained = tail.listed() - (this.state.tail?.displayed ?? 0);
+    if (gained <= 0) return;
+    try {
+      await tail.warm(Math.min(gained, WARM_ROWS), await this.rowView());
+      this.tailWorked(tail);
+    } catch (err) {
+      if (!(err instanceof Superseded)) this.tailFailed(tail, err as Error);
+    }
   }
 
   /** What the view tells about the tail, null while it isn't listed. */
@@ -923,7 +957,11 @@ export class Viewer extends EventEmitter {
     if (!tail && !was) return;
     if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused && tail.exactAfter === was.exactAfter) return;
     const grew = (tail?.displayed ?? 0) !== (was?.displayed ?? 0);
-    this.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}) });
+    // A selected provisional packet the filter lists now gets its row
+    const { selected, selectedIndex, selectedRows } = this.state;
+    const index = grew && selectedIndex < 0 && selected !== null && selected > this.state.totalFrames ? this.indexOf(selected) : -1;
+    const selection = index >= 0 ? { selectedIndex: index, ...(selectedRows.length ? {} : rowSelection(rowOf(index))) } : {};
+    this.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}), ...selection });
   }
 
   /**
@@ -1163,6 +1201,8 @@ export class Viewer extends EventEmitter {
   async rows(generation: number, start: number, count: number): Promise<RowsResponse> {
     const { rowsSince, displayedFrames, filter } = this.state;
     if (generation > this.state.generation || generation < rowsSince) throw new StaleGenerationError("stale generation");
+    // A list that shows its end: the rows it gains are read ahead for a while
+    if (start + count >= displayedFrames + (this.state.tail?.displayed ?? 0) - WARM_ROWS) this.newestAskedAt = Date.now();
     const tail = this.listedTail;
     count = Math.max(0, Math.min(count, 500, this.listLength() - start));
     if (count === 0 || start < 0) return { generation, start, rows: [] };

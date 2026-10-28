@@ -44,7 +44,7 @@
     "start": "node dist/server/main.js",
     "mcp": "node dist/server/main.js --mcp",
     "test": "node test/units.mjs && node test/framestore.mjs && node test/slices.mjs && node test/api-smoke.mjs && node test/mcp-smoke.mjs && node test/panels-smoke.mjs",
-    "test:live": "node test/live-smoke.mjs && node test/live-tail.mjs",
+    "test:live": "node test/live-smoke.mjs && node test/live-tail.mjs && node test/live-follow.mjs",
     "test:browser": "node test/browser.mjs && node test/browser-control.mjs",
     "test:examples": "node test/investigation.mjs",
     "demo": "node test/agent-demo.mjs",

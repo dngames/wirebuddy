@@ -83,7 +83,7 @@ export function applyState(s: ViewState): void {
     app.selRows = s.selectedRows;
     selRefused = false;
     if (s.selectedIndex >= 0) reveal = { index: s.selectedIndex, flash: false };
-    else toast("info", `Packet ${pendingReveal} is hidden by the display filter`);
+    else toast("info", `Packet ${pendingReveal} ${unlisted(s, pendingReveal)}`);
     pendingReveal = null;
   } else if (!selectBusy() || s.file !== prev.file || s.filter !== prev.filter) {
     // Row indices of another file or filter mean nothing, even with a selection pending
@@ -117,6 +117,16 @@ export function applyState(s: ViewState): void {
   if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) reloadFrame();
   else if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
   if (reveal) bus.emit("reveal", reveal.index, reveal.flash);
+}
+
+/** Why the list has no row for `frame`, a frame the view knows: as the server tells the agent. */
+function unlisted(s: ViewState, frame: number): string {
+  const t = s.tail;
+  if (t && frame > s.totalFrames) {
+    if (t.held) return `is listed once read in full, as ${t.held}`;
+    if (frame > s.totalFrames + t.frames - t.unfiltered) return "isn't checked against the display filter yet";
+  }
+  return "is hidden by the display filter";
 }
 
 // ----------------------------------------------------------------- selection

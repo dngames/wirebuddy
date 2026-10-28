@@ -259,6 +259,19 @@ try {
     assert.equal(pings(300).after(1, 50, 60, budget(1000)).open, false);
   });
 
+  await check("flows: whether what comes after hi may still change a frame's row", () => {
+    // 1-3 handshake, 4 request, 5-104 response, 105 the next request, 106 its answer
+    const flows = fed(exchange.slice(0, 106));
+    const growing = fed(exchange.slice(0, 80));
+    const udp = fed(Array.from({ length: 100 }, (_, i) => g.udpFrame(i)));
+    assert.deepEqual([flows.pending(4, 50), flows.pending(40, 50), flows.pending(4, 104), flows.pending(4, 105), flows.pending(105, 106)], [true, true, false, false, true]);
+    assert.deepEqual([growing.pending(4, 50), growing.pending(4, 80), udp.pending(10, 50)], [true, true, false]);
+    // Pings answered 35 packets later: a ping's row changes once its reply came
+    const icmp = (back) => g.eth(0x0800, g.ip4(1, Buffer.alloc(16), back ? { src: [10, 0, 0, 2], dst: [10, 0, 0, 1] } : {}));
+    const pings = fed(Array.from({ length: 100 }, (_, n) => (n % 10 === 0 ? icmp(false) : n % 10 === 5 && n > 30 ? icmp(true) : g.udpFrame(n))));
+    assert.deepEqual([pings.pending(1, 20), pings.pending(1, 40), pings.pending(21, 40)], [true, false, true]);
+  });
+
   await check("flows: when there are too many, ended flows and those without a handshake are forgotten first", () => {
     const flows = new FlowIndex();
     // A connection that starts and goes quiet
@@ -655,6 +668,111 @@ try {
     }
   });
 
+  await check("rows kept while their chunk grew read as sharkd reads the file once it grew", async () => {
+    const [cut, later, base] = [25_000, 31_000, 20_000];
+    const file = await cutAt(cut);
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      await tail.update();
+      tail.rebase(base);
+      for (let i = 0; i < cut - base; i += 500) await tail.rows(i, 500, view);
+      const more = join(out, "more.pcapng");
+      rmSync(more, { force: true });
+      await bigStore.writeSlice(Int32Array.from({ length: later - cut }, (_, i) => cut + 1 + i), more);
+      appendFileSync(file, readFileSync(more).subarray(header().length));
+      await tail.update();
+      const rows = [];
+      for (let i = 0; i < cut - base; i += 500) rows.push(...(await tail.rows(i, 500, view)));
+      await truth.call("load", { file: await cutAt(later), max_packets: later });
+      const exact = await rowsOf(truth, base + 1, cut);
+      const differ = rows.filter((r, i) => !same(r, exact[i]));
+      assert.equal(differ.length, 0, `${differ.length} rows differ, e.g. ${differ.slice(0, 3).map((r) => `${r.num}: ${exact[r.num - base - 1].c[6]} | ${r.c[6]}`).join("; ")}`);
+    } finally {
+      tail.close();
+    }
+  });
+
+  await check("rows read before their replies came read as sharkd reads the file once they came: pings and NFS calls answered thousands of packets later, a reply completed after the slice", async () => {
+    const u32 = (...xs) => {
+      const b = Buffer.alloc(4 * xs.length);
+      xs.forEach((x, i) => b.writeUInt32BE(x >>> 0, 4 * i));
+      return b;
+    };
+    // NFSv3 GETATTR; over TCP with a record mark
+    const call = (xid) => u32(xid, 0, 2, 100003, 3, 1, 0, 0, 0, 0, 8, 1, 2);
+    const reply = (xid, more = 0) => Buffer.concat([u32(xid, 1, 0, 0, 0, 0, 1), Buffer.alloc(more)]);
+    const marked = (m) => Buffer.concat([u32(0x80000000 | m.length), m]);
+    const echo = (type, seq) => {
+      const b = Buffer.alloc(64);
+      b[0] = type;
+      b.writeUInt16BE(0x1234, 4);
+      b.writeUInt16BE(seq, 6);
+      let sum = 0;
+      for (let i = 0; i < b.length; i += 2) sum += b.readUInt16BE(i);
+      while (sum > 0xffff) sum = (sum & 0xffff) + (sum >>> 16);
+      b.writeUInt16BE(~sum & 0xffff, 2);
+      return b;
+    };
+    const [client, server] = [{ src: [10, 0, 0, 1], dst: [10, 0, 0, 2] }, { src: [10, 0, 0, 2], dst: [10, 0, 0, 1] }];
+    /** A TCP connection from `port` to NFS; `from` 1: the server sends. */
+    const nfsTcp = (port) => {
+      const seq = [1000, 5000];
+      return (from, flags, payload = Buffer.alloc(0)) => {
+        const t = g.tcp(from ? 2049 : port, from ? port : 2049, payload);
+        t.writeUInt32BE(seq[from] >>> 0, 4);
+        t.writeUInt32BE(seq[1 - from] >>> 0, 8);
+        t[13] = flags;
+        seq[from] += payload.length + (flags & 0x02 ? 1 : 0);
+        return g.eth(0x0800, g.ip4(6, t, from ? server : client));
+      };
+    };
+    const [a, b] = [nfsTcp(800), nfsTcp(801)];
+    const at = new Map([[1, () => a(0, 0x02)], [2, () => a(1, 0x12)], [3, () => a(0, 0x10)], [4, () => b(0, 0x02)], [5, () => b(1, 0x12)], [6, () => b(0, 0x10)]]);
+    // Requests from 25000 on: the first answered at once, the others 3000 packets later
+    for (let k = 0; k <= 30; k++) {
+      const f = 25_000 + 100 * k;
+      const r = k ? f + 3000 : f + 50;
+      at.set(f, () => g.eth(0x0800, g.ip4(1, echo(8, k), { src: [10, 0, 0, 30], dst: [10, 9, 9, 9] })));
+      at.set(r, () => g.eth(0x0800, g.ip4(1, echo(0, k), { src: [10, 9, 9, 9], dst: [10, 0, 0, 30] })));
+      at.set(f + 2, () => g.eth(0x0800, g.ip4(17, g.udp(800, 2049, call(k)), client)));
+      at.set(r + 2, () => g.eth(0x0800, g.ip4(17, g.udp(2049, 800, reply(k)), server)));
+      at.set(f + 4, () => a(0, 0x18, marked(call(100 + k))));
+      at.set(r + 4, () => a(1, 0x18, marked(reply(100 + k))));
+    }
+    // A call at the chunk's end whose reply of 2400 segments ends past its slice
+    const long = marked(reply(1000, 2400 * 1448 - 32));
+    at.set(29_990, () => b(0, 0x18, marked(call(1000))));
+    for (let i = 0; i < 2400; i++) at.set(29_995 + 2 * i, () => b(1, 0x10, long.subarray(i * 1448, (i + 1) * 1448)));
+    at.set(34_900, () => b(0, 0x18, marked(call(1001))));
+    const frames = Array.from({ length: 40_000 }, (_, i) => at.get(i + 1)?.() ?? g.udpFrame(i + 1, { sport: 40_000 + (i % 50) }));
+    const packets = (from, to) => Buffer.concat(frames.slice(from, to).map((f, i) => packet(from + i, f)));
+    const file = join(out, "answers.pcapng");
+    writeFileSync(file, Buffer.concat([header(), packets(0, 28_500)]));
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    const base = 20_000;
+    try {
+      await tail.update();
+      tail.rebase(base);
+      // The chunk grows; then it is complete, the long reply still under way
+      for (const [cut, more] of [[28_500, 32_200], [32_200, 40_000]]) {
+        for (let i = 0; i < Math.min(cut, base + CHUNK) - base; i += 500) await tail.rows(i, 500, view);
+        appendFileSync(file, packets(cut, more));
+        await tail.update();
+      }
+      const rows = [];
+      for (let i = 0; i < CHUNK; i += 500) rows.push(...(await tail.rows(i, 500, view)));
+      const whole = newSharkd();
+      await whole.call("load", { file });
+      const exact = await rowsOf(whole, base + 1, base + CHUNK);
+      const differ = rows.filter((r, i) => !same(r, exact[i]));
+      assert.equal(differ.length, 0, `${differ.length} rows differ, e.g. ${differ.slice(0, 3).map((r) => `${r.num}: ${exact[r.num - base - 1].c[6]} | ${r.c[6]}`).join("; ")}`);
+      assert.match(exact[29_990 - base - 1].c[6], /\(Reply In 34793\)/);
+    } finally {
+      tail.close();
+      rmSync(file, { force: true });
+    }
+  });
+
   await check("big packets: chunks and slices keep to their byte budgets and read as the file does", async () => {
     // 64 KB packets, as bulk transfers on lo have them: 1100 of them take 70 MB
     const file = join(out, "jumbo.pcapng");
@@ -712,6 +830,31 @@ try {
       await assert.rejects(tail.rows(0, 100, view, () => false), Superseded);
       assert.equal(sharkdChildren(), before);
       assert.equal((await tail.rows(0, 100, view, () => true)).length, 100);
+    } finally {
+      tail.close();
+    }
+  });
+
+  await check("rows read ahead come without reading a slice: the newest ones, and a filter pass's matches", async () => {
+    const file = await cutAt(37_000);
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      await tail.update();
+      tail.rebase(30_000);
+      await tail.warm(300, view);
+      const newest = await tail.rows(tail.listed() - 300, 300, view, () => false);
+      assert.deepEqual([newest.length, newest[0].num, newest.at(-1).num], [300, 36_701, 37_000]);
+      assert.ok(newest.every((r) => r.p && r.c[0] === String(r.num)));
+      tail.setFilter("dns", null);
+      while (await tail.filterPass(view, 500));
+      const dns = Array.from({ length: tail.listed() }, (_, i) => tail.frameAt(i));
+      assert.ok(dns.length > 20, `${dns.length} matches`);
+      // The filter's sharkd is busy with another filter meanwhile
+      tail.setFilter("tcp", null);
+      const busy = tail.filterPass(view, 500);
+      const rows = await tail.rowsOf(dns, view, () => false);
+      await busy;
+      assert.ok(rows.length === dns.length && rows.every((r, i) => r.num === dns[i] && r.c[4] === "DNS"), JSON.stringify(rows[0]));
     } finally {
       tail.close();
     }

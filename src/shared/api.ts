@@ -18,7 +18,9 @@
  * `GET /api/rows` answers for any generation since `rowsSince`, with the
  * rows as they read now; an older one gets 409, and so does one that isn't
  * the newest when provisional rows would have to be read for it. Fewer rows
- * than asked for: provisional ones couldn't be read now; ask again.
+ * than asked for: provisional ones couldn't be read now; ask again. For a
+ * few seconds after a request for the list's newest rows, the provisional
+ * rows it gains are read before the list shows them.
  *
  * Endpoints:
  *

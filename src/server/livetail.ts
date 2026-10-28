@@ -12,9 +12,11 @@
  * their data under way after it and the answers they still owe. Every part
  * has a byte budget too, so a slice takes about 64 MiB at most whatever the
  * packet sizes. A chunk's rows always come from a slice of its own, so they
- * read the same every time once nothing that comes later can change them.
- * sharkd numbers a slice's frames from 1: rows and details are renumbered to
- * the file's frame numbers.
+ * read the same every time once nothing that comes later can change them. A
+ * complete chunk's row is kept once its slice reaches as far past the chunk
+ * as it ever will and the row's flow takes nothing more from after that;
+ * others while their chunk's slice stays the same. sharkd numbers a slice's
+ * frames from 1: rows and details are renumbered to the file's frame numbers.
  */
 
 import { createHash } from "node:crypto";
@@ -37,8 +39,10 @@ const CONTEXT_BYTES = 4 * MiB;
 /** What a slice brings along for its flows from before the chunk's context, and from after it. */
 const BEFORE = { frames: 20_000, bytes: 16 * MiB };
 const AFTER = { frames: 10_000, bytes: 8 * MiB };
-/** Rows kept of chunks that read the same from now on. */
+/** Rows kept that read so from now on. */
 const MAX_CACHED_ROWS = 100_000;
+/** Rows kept that later packets may still change, while their chunk's slice stays the same. */
+const MAX_RECENT_ROWS = 5_000;
 /** A page of a chunk brings the chunk's other filter matches along when there are no more than this. */
 const READ_BATCH = 500;
 /** Slices worked out, kept by chunk. */
@@ -95,6 +99,8 @@ export interface Slice {
   after: Int32Array;
   /** The chunk won't grow. */
   complete: boolean;
+  /** Nothing more comes before hi: the chunk's slices differ only in `after` from now on. */
+  settled: boolean;
   /** Its rows read the same from now on: what comes later can't change them. */
   final: boolean;
 }
@@ -292,10 +298,13 @@ export class LiveTail {
   private indexing: Promise<void> = Promise.resolve();
   /** Slices worked out, by chunk, with the count they are for. */
   private readonly slices = new Map<number, { count: number; slice: Slice }>();
-  /** Rows of final chunks, by chunk, the one used last at the end; for RowView.key. */
+  /** Rows that read so from now on, by chunk, the one used last at the end; for RowView.key. */
   private readonly cache = new Map<number, Map<number, PacketRow>>();
   private cachedRows = 0;
   private cacheKey = "";
+  /** Other rows, by chunk, with the slice they were read from: kept while it is the chunk's slice. */
+  private readonly recent = new Map<number, { key: string; rows: Map<number, PacketRow> }>();
+  private recentRows = 0;
   private closed = false;
 
   constructor(private readonly opts: TailOptions) {
@@ -423,7 +432,7 @@ export class LiveTail {
     const settled = complete && (hi === end + CONTEXT || hi < this.count);
     const after = settled ? this.flows.after(lo, end, hi, { ...AFTER, size }) : { frames: new Int32Array(0), open: true };
     const extras = this.flows.context(c0, end, { ...BEFORE, size });
-    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, complete, final: settled && !after.open };
+    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, complete, settled, final: settled && !after.open };
     this.slices.delete(lo);
     this.slices.set(lo, { count: this.count, slice: s });
     if (this.slices.size > MAX_SLICES) this.slices.delete(this.slices.keys().next().value!);
@@ -439,11 +448,7 @@ export class LiveTail {
 
   /** Rows of the given tail frames (ascending), whatever the filter; slices are read only while `wanted` says so. */
   async rowsOf(frames: number[], view: RowView, wanted: () => boolean = () => true): Promise<PacketRow[]> {
-    if (view.key !== this.cacheKey) {
-      this.cache.clear();
-      this.cachedRows = 0;
-      this.cacheKey = view.key;
-    }
+    this.useView(view);
     const got = new Map<number, PacketRow>();
     for (let i = 0; i < frames.length; ) {
       const { lo, end, complete } = this.chunk(frames[i]);
@@ -454,31 +459,105 @@ export class LiveTail {
         this.cache.delete(lo);
         this.cache.set(lo, cached);
       }
-      let part = frames.slice(i, j + 1).filter((f) => {
-        const r = cached?.get(f);
+      const take = (rows: Map<number, PacketRow> | undefined) => (f: number): boolean => {
+        const r = rows?.get(f);
         if (r) got.set(f, r);
         return !r;
-      });
+      };
+      let part = frames.slice(i, j + 1).filter(take(cached));
+      const recent = part.length ? this.recentOf(lo) : undefined;
+      if (recent) part = part.filter(take(recent));
       // A filter's matches are sparse: pages around these ask for the chunk's others next, when they are few
       if (part.length && complete && this.filter && !this.held) {
-        const more = this.matchesIn(lo, end).filter((f) => !cached?.has(f));
+        const more = this.matchesIn(lo, end).filter((f) => !cached?.has(f) && !recent?.has(f));
         if (more.length <= READ_BATCH) part = [...new Set([...part, ...more])].sort((a, b) => a - b);
       }
       if (part.length) {
-        const { rows, final } = await this.readChunk(part, view, wanted);
-        for (const f of part) {
-          const row = rows.get(f);
-          got.set(f, row ?? { num: f, c: [], p: true });
-          if (final && row) this.keep(lo, f, row);
-        }
+        const { rows, slice } = await this.readChunk(part, view, wanted);
+        this.keepAll(slice, part, rows, got);
       }
       i = j + 1;
     }
     return frames.map((f) => got.get(f)!);
   }
 
-  /** Rows of `frames` (ascending, of one chunk) from a slice of their chunk; `final`: they read the same from now on. */
-  private async readChunk(frames: number[], view: RowView, wanted: () => boolean): Promise<{ rows: Map<number, PacketRow>; final: boolean }> {
+  /** Rows kept are of `view`: none once rows read differently. */
+  private useView(view: RowView): void {
+    if (view.key === this.cacheKey) return;
+    this.cache.clear();
+    this.cachedRows = 0;
+    this.recent.clear();
+    this.recentRows = 0;
+    this.cacheKey = view.key;
+  }
+
+  /** Rows read from slice `s` of `frames` into `got`, kept while they read so. */
+  private keepAll(s: Slice, frames: number[], rows: Map<number, PacketRow>, got?: Map<number, PacketRow>): void {
+    for (const f of frames) {
+      const row = rows.get(f);
+      got?.set(f, row ?? { num: f, c: [], p: true });
+      if (!row) continue;
+      if (this.settled(s, f)) this.keep(s.lo, f, row);
+      else this.remember(s, f, row);
+    }
+  }
+
+  /** Reads the newest `n` rows of the tail, so a list that shows them next gets them at once. */
+  async warm(n: number, view: RowView): Promise<void> {
+    const listed = this.listed();
+    if (listed) await this.rows(Math.max(0, listed - n), Math.min(n, listed), view);
+  }
+
+  /** Rows kept of chunk `lo` that read so now. */
+  private recentOf(lo: number): Map<number, PacketRow> | undefined {
+    const r = this.recent.get(lo);
+    if (!r) return undefined;
+    this.recent.delete(lo);
+    if (this.current(lo, r.key)) {
+      this.recent.set(lo, r);
+      return r.rows;
+    }
+    this.recentRows -= r.rows.size;
+    return undefined;
+  }
+
+  /** Whether rows read from slice `key` still read so for chunk `lo`: it is the chunk's slice now. */
+  private current(lo: number, key: string): boolean {
+    return key === sliceKey(this.slice(lo));
+  }
+
+  /**
+   * Whether a row read from slice `s` reads so until a full read covers it:
+   * its chunk is final, or settled and its flow takes nothing more from
+   * after hi. A growing chunk's rows may still change: a reply that comes
+   * later than its slice holds names its request (ping, NFS).
+   */
+  private settled(s: Slice, frame: number): boolean {
+    return s.final || (s.settled && !this.flows.pending(frame, s.hi));
+  }
+
+  /** Keeps a row read from slice `s` while that is its chunk's slice; the chunks used longest ago go first. */
+  private remember(s: Slice, frame: number, row: PacketRow): void {
+    const key = sliceKey(s);
+    if (!this.current(s.lo, key)) return;
+    let r = this.recent.get(s.lo);
+    if (r?.key !== key) {
+      if (r) this.recentRows -= r.rows.size;
+      r = { key, rows: new Map() };
+    }
+    this.recent.delete(s.lo);
+    this.recent.set(s.lo, r);
+    if (!r.rows.has(frame)) this.recentRows++;
+    r.rows.set(frame, row);
+    for (const [old, x] of this.recent) {
+      if (this.recentRows <= MAX_RECENT_ROWS || old === s.lo) break;
+      this.recent.delete(old);
+      this.recentRows -= x.rows.size;
+    }
+  }
+
+  /** Rows of `frames` (ascending, of one chunk) from a slice of their chunk, `slice`. */
+  private async readChunk(frames: number[], view: RowView, wanted: () => boolean): Promise<{ rows: Map<number, PacketRow>; slice: Slice }> {
     const last = frames[frames.length - 1];
     // The filter's sharkd may hold the slice (the newest chunk, just checked), when it has nothing else to do
     const filter = this.filterEngine;
@@ -497,7 +576,7 @@ export class LiveTail {
   }
 
   /** Rows of `frames` (ascending, of the chunk) from the slice `engine` holds, renumbered. */
-  private async read(engine: Engine, frames: number[], view: RowView): Promise<{ rows: Map<number, PacketRow>; final: boolean }> {
+  private async read(engine: Engine, frames: number[], view: RowView): Promise<{ rows: Map<number, PacketRow>; slice: Slice }> {
     const s = engine.slice!;
     const filter = this.filter && !this.held ? this.filter : "";
     const matched = filter ? await this.matchesOf(engine, filter) : null;
@@ -516,7 +595,7 @@ export class LiveTail {
     };
     for (const [first, n] of runs(byMatch)) await fetch({ filter, ...(first ? { skip: first } : {}), limit: n });
     for (const [first, n] of runs(byFrame)) await fetch({ ...(first > 1 ? { skip: first - 1 } : {}), limit: n });
-    return { rows, final: s.final };
+    return { rows, slice: s };
   }
 
   /** The frames of the slice `engine` holds that `filter` matches, by their numbers there. */
@@ -545,7 +624,7 @@ export class LiveTail {
     return a;
   }
 
-  /** Keeps a row of a final chunk; the chunks used longest ago go first. */
+  /** Keeps a row that reads so from now on (see settled); the chunks used longest ago go first. */
   private keep(lo: number, frame: number, row: PacketRow): void {
     let rows = this.cache.get(lo);
     if (!rows) this.cache.set(lo, (rows = new Map()));
@@ -578,12 +657,15 @@ export class LiveTail {
    * the newest chunk, still growing, is checked again once more packets
    * came, and after a pause as long as the last check took (sharkd reads the
    * whole slice for each).
+   * With `view`, the newest `rows` matches of the newest chunk it checked
+   * are read too, while sharkd holds the slice, so a list that shows them
+   * next gets them at once.
    */
-  async filterPass(): Promise<boolean> {
+  async filterPass(view?: RowView, rows = 0): Promise<boolean> {
     const { seq, filter } = this;
     if (!filter || this.held || this.closed) return false;
     const from = Math.max(this.checked, this.base) + 1;
-    const next = from <= this.count && (this.chunk(from).complete || Date.now() >= this.growingAt) ? from : this.settled();
+    const next = from <= this.count && (this.chunk(from).complete || Date.now() >= this.growingAt) ? from : this.recheck();
     if (!next) return false;
     const engine = (this.filterEngine ??= this.newEngine());
     return engine.run(async () => {
@@ -600,12 +682,18 @@ export class LiveTail {
         const f = toGlobal(s, local);
         if (local >= first && local <= last && f >= lo && f <= s.end) now.push(f);
       }
+      if (view && rows > 0 && next === from && now.length) {
+        this.useView(view);
+        const newest = now.slice(-rows);
+        this.keepAll(s, newest, (await this.read(engine, newest, view)).rows);
+        if (seq !== this.seq) return false;
+      }
       this.place(lo, s.end, now);
       this.checked = Math.max(this.checked, s.end);
       if (!s.complete) this.growingAt = 2 * Date.now() - started;
       this.unsettled.delete(s.lo);
       if (s.complete && !s.final) this.unsettled.set(s.lo, { key: sliceKey(s), checked: this.count, looked: this.count });
-      return (s.complete && this.checked < this.count) || this.settled() > 0;
+      return (s.complete && this.checked < this.count) || this.recheck() > 0;
     });
   }
 
@@ -623,7 +711,7 @@ export class LiveTail {
    * few others are looked at a pass, each again after the others once more
    * packets came.
    */
-  private settled(): number {
+  private recheck(): number {
     let looks = UNSETTLED_LOOKS;
     for (const [lo, was] of this.unsettled) {
       const { end } = this.chunk(lo);

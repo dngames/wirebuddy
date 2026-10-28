@@ -62,12 +62,13 @@ let widths: number[] = [];
 const colW: Record<string, number> = load<Record<string, number>>("colwidths", {});
 let total = 0;
 let gen = -1;
-/** The stale pages show the same frames as the new list (it only grew). */
-let staleValid = false;
 let pages = new Map<number, PacketRow[]>();
-/** Previous generation's pages, shown while a live reload refetches. */
+/** Older generations' pages of the same list (it only grew): the same frames, until the page comes again. */
 let stale = new Map<number, PacketRow[]>();
-let inflight = new Set<number>();
+/** Pages of an earlier list of the same file and filter, shown as placeholders while it refetches. */
+let ghosts = new Map<number, PacketRow[]>();
+/** Pages asked for, with the rows asked for; requests for older generations of the list count too. */
+let inflight = new Map<number, number>();
 const failed = new Map<number, number>();
 let errorToastAt = 0;
 
@@ -79,6 +80,8 @@ let flashUntil = 0;
 let flashTimer = 0;
 /** Row to select once its page arrives, with the rows selected along with it. */
 let pendingSel: { i: number; rows?: Ranges } | null = null;
+/** Following the live end: the view waits on the newest rows it has until the end's arrive. */
+let followPending = false;
 /** Row Shift+click and Shift+arrows extend the selection from. */
 let anchor = -1;
 let userInputAt = 0;
@@ -120,6 +123,7 @@ function syncScrollFromVirt(): void {
 function setVirtTop(v: number): void {
   const m = metrics();
   virtTop = clamp(v, 0, m.maxVirt);
+  followPending = false;
   syncScrollFromVirt();
   render();
 }
@@ -132,17 +136,69 @@ function onScroll(): void {
     const before = virtTop;
     virtTop = m.maxScroll > 0 ? (st * m.maxVirt) / m.maxScroll : 0;
     lastSetScroll = st;
-    // Scrolling up by hand during a live capture turns auto-scroll off, as in Wireshark.
-    if (virtTop < before - 1 && app.autoScroll && captureActive() && performance.now() - userInputAt < 800) {
-      act.setAutoScroll(false);
+    if (performance.now() - userInputAt < 800) {
+      followPending = false;
+      scrolledBy(virtTop - before);
     }
   }
   render();
 }
 
+/** Scrolling up by hand during a live capture turns auto-scroll off, as in Wireshark. */
+function scrolledBy(d: number): void {
+  if (d < -1 && app.autoScroll && captureActive()) act.setAutoScroll(false);
+}
+
 function isAtBottom(): boolean {
   const m = metrics();
   return virtTop >= m.maxVirt - RH;
+}
+
+/**
+ * Scrolls to the end of the list, or while its rows are still loading to
+ * the newest rows the list has, and on to the end once they arrive: a
+ * followed live capture never shows a screen of placeholders it has rows for.
+ */
+function follow(): void {
+  const m = metrics();
+  const n = Math.min(total, Math.ceil(m.vh / RH));
+  const end = newestWindow(n);
+  if (end >= total - 1 || (end < 0 && !showsRows())) {
+    setVirtTop(m.maxVirt);
+    return;
+  }
+  const t = clamp((end + 1) * RH - m.vh, 0, m.maxVirt);
+  if (end >= 0 && (t > virtTop || !showsRows())) {
+    virtTop = t;
+    syncScrollFromVirt();
+  }
+  followPending = true;
+  render();
+}
+
+/** Last row of the newest `n` rows in a row that all have data, at or after the view's first row; -1 if there are none. */
+function newestWindow(n: number): number {
+  const from = Math.floor(virtTop / RH);
+  const keys = [...new Set([...pages.keys(), ...stale.keys()])].filter((p) => (p + 1) * PAGE > from).sort((a, b) => b - a);
+  for (const p of keys) {
+    const rows = pages.get(p) ?? stale.get(p)!;
+    let k = Math.min(rows.length, total - p * PAGE) - 1;
+    while (k >= 0 && !rows[k]) k--;
+    const end = p * PAGE + k;
+    if (k < 0 || end - n + 1 < 0) continue;
+    let i = end;
+    while (i > end - n && validRowAt(i)) i--;
+    if (i === end - n) return end;
+  }
+  return -1;
+}
+
+/** Whether any row on screen has data, if only a placeholder's. */
+function showsRows(): boolean {
+  const first = Math.floor(virtTop / RH);
+  const n = Math.ceil(metrics().vh / RH) + 1;
+  for (let i = first; i < Math.min(total, first + n); i++) if (rowAt(i)) return true;
+  return false;
 }
 
 function ensureVisible(i: number, mode: "nearest" | "center" | "centerIfHidden"): void {
@@ -280,7 +336,7 @@ function autosize(j: number): void {
 
 function rowAt(i: number): PacketRow | undefined {
   const p = Math.floor(i / PAGE);
-  return pages.get(p)?.[i - p * PAGE] ?? stale.get(p)?.[i - p * PAGE];
+  return pages.get(p)?.[i - p * PAGE] ?? stale.get(p)?.[i - p * PAGE] ?? ghosts.get(p)?.[i - p * PAGE];
 }
 
 function freshRowAt(i: number): PacketRow | undefined {
@@ -288,18 +344,28 @@ function freshRowAt(i: number): PacketRow | undefined {
   return pages.get(p)?.[i - p * PAGE];
 }
 
+/** Row `i` of the list shown now, if only as an older generation read it. */
+function validRowAt(i: number): PacketRow | undefined {
+  const p = Math.floor(i / PAGE);
+  return pages.get(p)?.[i - p * PAGE] ?? stale.get(p)?.[i - p * PAGE];
+}
+
 function want(first: number, last: number): void {
   if (!app.state?.file || total === 0) return;
   const lo = Math.max(0, first - OVERSCAN);
   const hi = Math.min(total - 1, last + OVERSCAN);
+  const pageOf = (i: number): number => Math.floor(i / PAGE);
   const vis: number[] = [];
-  for (let p = Math.floor(first / PAGE); p <= Math.floor(Math.min(total - 1, last) / PAGE); p++) vis.push(p);
+  for (let p = pageOf(first); p <= pageOf(Math.min(total - 1, last)); p++) vis.push(p);
   const extra: number[] = [];
-  for (let p = Math.floor(lo / PAGE); p <= Math.floor(hi / PAGE); p++) if (!vis.includes(p)) extra.push(p);
+  for (let p = pageOf(lo); p <= pageOf(hi); p++) if (!vis.includes(p)) extra.push(p);
+  // A clicked row, until it is selected; while the view waits on the live end, only the end's pages
+  const urgent: number[] = pendingSel ? [pageOf(pendingSel.i)] : [];
+  if (followPending) for (let p = pageOf(Math.max(0, total - Math.ceil(metrics().vh / RH))); p <= pageOf(total - 1); p++) urgent.push(p);
   const now = performance.now();
-  for (const p of [...vis, ...extra]) {
+  for (const p of followPending ? urgent : [...urgent, ...vis, ...extra]) {
     if (inflight.size >= MAX_INFLIGHT) break;
-    if (pages.has(p) || inflight.has(p)) continue;
+    if (pages.has(p) || (inflight.get(p) ?? 0) >= Math.min(PAGE, total - p * PAGE)) continue;
     const f = failed.get(p);
     if (f !== undefined && now - f < 2500) continue;
     void fetchPage(p);
@@ -312,36 +378,28 @@ async function fetchPage(p: number): Promise<void> {
   const start = p * PAGE;
   const count = Math.min(PAGE, total - start);
   if (count <= 0) return;
-  inflight.add(p);
+  inflight.set(p, count);
   try {
     const r = await get<RowsResponse>("api/rows", { gen: g, start, count });
+    // Rows of another list since
+    if (viewKey() !== view || r.generation !== g) return;
     const rows = r.start === start ? r.rows : alignRows(r, start, count);
     if (g !== gen) {
-      // The list only grew since (a live capture): show them until the page comes again
-      if (viewKey() === view && !pages.has(p)) {
-        stale.set(p, rows);
+      // The list only grew since (a live capture): the same frames, as the server reads them now
+      if (pages.has(p)) return;
+      if (current(rows, start)) setPage(p, rows);
+      else {
+        stale.set(p, [...rows, ...(stale.get(p)?.slice(rows.length) ?? [])]);
         trimStale();
       }
-      return;
-    }
-    if (r.generation !== g) return;
-    if (r.rows.length < count) {
+    } else if (r.rows.length < count) {
       // Provisional rows that couldn't be read now: the others show, the page comes again
       stale.set(p, [...rows, ...(stale.get(p)?.slice(rows.length) ?? [])]);
       failed.set(p, performance.now());
       window.setTimeout(scheduleRender, 2600);
-      return;
-    }
-    pages.set(p, rows);
-    stale.delete(p);
-    failed.delete(p);
-    evict(p);
-    if (pendingSel && pendingSel.i >= start && pendingSel.i < start + rows.length) {
-      const { i, rows: sel } = pendingSel;
-      pendingSel = null;
-      const row = rows[i - start];
-      if (row) act.selectRow(i, row.num, sel);
-    }
+    } else setPage(p, rows);
+    resolvePending();
+    if (followPending) follow();
   } catch (e) {
     if (g !== gen) return;
     failed.set(p, performance.now());
@@ -353,9 +411,33 @@ async function fetchPage(p: number): Promise<void> {
       toastError(e, "Loading packets failed");
     }
   } finally {
-    if (g === gen) inflight.delete(p);
+    if (inflight.get(p) === count && viewKey() === view) inflight.delete(p);
     scheduleRender();
   }
+}
+
+function setPage(p: number, rows: PacketRow[]): void {
+  pages.set(p, rows);
+  stale.delete(p);
+  failed.delete(p);
+  evict(p);
+}
+
+/** Whether an older generation's page is the whole page of the list now, its rows read in full or provisional as they are now. */
+function current(rows: PacketRow[], start: number): boolean {
+  const exact = app.state?.displayedFrames ?? 0;
+  if (rows.length !== Math.min(PAGE, total - start)) return false;
+  for (let k = 0; k < rows.length; k++) if (!rows[k] || !!rows[k].p !== start + k >= exact) return false;
+  return true;
+}
+
+/** Selects a clicked row once its frame is known. */
+function resolvePending(): void {
+  const row = pendingSel && validRowAt(pendingSel.i);
+  if (!pendingSel || !row) return;
+  const { i, rows } = pendingSel;
+  pendingSel = null;
+  act.selectRow(i, row.num, rows);
 }
 
 /** Server answered with a different start: keep only the rows of page p. */
@@ -368,13 +450,15 @@ function alignRows(r: RowsResponse, start: number, count: number): PacketRow[] {
   return out;
 }
 
-/** Keeps pages + stale within MAX_PAGES, dropping stale pages far from the view first. */
+/** Keeps pages, stale and ghost pages within MAX_PAGES, dropping ghosts, then stale pages, far from the view first. */
 function trimStale(): void {
-  const room = Math.max(0, MAX_PAGES - pages.size);
-  if (stale.size <= room) return;
   const center = Math.floor(virtTop / RH / PAGE);
-  const keys = [...stale.keys()].sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
-  for (const k of keys.slice(room)) stale.delete(k);
+  for (const old of [ghosts, stale]) {
+    const room = Math.max(0, MAX_PAGES - pages.size - (old === ghosts ? stale.size : 0));
+    if (old.size <= room) continue;
+    const keys = [...old.keys()].sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+    for (const k of keys.slice(room)) old.delete(k);
+  }
 }
 
 function evict(keep: number): void {
@@ -387,9 +471,11 @@ function evict(keep: number): void {
 
 /** Row index of a frame if its row is cached, else -1. */
 function indexOfFrame(frame: number): number {
-  for (const [p, rows] of pages) {
-    const k = rows.findIndex((r) => r?.num === frame);
-    if (k >= 0) return p * PAGE + k;
+  for (const cache of [pages, stale]) {
+    for (const [p, rows] of cache) {
+      const k = rows.findIndex((r) => r?.num === frame);
+      if (k >= 0) return p * PAGE + k;
+    }
   }
   return -1;
 }
@@ -514,8 +600,8 @@ function selectIndex(i: number, rows?: Ranges): void {
   i = clamp(i, 0, total - 1);
   if (!rows) anchor = i;
   ensureVisible(i, "nearest");
-  // A stale row may show another frame after a re-read that rebuilt the list
-  const row = freshRowAt(i) ?? (staleValid ? rowAt(i) : undefined);
+  // A ghost row may show another frame: the list was rebuilt since
+  const row = validRowAt(i);
   if (row) {
     pendingSel = null;
     act.selectRow(i, row.num, rows);
@@ -663,7 +749,7 @@ export function packetCopyItems(): MenuItem[] {
 }
 
 async function openRowMenu(i: number, x: number, y: number): Promise<void> {
-  const row = rowAt(i);
+  const row = validRowAt(i);
   if (!row) return;
   // Right-click inside the selection keeps it, like Wireshark
   if (inRanges(app.selRows, i)) act.selectRow(i, row.num, app.selRows);
@@ -749,7 +835,9 @@ export function createPacketList(): HTMLElement {
       // Scaled range: scroll by real rows instead of scaled pixels.
       e.preventDefault();
       const unit = e.deltaMode === 1 ? RH : e.deltaMode === 2 ? m.vh : 1;
+      const before = virtTop;
       if (e.deltaY) setVirtTop(virtTop + e.deltaY * unit);
+      scrolledBy(virtTop - before);
       if (e.deltaX) scroller.scrollLeft += e.deltaX * unit;
     },
     { passive: false },
@@ -816,26 +904,34 @@ export function createPacketList(): HTMLElement {
     // A restarted server's rows and generations have nothing to do with the cached ones
     const reset = !!prev && prev.instance !== s.instance;
     const genChanged = reset || fileChanged || s.generation !== gen;
-    staleValid = !!prev && !reset && !fileChanged && s.rowsSince === prev.rowsSince;
     const sameView = !!prev && !fileChanged && !reset && s.filter === prev.filter;
+    // The list only grew: row indices show the same frames
+    const sameRows = sameView && s.rowsSince === prev.rowsSince;
     // Measured before the row count changes; a file that just finished loading starts at the top.
     // An empty list counts as at the bottom, so the first rows of a live file are followed too
-    const wasAtBottom = !prev?.loading && (total === 0 || isAtBottom());
+    const wasAtBottom = !prev?.loading && (total === 0 || isAtBottom() || followPending);
     // The final reload after a stop arrives with the capture already idle
     const wasCapturing = !!prev && captureActive(prev);
     // Provisional rows of a live capture follow the ones read in full
     total = s.file ? Math.max(0, s.displayedFrames + (s.tail?.displayed ?? 0)) : 0;
     if (genChanged) {
-      // Same file and filter: old rows stay as placeholders until refetched.
-      stale = sameView ? new Map([...stale, ...pages]) : new Map();
+      if (sameRows) stale = new Map([...stale, ...pages]);
+      else {
+        // Same file and filter: old rows stay as placeholders until refetched
+        ghosts = sameView ? new Map([...ghosts, ...stale, ...pages]) : new Map();
+        stale = new Map();
+        inflight = new Map();
+      }
       gen = s.generation;
       pages = new Map();
-      inflight = new Set();
       failed.clear();
       trimStale();
-      // A pending selection's rows belong to the old list
-      if (!sameView || (pendingSel && pendingSel.i >= total)) pendingSel = null;
-      if (!sameView) anchor = -1;
+      // A pending selection's row belongs to the old list
+      if (!sameRows || (pendingSel && pendingSel.i >= total)) pendingSel = null;
+      if (!sameView) {
+        anchor = -1;
+        followPending = false;
+      }
     }
     updateHeights();
     if (fileChanged) {
@@ -843,11 +939,12 @@ export function createPacketList(): HTMLElement {
       scroller.scrollLeft = 0;
       pendingSel = null;
       anchor = -1;
+      followPending = false;
       syncScrollFromVirt();
       // New capture or ring-buffer file switch: follow the live end.
       if (prev && app.autoScroll && captureActive(s)) setVirtTop(metrics().maxVirt);
     } else if (genChanged && sameView && app.autoScroll && (captureActive(s) || wasCapturing || wasAtBottom)) {
-      setVirtTop(metrics().maxVirt);
+      follow();
     } else if (genChanged && prev && s.filter !== prev.filter && app.selIndex >= 0) {
       ensureVisible(app.selIndex, "center");
     }
@@ -879,7 +976,8 @@ export function createPacketList(): HTMLElement {
   });
 
   bus.on("autoscroll", (on) => {
-    if (on && captureActive() && !isAtBottom()) setVirtTop(metrics().maxVirt);
+    if (on && captureActive() && !isAtBottom()) follow();
+    else if (!on) followPending = false;
   });
 
   return root;

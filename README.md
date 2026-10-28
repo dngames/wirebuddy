@@ -391,7 +391,7 @@ npm run build
 npm test               # unit checks, the capture file reader, live slices against full reads, the HTTP API, MCP tools and panels
 npm run test:browser   # panels and the examples in headless Chrome (skipped without Chrome)
 npm run test:examples  # the investigations' bugs and their fixes, over loopback without a capture
-npm run test:live      # live captures on loopback: pings, a local HTTPS server, the investigations; then a big generated one
+npm run test:live      # live captures on loopback: pings, a local HTTPS server, the investigations; then big generated ones, followed in headless Chrome
 ```
 
 The tests run their servers with an empty home folder, so your own Wireshark preferences and

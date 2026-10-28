@@ -1,15 +1,16 @@
 // The live view of a big, busy capture: newer packets show provisionally within about two seconds
-// while full reads of the file lag behind, become exact once the capture stops, and small captures
-// never show provisional packets. With a display filter the newest rows keep coming; slices that
-// can't be written leave the exact rows alone; the profile's and custom columns read as in full,
-// also after an extension changes a field; a final read that fails leaves newer packets
-// provisional and says so; and when memory is short, full reads wait, matches that later packets
-// change are listed anew, reads in place don't fail requests in flight, and one killed for memory
-// lists the file from slices without blaming an extension. A full read that dies after the stop,
-// with the final read still to come, leaves it to that one (test/holding-sharkd.mjs holds and
-// kills it). A server ends on SIGHUP as on SIGTERM, also right as its URL is out, and removes
-// slices killed ones left. dumpcap is test/fake-dumpcap.mjs, which writes generated traffic. The
-// packet list's marking is checked in headless Chrome when there is one.
+// while full reads of the file lag behind, are read ahead only while a list shows its end, become
+// exact once the capture stops, and small captures never show provisional packets. With a display
+// filter the newest rows keep coming; slices that can't be written leave the exact rows alone; the
+// profile's and custom columns read as in full, also after an extension changes a field; a final
+// read that fails leaves newer packets provisional and says so; and when memory is short, full
+// reads wait, matches that later packets change are listed anew, reads in place don't fail
+// requests in flight, and one killed for memory lists the file from slices without blaming an
+// extension. A full read that dies after the stop, with the final read still to come, leaves it to
+// that one (test/holding-sharkd.mjs holds and kills it). A server ends on SIGHUP as on SIGTERM,
+// also right as its URL is out, and removes slices killed ones left. dumpcap is
+// test/fake-dumpcap.mjs, which writes generated traffic. The packet list's marking is checked in
+// headless Chrome when there is one.
 // Usage: node test/live-tail.mjs   (after npm run build; CHROME=<path> picks the browser)
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
@@ -253,6 +254,22 @@ try {
     }
     assert.match(exported.text, /^Wrote 4 packets .*; 2 of them are newer packets of the live capture, not read in full yet/);
     assert.doesNotMatch(exported.text, /these results cover/);
+  });
+
+  await check("with no list showing its end, the rows it gains aren't read ahead: no slices are written", async () => {
+    /** The number of the newest slice written so far. */
+    const newest = () => {
+      const folder = readdirSync(wb.captureDir).find((n) => n.startsWith(".wirebuddy-slices-"));
+      return Math.max(0, ...(folder ? readdirSync(join(wb.captureDir, folder)).map((f) => parseInt(f) || 0) : []));
+    };
+    // A list that showed its end has them read ahead a few seconds more
+    await sleep(5000);
+    const before = newest();
+    let after = before;
+    for (const end = Date.now() + 4000; Date.now() < end; await sleep(50)) after = Math.max(after, newest());
+    const s = await state();
+    assert.ok(s.tail?.displayed > 0 && s.capture.status === "running", JSON.stringify({ tail: s.tail, capture: s.capture.status }));
+    assert.equal(after - before, 0, `${after - before} slices written`);
   });
 
   await check("the packet list marks provisional rows, the status bar counts them (headless Chrome)", async () => {
