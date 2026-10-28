@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-28
+
 - Install from npm: `npm install -g wirebuddy`, or `claude mcp add wirebuddy -- npx -y wirebuddy --mcp`
 
 ## [0.10.1] - 2026-10-28
@@ -55,7 +57,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/dngames/wirebuddy/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/dngames/wirebuddy/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dngames/wirebuddy/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/dngames/wirebuddy/releases/tag/v0.9.0

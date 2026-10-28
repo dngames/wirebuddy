@@ -1,6 +1,6 @@
 {
   "name": "wirebuddy",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "A lightweight Wireshark-style packet viewer for the browser, with live capture and MCP tools so an AI agent can look at the same capture as you",
   "keywords": [
     "wireshark",
