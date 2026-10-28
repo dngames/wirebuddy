@@ -1,5 +1,5 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
-// Generates its own ICMP traffic with ping, and TCP with the robot-arm example.
+// Generates its own ICMP traffic with ping, and TCP with the robot-arm and ct-archive examples.
 // test/live-tail.mjs covers captures big enough for provisional packets.
 // Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
@@ -62,6 +62,26 @@ async function waitIdle(timeoutMs) {
     await sleep(250);
   }
   throw new Error("capture did not stop");
+}
+
+/** An MCP client of a WireBuddy of its own that captures into `dir`, and its tools: text, or they throw. */
+async function agent(dir) {
+  const client = new Client({ name: "live-smoke", version: "0" });
+  await client.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0", "--capture-dir", dir],
+      env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
+      stderr: "ignore",
+    }),
+  );
+  const tool = async (name, args) => {
+    const r = await client.callTool({ name, arguments: args });
+    const text = r.content.map((c) => c.text).join("\n");
+    if (r.isError) throw new Error(`${name}: ${text}`);
+    return text;
+  };
+  return { client, tool };
 }
 
 let failures = 0;
@@ -387,23 +407,49 @@ try {
     }
   });
 
+  await check("ct-archive example: Wireshark exports an image per C-STORE of the exporter, 184 with 124 UIDs", async () => {
+    const example = join(root, "examples/investigations/ct-archive");
+    const probe = createServer();
+    await new Promise((r) => probe.listen(0, "127.0.0.1", r));
+    const port = probe.address().port;
+    await new Promise((r) => probe.close(r));
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-live-ct-"));
+    const { client, tool } = await agent(dir);
+    let archive;
+    try {
+      archive = spawn(process.execPath, [join(example, "device.mjs"), "--port", String(port)], { stdio: ["ignore", "pipe", "ignore"] });
+      await new Promise((resolve, reject) => {
+        archive.stdout.setEncoding("utf8").on("data", (d) => /listening on/.test(d) && resolve());
+        archive.on("exit", (code) => reject(new Error(`archive exited with ${code}`)));
+      });
+      await tool("start_capture", { interface: "lo", filter: `tcp port ${port}`, stop_after_seconds: 30 });
+      await sleep(800);
+      await new Promise((resolve, reject) => {
+        const p = spawn(process.execPath, [join(example, "app.mjs"), "--port", String(port)], { stdio: "ignore" });
+        p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`app.mjs exited with ${code}`))));
+      });
+      await sleep(300);
+      await tool("stop_capture", {});
+      // The objects of the whole file, once the view has read it after the stop
+      let listing = "";
+      for (let i = 0; i < 40 && !/^184 DICOM objects:/.test(listing); i++) {
+        await sleep(250);
+        if (/Capture \(started by agent\): idle/.test(await tool("get_view_state", {}))) listing = await tool("export_objects", { kind: "dicom" });
+      }
+      const uids = [...listing.matchAll(/^frame \d+: \d+-\d+-([\d.]+)\.dcm — /gm)].map((m) => m[1]);
+      assert.equal(uids.length, 184, listing.slice(0, 300));
+      assert.equal(new Set(uids).size, 124);
+    } finally {
+      archive?.kill();
+      await tool("stop_capture", {}).catch(() => {});
+      await client.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   await check("the agent starts a capture over MCP", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-live-mcp-"));
-    const client = new Client({ name: "live-smoke", version: "0" });
-    await client.connect(
-      new StdioClientTransport({
-        command: process.execPath,
-        args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0", "--capture-dir", dir],
-        env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
-        stderr: "ignore",
-      }),
-    );
-    const tool = async (name, args) => {
-      const r = await client.callTool({ name, arguments: args });
-      const text = r.content.map((c) => c.text).join("\n");
-      if (r.isError) throw new Error(`${name}: ${text}`);
-      return text;
-    };
+    const { client, tool } = await agent(dir);
     const pinger = ping(4);
     try {
       const started = await tool("start_capture", { interface: "lo", filter: ECHO, stop_after_seconds: 3 });

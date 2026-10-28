@@ -265,6 +265,34 @@ As in the demo above, the agent:
 The example's [README](examples/investigations/robot-arm/README.md) has the setup and, at its
 end, the solution; `solution/armc` is a dissector and a panel as the agent might write them.
 
+### Example: a CT archive that loses slices
+
+[`examples/investigations/ct-archive`](examples/investigations/ct-archive) is a second one, from
+radiology: an emulated image archive and the reconstruction server's exporter that sends it the CT
+images of a head phantom over DICOM. The exporter gets Success for all 184 images, yet the archive
+holds only 100 of the 160 images of the thin-slice series, and the archive team says it keeps what
+it receives.
+
+> Radiologists say our new 0.625 mm thin-slice head series show up in the archive with only about
+> 100 of 160 images, and the reformats have steps; the 5 mm series from the same scan are complete.
+> Our reconstruction server's exporter, examples/investigations/ct-archive/app.mjs, logs every image
+> as stored with status Success. The archive vendor's conformance statement is
+> examples/investigations/ct-archive/CONFORMANCE.md. The archive is running on port 11112. Capture
+> an export and find out where the slices go.
+
+The agent:
+
+1. captures on `lo` while the exporter runs;
+2. finds the DICOM decoded by Wireshark itself: 184 C-STOREs, each answered with Success;
+3. lists the images with `export_objects` and finds 184 of them with only 124 SOP Instance UIDs;
+4. marks the pairs of slices that share a UID and may write a panel that shows the series as sent
+   and as the archive keeps it;
+5. names the cause, fixes the exporter and, with the archive restarted, captures again: 184 UIDs,
+   and the archive keeps all 160.
+
+The example's [README](examples/investigations/ct-archive/README.md) has the setup and the
+solution; `solution/ctseries` is the panel.
+
 ### MCP tools
 
 | Tool | What it does |
@@ -362,8 +390,8 @@ the questions you asked it.
 npm run build
 npm test               # unit checks, the capture file reader, live slices against full reads, the HTTP API, MCP tools and panels
 npm run test:browser   # panels and the examples in headless Chrome (skipped without Chrome)
-npm run test:examples  # the robot-arm investigation's bug and its fix, over loopback without a capture
-npm run test:live      # live captures on loopback: pings 127.0.0.1, a local HTTPS server, the robot arm; then a big generated one
+npm run test:examples  # the investigations' bugs and their fixes, over loopback without a capture
+npm run test:live      # live captures on loopback: pings, a local HTTPS server, the investigations; then a big generated one
 ```
 
 The tests run their servers with an empty home folder, so your own Wireshark preferences and

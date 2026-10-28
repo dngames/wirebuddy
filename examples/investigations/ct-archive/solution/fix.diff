@@ -1,0 +1,11 @@
+--- a/examples/investigations/ct-archive/app.mjs
++++ b/examples/investigations/ct-archive/app.mjs
+@@ -401,7 +401,7 @@
+     let stored = 0;
+     for (const slice of slices(series)) {
+       // Same slice, same UID: a re-sent series replaces itself in the archive
+-      const sopUid = `${series.uid}.${Math.round(slice.location)}`; // whole mm: ".05" would be a component with a leading zero
++      const sopUid = `${series.uid}.${slice.instance}`;
+       const status = await archive.store(++sent, sopUid, dataset(series, slice, sopUid));
+       if (status === SUCCESS) stored++;
+       else failed.push(`series ${series.number} image ${slice.instance}: ${hex(status)}`);

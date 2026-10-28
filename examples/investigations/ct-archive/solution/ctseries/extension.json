@@ -1,0 +1,10 @@
+{
+  "label": "CT series",
+  "version": "1",
+  "description": "Shows the CT images sent over DICOM: an axial viewer per series, sagittal reformats as sent and as the archive keeps them, and every C-STORE with the SOP Instance UIDs sent more than once",
+  "panel": {
+    "title": "CT series",
+    "size": [1000, 660],
+    "offer": { "filter": "dicom", "text": "Show the CT series" }
+  }
+}

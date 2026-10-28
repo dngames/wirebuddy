@@ -1,0 +1,115 @@
+body {
+  overflow: hidden;
+}
+
+.bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--wb-border);
+}
+
+.series,
+.windows {
+  display: flex;
+}
+
+.bar button {
+  padding: 3px 10px;
+  border: 1px solid var(--wb-border);
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bar button + button {
+  margin-left: -1px;
+}
+
+.bar button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.bar button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.bar button.on {
+  position: relative;
+  border-color: var(--wb-accent);
+  background: color-mix(in srgb, var(--wb-accent) 16%, var(--wb-bg));
+}
+
+.association {
+  padding: 2px 4px;
+  border: 1px solid var(--wb-border);
+  border-radius: 4px;
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.slice {
+  flex: 1;
+  min-width: 80px;
+}
+
+.view {
+  position: absolute;
+  top: 37px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.view canvas {
+  touch-action: none;
+}
+
+.readout {
+  position: absolute;
+  max-width: 380px;
+  padding: 6px 8px;
+  border: 1px solid var(--wb-border);
+  border-radius: 6px;
+  background: var(--wb-bg);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.readout .head {
+  font-weight: 600;
+}
+
+.readout .muted {
+  color: var(--wb-muted);
+}
+
+.readout .bad {
+  color: #d03b3b;
+}
+
+.note {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  padding: 0 16px;
+  color: var(--wb-muted);
+  text-align: center;
+  pointer-events: none;
+}

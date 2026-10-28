@@ -1,7 +1,7 @@
 // The example panels in a real browser, the way the agent works with them: each of
-// examples/extensions and the robot-arm investigation's solution copied into the extensions
-// folder, tested on its fixture from test/media and opened over MCP in WireBuddy's UI in
-// headless Chrome, then checked from inside its frame over the DevTools protocol.
+// examples/extensions and the investigations' solutions (robot-arm, ct-archive) copied into the
+// extensions folder, tested on its fixture from test/media and opened over MCP in WireBuddy's UI
+// in headless Chrome, then checked from inside its frame over the DevTools protocol.
 // Usage: node test/browser.mjs [--verbose] [--shots <dir>]   (after npm run build; skipped without Chrome)
 // CHROME=<path> picks the browser.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
+import { writeCtCapture } from "./media/ct-archive.mjs";
 import { writeHttpGallery } from "./media/http-gallery.mjs";
 import { SCANS, writeLidarCapture } from "./media/lidar-wbpc.mjs";
 import { writeArmCapture } from "./media/robot-arm.mjs";
@@ -58,6 +59,8 @@ for (const name of ["http-gallery", "rtp-video", "lidar-wbpc"]) {
 }
 cpSync(join(root, "examples/investigations/robot-arm/solution/armc"), join(extDir, "armc"), { recursive: true });
 tighten(join(extDir, "armc"));
+cpSync(join(root, "examples/investigations/ct-archive/solution/ctseries"), join(extDir, "ctseries"), { recursive: true });
+tighten(join(extDir, "ctseries"));
 const fixtures = join(home, "fixtures");
 mkdirSync(fixtures);
 const files = writeHttpGallery(join(fixtures, "http-gallery.pcap"));
@@ -65,6 +68,9 @@ const streams = writeRtpCapture(join(fixtures, "rtp-h264.pcap"));
 const scans = writeLidarCapture(join(fixtures, "lidar-wbpc.pcap"));
 const arm = writeArmCapture(join(fixtures, "robot-arm.pcap"));
 const armFixed = writeArmCapture(join(fixtures, "robot-arm-fixed.pcap"), { fixed: true });
+const ct = writeCtCapture(join(fixtures, "ct-archive.pcap"));
+const ctFixed = writeCtCapture(join(fixtures, "ct-archive-fixed.pcap"), { fixed: true });
+const ctThenFixed = writeCtCapture(join(fixtures, "ct-archive-then-fixed.pcap"), { thenFixed: true });
 
 const client = new Client({ name: "browser-test", version: "0" });
 await client.connect(
@@ -432,6 +438,157 @@ try {
     assert.equal(errors, "");
     await finish("armc", frame);
     return `p50 ${slow.p50} ms at ${slow.rate} commands/s, fixed ${fast.p50} ms at ${fast.rate}/s, ${slow.lit} pixels lit of ${slow.size}`;
+  });
+
+  await check("ct-archive: the ctseries solution shows the series as sent and as kept, the repeated UIDs, then the fix", async () => {
+    // What the agent finds first: an export object per C-STORE, fewer UIDs than objects
+    await tool("open_capture", { path: join(fixtures, "ct-archive.pcap") });
+    const offered = await until(async () => (await api("/api/state")).panelOffers.some((o) => o.name === "ctseries") || null);
+    assert.ok(offered, "the panel is not offered for the capture");
+    const listing = await tool("export_objects", { kind: "dicom" });
+    const uids = [...listing.matchAll(/^frame \d+: \d+-\d+-([\d.]+)\.dcm — /gm)].map((m) => m[1]);
+    assert.equal(uids.length, ct.stores.length, listing.slice(0, 300));
+    assert.equal(new Set(uids).size, ct.uids);
+    const { frame } = await open("ctseries", "ct-archive.pcap");
+    let errors = "";
+    /** The panel's status line, its associations, its series buttons, and its pixels: lit, and of the collision red. */
+    const look = async () => {
+      const s = await tool("panel", { action: "status", name: "ctseries" });
+      if (/Errors \[panel output\]/.test(s)) errors += s;
+      const m = /Status \[panel output, untrusted\]: "(?:Association (\d+) of \d+ · )?(\d+) C-STOREs · (\d+) SOP Instance UIDs · (\d+|none) overwritten"/.exec(s);
+      const px = await frame.evaluate(`(() => {
+        const c = document.querySelector(".view canvas");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let lit = 0, red = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] !== d[0] || d[i + 1] !== d[1] || d[i + 2] !== d[2]) lit++;
+          if (Math.abs(d[i] - 0xd0) < 8 && Math.abs(d[i + 1] - 0x3b) < 8 && Math.abs(d[i + 2] - 0x3b) < 8) red++;
+        }
+        const buttons = [...document.querySelectorAll(".series button")];
+        const series = buttons.map((b) => b.textContent + (b.classList.contains("on") ? " *" : ""));
+        const picker = document.querySelector(".association");
+        return { lit, red, series, titles: buttons.map((b) => b.title), associations: picker.hidden ? 1 : picker.options.length, slice: document.querySelector(".slice").value };
+      })()`);
+      return { association: Number(m?.[1] ?? 1), stores: Number(m?.[2]), uids: Number(m?.[3]), overwritten: m?.[4] === "none" ? 0 : Number(m?.[4]), ...px, status: s.split("\n")[0] };
+    };
+    /** A snapshot over MCP: the PNG and how many of its pixels are not transparent. */
+    const snapshot = async () => {
+      const snap = await client.callTool({ name: "panel", arguments: { action: "snapshot", name: "ctseries" } });
+      const png = Buffer.from(snap.content.find((c) => c.type === "image")?.data ?? "", "base64");
+      assert.ok(!snap.isError && png.subarray(1, 4).toString() === "PNG", snap.content[0].text);
+      const opaque = await page.evaluate(`(async () => {
+        const bytes = Uint8Array.from(atob("${png.toString("base64")}"), (c) => c.charCodeAt(0));
+        const image = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+        const g = new OffscreenCanvas(image.width, image.height).getContext("2d");
+        g.drawImage(image, 0, 0);
+        const d = g.getImageData(0, 0, image.width, image.height).data;
+        let n = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+        return n;
+      })()`);
+      return { png, opaque };
+    };
+    const buggy = await until(async () => {
+      const l = await look();
+      return { ...l, done: l.stores === ct.stores.length && l.uids === ct.uids && l.series.length === 2 && l.lit > 50000 };
+    }, 60000);
+    assert.equal(errors, "");
+    assert.ok(buggy.done && buggy.overwritten === ct.overwritten, `${JSON.stringify(buggy)}, generated ${ct.uids} UIDs`);
+    assert.deepEqual(buggy.series, ["Series 2 · 5 mm", "Series 3 · 0.625 mm *"], "the thin series, with the lost images, first");
+    assert.ok(buggy.red > 2000, JSON.stringify(buggy));
+    const { png, opaque } = await snapshot();
+    assert.ok(opaque > 50000, `${opaque} pixels in the snapshot`);
+    if (values.shots) writeFileSync(join(values.shots, "ctseries-snapshot.png"), png);
+    // An overwritten C-STORE in the strip: its readout on hover, its packet selected on a click
+    const src = (await api("/api/state")).panels.find((x) => x.name === "ctseries").src;
+    const box = await page.evaluate(`(() => {
+      const r = document.querySelector(${JSON.stringify(`iframe[src^="${src}"]`)}).getBoundingClientRect();
+      return { x: r.left, y: r.top };
+    })()`);
+    const tick = await frame.evaluate(`(() => {
+      const c = document.querySelector(".view canvas");
+      const k = c.width / c.clientWidth;
+      const at = c.getBoundingClientRect();
+      const y = Math.round(c.height - 35 * k);
+      const row = c.getContext("2d").getImageData(0, y, c.width, 1).data;
+      for (let x = 0; x < c.width; x++) if (Math.abs(row[x * 4] - 0xd0) < 8 && Math.abs(row[x * 4 + 1] - 0x3b) < 8) return { x: at.left + x / k + 1, y: at.top + y / k };
+      return null;
+    })()`);
+    assert.ok(tick, "no red C-STORE in the strip");
+    const at = { x: box.x + tick.x, y: box.y + tick.y };
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...at });
+    const tip = await until(() => frame.evaluate(`(() => { const r = document.querySelector(".readout"); return !r.hidden && r.textContent; })()`));
+    assert.match(tip, /^C-STORE (\d+) · frame (\d+) · .*Same UID as C-STORE \d+ \(instance \d+, [\d.]+ mm\): overwritten/, tip);
+    await screenshot("ctseries-collision");
+    await page.send("Input.dispatchMouseEvent", { type: "mousePressed", ...at, button: "left", clickCount: 1 });
+    await page.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", clickCount: 1 });
+    const [, n, shown] = /^C-STORE (\d+) · frame (\d+)/.exec(tip).map(Number);
+    const store = ct.stores[n - 1];
+    assert.equal(shown, store.frame, `C-STORE ${n} ends in frame ${store.frame}`);
+    const selected = await until(async () => (await api("/api/state")).selected === store.frame || null);
+    assert.ok(selected, `frame ${store.frame} was not selected`);
+    const picked = await until(async () => {
+      const l = await look();
+      return { ...l, done: l.slice === String(store.instance - 1) };
+    });
+    assert.ok(picked.done, `the panel does not show instance ${store.instance}: ${JSON.stringify(picked)}`);
+    // No capture, then the fixed exporter's: the panel starts over
+    await api("/api/close", {});
+    const empty = await until(async () => {
+      const l = await look();
+      const note = await frame.evaluate(`(() => { const n = document.querySelector(".note"); return n.hidden ? "" : n.textContent; })()`);
+      return { ...l, note, done: l.lit === 0 && /^Open a capture with DICOM/.test(note) };
+    });
+    assert.ok(empty.done, JSON.stringify(empty));
+    await tool("open_capture", { path: join(fixtures, "ct-archive-fixed.pcap") });
+    const fixed = await until(async () => {
+      const l = await look();
+      return { ...l, done: l.stores === ctFixed.stores.length && l.uids === ctFixed.uids && l.lit > 50000 };
+    }, 60000);
+    assert.equal(errors, "");
+    assert.ok(fixed.done && fixed.overwritten === 0 && fixed.uids === fixed.stores, JSON.stringify(fixed));
+    assert.equal(fixed.red, 0, "nothing red without repeated UIDs");
+    await screenshot("ctseries-fixed");
+    // Both exports in one capture: an association each, the latest shown, the other one picked
+    await tool("open_capture", { path: join(fixtures, "ct-archive-then-fixed.pcap") });
+    const [before, after] = ctThenFixed.exports;
+    const latest = await until(async () => {
+      const l = await look();
+      return { ...l, done: l.association === 2 && l.stores === after.stores.length && l.uids === after.uids && l.lit > 50000 };
+    }, 60000);
+    assert.ok(latest.done && latest.associations === 2 && latest.overwritten === 0, JSON.stringify(latest));
+    assert.deepEqual(latest.titles, ["Head 5.0: 24 images sent, 24 kept", "Head 0.625: 160 images sent, 160 kept"]);
+    await frame.evaluate(`(() => {
+      const p = document.querySelector(".association");
+      p.value = "0";
+      p.dispatchEvent(new Event("change"));
+    })()`);
+    const first = await until(async () => {
+      const l = await look();
+      return { ...l, done: l.association === 1 && l.uids === before.uids };
+    });
+    assert.ok(first.done && first.stores === before.stores.length && first.overwritten === before.overwritten, JSON.stringify(first));
+    assert.deepEqual(first.titles, ["Head 5.0: 24 images sent, 24 kept", "Head 0.625: 160 images sent, 100 kept"]);
+    // A C-STORE of the other association selected in WireBuddy: the panel goes there
+    const later = after.stores[100];
+    await tool("goto_frame", { frame: later.frame });
+    const followed = await until(async () => {
+      const l = await look();
+      return { ...l, done: l.association === 2 && l.slice === String(later.instance - 1) };
+    });
+    assert.ok(followed.done, JSON.stringify(followed));
+    assert.equal(errors, "");
+    // Hidden, the panel gets no animation frames: a snapshot paints the canvas all the same
+    await frame.evaluate(`(() => {
+      window.requestAnimationFrame = () => 0;
+      const c = document.querySelector(".view canvas");
+      c.width = c.width;
+    })()`);
+    assert.equal((await look()).lit, 0, "the canvas is cleared");
+    const hidden = await snapshot();
+    assert.ok(hidden.opaque > 50000, `${hidden.opaque} pixels in the snapshot of the hidden panel`);
+    await finish("ctseries", frame);
+    return `${buggy.uids} SOP Instance UIDs in ${buggy.stores} C-STOREs, ${buggy.overwritten} overwritten; fixed ${fixed.uids}; ${buggy.lit} pixels lit`;
   });
 } finally {
   page?.close();

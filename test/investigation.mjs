@@ -1,10 +1,13 @@
-// The robot-arm investigation example without a capture: the emulated controller speaks ARMC v1
+// The investigation examples without a capture. Robot arm: the emulated controller speaks ARMC v1
 // as its PROTOCOL.md says, the app as shipped falls behind its rate, and solution/fix.diff fixes it.
+// CT archive: the archive answers as DICOM PS3.8 and its CONFORMANCE.md say, the exporter as shipped
+// gets Success for every image but the archive keeps 100 of the 160 thin slices, and
+// solution/fix.diff makes it keep them all, next to the old images in an archive not restarted.
 // Usage: node test/investigation.mjs   (loopback TCP and UDP only, no capture)
 import { execFileSync, spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { connect, createServer } from "node:net";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +43,8 @@ async function freePort(udp) {
   await new Promise((r) => s.close(r));
   return port;
 }
+
+// --- Robot arm
 
 /** An ARMC message: 8-byte header, then the payload. */
 function message(type, seq, payload = Buffer.alloc(0), { magic = "AM", version = 1 } = {}) {
@@ -260,6 +265,394 @@ try {
 } finally {
   device.kill();
   rmSync(work, { recursive: true, force: true });
+}
+
+// --- CT archive
+
+const ct = join(root, "examples/investigations/ct-archive");
+const UID = {
+  context: "1.2.840.10008.3.1.1.1",
+  ct: "1.2.840.10008.5.1.4.1.1.2",
+  mr: "1.2.840.10008.5.1.4.1.1.4",
+  verification: "1.2.840.10008.1.1",
+  explicit: "1.2.840.10008.1.2.1",
+  implicit: "1.2.840.10008.1.2",
+  jpeg: "1.2.840.10008.1.2.4.50",
+};
+const TEST_SERIES = "2.25.271828182845904523536";
+const ascii = (s) => Buffer.from(s, "latin1");
+const u16 = (n) => Buffer.from([n & 0xff, n >> 8]);
+
+function pdu(type, body) {
+  const head = Buffer.alloc(6);
+  head[0] = type;
+  head.writeUInt32BE(body.length, 2);
+  return Buffer.concat([head, body]);
+}
+function item(type, body) {
+  const head = Buffer.alloc(4);
+  head[0] = type;
+  head.writeUInt16BE(body.length, 2);
+  return Buffer.concat([head, body]);
+}
+function items(b, at) {
+  const out = [];
+  for (; at + 4 <= b.length; at += 4 + b.readUInt16BE(at + 2)) out.push({ type: b[at], value: b.subarray(at + 4, at + 4 + b.readUInt16BE(at + 2)) });
+  return out;
+}
+
+/** An A-ASSOCIATE-RQ; contexts as [id, abstract syntax, ...transfer syntaxes]. */
+function associateRq({ called = "ARCHIVE", version = 1, context = UID.context, contexts = [[1, UID.ct, UID.explicit]] } = {}) {
+  const head = Buffer.alloc(68);
+  head.writeUInt16BE(version, 0);
+  head.write(called.padEnd(16), 4, "latin1");
+  head.write("TESTSCU".padEnd(16), 20, "latin1");
+  const max = Buffer.alloc(4);
+  max.writeUInt32BE(16384);
+  const proposed = contexts.map(([id, abstract, ...syntaxes]) => item(0x20, Buffer.concat([Buffer.from([id, 0, 0, 0]), item(0x30, ascii(abstract)), ...syntaxes.map((s) => item(0x40, ascii(s)))])));
+  return pdu(1, Buffer.concat([head, item(0x10, ascii(context)), ...proposed, item(0x50, Buffer.concat([item(0x51, max), item(0x52, ascii("2.25.1"))]))]));
+}
+
+/** An A-ASSOCIATE-AC: the called AE title, each context's result and transfer syntax, the max PDU. */
+function accepted(p) {
+  assert.equal(p.type, 2, `PDU type ${p.type} instead of A-ASSOCIATE-AC`);
+  const out = { called: p.body.toString("latin1", 4, 20).trim(), contexts: {}, maxPdu: 0 };
+  for (const { type, value } of items(p.body, 68)) {
+    if (type === 0x21) out.contexts[value[0]] = [value[2], items(value, 4).find((s) => s.type === 0x40)?.value.toString("latin1")];
+    if (type === 0x50) out.maxPdu = items(value, 0).find((s) => s.type === 0x51)?.value.readUInt32BE(0);
+  }
+  return out;
+}
+
+/** Elements [tag, vr, value] in Explicit or Implicit VR Little Endian. */
+function encode(elements, explicit) {
+  return Buffer.concat(
+    elements.map(([tag, vr, value]) => {
+      const v = typeof value === "string" ? ascii(value.length % 2 ? value + (vr === "UI" ? "\0" : " ") : value) : value;
+      const long = explicit && (vr === "OW" || vr === "OB");
+      const head = Buffer.alloc(long ? 12 : 8);
+      head.writeUInt16LE(tag >>> 16, 0);
+      head.writeUInt16LE(tag & 0xffff, 2);
+      if (!explicit) head.writeUInt32LE(v.length, 4);
+      else {
+        head.write(vr, 4, "latin1");
+        if (long) head.writeUInt32LE(v.length, 8);
+        else head.writeUInt16LE(v.length, 6);
+      }
+      return Buffer.concat([head, v]);
+    }),
+  );
+}
+
+/** A command set (Implicit VR Little Endian), its group length first. */
+function command(fields) {
+  const body = encode(fields, false);
+  const length = Buffer.alloc(4);
+  length.writeUInt32LE(body.length);
+  return Buffer.concat([encode([[0, "UL", length]], false), body]);
+}
+const storeRq = (id, sop, sopClass = UID.ct) =>
+  command([
+    [0x00000002, "UI", sopClass],
+    [0x00000100, "US", u16(0x0001)],
+    [0x00000110, "US", u16(id)],
+    [0x00000700, "US", u16(0)],
+    [0x00000800, "US", u16(0)],
+    [0x00001000, "UI", sop],
+  ]);
+const echoRq = (id) =>
+  command([
+    [0x00000002, "UI", UID.verification],
+    [0x00000100, "US", u16(0x0030)],
+    [0x00000110, "US", u16(id)],
+    [0x00000800, "US", u16(0x0101)],
+  ]);
+
+/** A small CT dataset of series 7 with a sequence of undefined length in it. */
+function ctDataset(sop, instance, explicit) {
+  const tag = (t, length) => {
+    const b = Buffer.alloc(8);
+    b.writeUInt16LE(t >>> 16, 0);
+    b.writeUInt16LE(t & 0xffff, 2);
+    b.writeUInt32LE(length, 4);
+    return b;
+  };
+  const sq = explicit ? Buffer.from([0x08, 0x00, 0x40, 0x11, 0x53, 0x51, 0, 0, 0xff, 0xff, 0xff, 0xff]) : tag(0x00081140, 0xffffffff);
+  return Buffer.concat([
+    encode([[0x00080016, "UI", UID.ct], [0x00080018, "UI", sop]], explicit),
+    sq,
+    tag(0xfffee000, 0xffffffff),
+    encode([[0x00081150, "UI", UID.ct]], explicit),
+    tag(0xfffee00d, 0),
+    tag(0xfffee0dd, 0),
+    encode([[0x00180050, "DS", "1"], [0x0020000e, "UI", TEST_SERIES], [0x00200011, "IS", "7"], [0x00200013, "IS", String(instance)], [0x7fe00010, "OW", Buffer.alloc(2048, instance)]], explicit),
+  ]);
+}
+
+/** P-DATA-TF PDUs: the command and dataset cut into PDVs of sizes() bytes, `perPdu` PDVs to a PDU. */
+function pData(context, cmd, data, sizes, perPdu) {
+  const pdvs = [];
+  for (const [bytes, isCommand] of [[cmd, true], [data, false]]) {
+    for (let at = 0; bytes && at < bytes.length; ) {
+      const part = bytes.subarray(at, at + sizes());
+      at += part.length;
+      const head = Buffer.alloc(6);
+      head.writeUInt32BE(part.length + 2, 0);
+      head[4] = context;
+      head[5] = (isCommand ? 1 : 0) | (at >= bytes.length ? 2 : 0);
+      pdvs.push(head, part);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < pdvs.length; i += 2 * perPdu) out.push(pdu(4, Buffer.concat(pdvs.slice(i, i + 2 * perPdu))));
+  return Buffer.concat(out);
+}
+
+/** A P-DATA-TF with one command PDV: its context, control header and fields. */
+function response(p) {
+  assert.equal(p.type, 4, `PDU type ${p.type} instead of P-DATA-TF`);
+  const b = p.body.subarray(6, 4 + p.body.readUInt32BE(0));
+  const fields = new Map();
+  for (let at = 0; at + 8 <= b.length; at += 8 + b.readUInt32LE(at + 4)) fields.set(((b.readUInt16LE(at) << 16) | b.readUInt16LE(at + 2)) >>> 0, b.subarray(at + 8, at + 8 + b.readUInt32LE(at + 4)));
+  const n = (tag) => fields.get(tag)?.readUInt16LE(0);
+  return { context: p.body[4], control: p.body[5], field: n(0x00000100), id: n(0x00000120), dataSet: n(0x00000800), status: n(0x00000900), sop: fields.get(0x00001000)?.toString("latin1").replace(/\0$/, "") };
+}
+
+/** Writes `bytes` in pieces of 1 to 64 bytes, pausing now and then so the archive reads them apart. */
+async function trickle(socket, bytes, rand) {
+  for (let at = 0, k = 0; at < bytes.length; k++) {
+    const n = 1 + Math.floor(rand() * 64);
+    socket.write(bytes.subarray(at, at + n));
+    at += n;
+    if (k % 8 === 7) await sleep(1);
+  }
+}
+
+/** A raw DICOM connection that collects the archive's PDUs. */
+async function dicomClient(port) {
+  const socket = connect({ host: "127.0.0.1", port, noDelay: true });
+  await new Promise((resolve, reject) => socket.once("connect", resolve).once("error", reject));
+  socket.on("error", () => {});
+  const pdus = [];
+  let buf = Buffer.alloc(0);
+  let closed = false;
+  socket.on("data", (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 6 && buf.length >= 6 + buf.readUInt32BE(2)) {
+      const n = 6 + buf.readUInt32BE(2);
+      pdus.push({ type: buf[0], body: buf.subarray(6, n) });
+      buf = buf.subarray(n);
+    }
+  });
+  socket.on("close", () => (closed = true));
+  const until = async (ok, what) => {
+    for (const end = Date.now() + 2000; !ok() && Date.now() < end; ) await sleep(5);
+    assert.ok(ok(), what);
+  };
+  return {
+    socket,
+    async next() {
+      await until(() => pdus.length > 0, "no PDU from the archive");
+      return pdus.shift();
+    },
+    closed: () => until(() => closed, "the archive did not close the connection"),
+  };
+}
+
+function startArchive(port) {
+  const p = spawn(process.execPath, [join(ct, "device.mjs"), "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"] });
+  const archive = { p, log: "" };
+  archive.ready = new Promise((resolve, reject) => {
+    p.stdout.setEncoding("utf8").on("data", (d) => {
+      archive.log += d;
+      if (/listening on/.test(archive.log)) resolve();
+    });
+    p.stderr.setEncoding("utf8").on("data", (d) => (archive.log += d));
+    p.on("exit", (code) => reject(new Error(`archive exited with ${code}: ${archive.log}`)));
+  });
+  return archive;
+}
+
+/** The first line of the archive's log after `from` characters that matches `re`. */
+async function logged(archive, re, from) {
+  for (const end = Date.now() + 3000; Date.now() < end; await sleep(10)) {
+    const m = re.exec(archive.log.slice(from));
+    if (m) return m;
+  }
+  throw new Error(`no ${re} in the archive's log:\n${archive.log.slice(from)}`);
+}
+
+/** What the archive holds of the 5 mm and the 0.625 mm series after an export that began at `from`. */
+async function held(archive, from) {
+  const five = await logged(archive, /series 2 \(5 mm\): (\d+) instances/, from);
+  const thin = await logged(archive, /series 3 \(0\.625 mm\): (\d+) instances/, from);
+  return [Number(five[1]), Number(thin[1])];
+}
+
+/** Runs the exporter and reads its summary line. */
+function runExporter(app, port) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [app, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    p.stdout.setEncoding("utf8").on("data", (d) => (out += d));
+    p.stderr.setEncoding("utf8").on("data", (d) => (out += d));
+    const timer = setTimeout(() => p.kill(), 30_000);
+    p.on("exit", (code) => {
+      clearTimeout(timer);
+      const m = /^(\d+) images sent, (\d+) Success$/m.exec(out);
+      if (code !== 0 || !m) return reject(new Error(`app exited with ${code}: ${out}`));
+      resolve({ out, sent: Number(m[1]), success: Number(m[2]) });
+    });
+  });
+}
+
+const archivePort = await freePort(false);
+const archive = startArchive(archivePort);
+let fresh = null;
+const ctWork = mkdtempSync(join(tmpdir(), "wirebuddy-ct-"));
+try {
+  await archive.ready;
+
+  await check("archive rejects associations as PS3.8 says: called AE title, protocol version, application context", async () => {
+    for (const [rq, expect, logs] of [
+      [associateRq({ called: "NOBODY" }), [1, 1, 7], /association rejected, called AE title not recognized \("NOBODY"\)/],
+      [associateRq({ version: 2 }), [1, 2, 2], /association rejected, protocol version not supported/],
+      [associateRq({ context: "1.2.3.4" }), [1, 1, 2], /association rejected, application context not supported/],
+    ]) {
+      const from = archive.log.length;
+      const c = await dicomClient(archivePort);
+      try {
+        c.socket.write(rq);
+        const rj = await c.next();
+        assert.equal(rj.type, 3, `PDU type ${rj.type} instead of A-ASSOCIATE-RJ`);
+        assert.deepEqual([...rj.body.subarray(1, 4)], expect, "result, source, reason");
+        await c.closed();
+        await logged(archive, logs, from);
+      } finally {
+        c.socket.destroy();
+      }
+    }
+  });
+
+  await check("archive accepts CT Image Storage in Explicit VR before Implicit, refuses other syntaxes, takes PDUs of 16384", async () => {
+    const c = await dicomClient(archivePort);
+    try {
+      c.socket.write(associateRq({ contexts: [[1, UID.ct, UID.jpeg, UID.implicit, UID.explicit], [3, UID.ct, UID.implicit], [5, UID.mr, UID.explicit], [7, UID.ct, UID.jpeg], [9, UID.verification, UID.implicit]] }));
+      const ac = accepted(await c.next());
+      assert.equal(ac.called, "ARCHIVE");
+      assert.equal(ac.maxPdu, 16384);
+      assert.deepEqual(Object.fromEntries(Object.entries(ac.contexts).map(([id, [result]]) => [id, result])), { 1: 0, 3: 0, 5: 3, 7: 4, 9: 0 }, "0 accepted, 3 abstract syntax, 4 transfer syntaxes not supported");
+      assert.deepEqual([ac.contexts[1][1], ac.contexts[3][1], ac.contexts[9][1]], [UID.explicit, UID.implicit, UID.implicit]);
+    } finally {
+      c.socket.destroy();
+    }
+  });
+
+  await check("archive puts C-STOREs together from PDVs and reads split at any byte, keeps a re-send once, releases", async () => {
+    const from = archive.log.length;
+    const c = await dicomClient(archivePort);
+    let seed = 11;
+    const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const sizes = () => 1 + Math.floor(rand() * 600);
+    const store = async (context, id, sop, data) => {
+      await trickle(c.socket, pData(context, storeRq(id, sop), data, sizes, 3), rand);
+      return response(await c.next());
+    };
+    try {
+      c.socket.write(associateRq({ contexts: [[1, UID.ct, UID.explicit], [3, UID.ct, UID.implicit], [9, UID.verification, UID.implicit]] }));
+      accepted(await c.next());
+      const sop = `${TEST_SERIES}.1`;
+      assert.deepEqual(await store(1, 1, sop, ctDataset(sop, 1, true)), { context: 1, control: 3, field: 0x8001, id: 1, dataSet: 0x0101, status: 0, sop });
+      // The same SOP Instance UID again, in Implicit VR: a corrected re-send
+      assert.equal((await store(3, 2, sop, ctDataset(sop, 2, false))).status, 0);
+      assert.equal((await store(1, 3, `${TEST_SERIES}.3`, ctDataset(`${TEST_SERIES}.3`, 3, true))).status, 0);
+      assert.equal((await store(9, 4, `${TEST_SERIES}.4`, ctDataset(`${TEST_SERIES}.4`, 4, false))).status, 0x0122, "a C-STORE on the Verification context");
+      await trickle(c.socket, pData(9, echoRq(5), null, sizes, 2), rand);
+      const echo = response(await c.next());
+      assert.deepEqual([echo.field, echo.id, echo.status], [0x8030, 5, 0], "C-ECHO-RSP");
+      c.socket.write(pdu(5, Buffer.alloc(4)));
+      assert.equal((await c.next()).type, 6, "A-RELEASE-RP");
+      await c.closed();
+    } finally {
+      c.socket.destroy();
+    }
+    await logged(archive, /released after 4 C-STORE: 3 Success, 1 failed/, from);
+    await logged(archive, /series 7 \(1 mm\): 2 instances/, from);
+  });
+
+  await check("archive aborts on PDUs out of place: P-DATA-TF before an association, an unknown type, one over 16384 bytes", async () => {
+    for (const [associate, bad, reason] of [
+      [false, pdu(4, Buffer.from([0, 0, 0, 2, 1, 3])), 2],
+      [false, pdu(9, Buffer.alloc(4)), 1],
+      [true, pdu(4, Buffer.alloc(16385)), 6],
+    ]) {
+      const c = await dicomClient(archivePort);
+      try {
+        if (associate) {
+          c.socket.write(associateRq());
+          accepted(await c.next());
+        }
+        c.socket.write(bad);
+        const abort = await c.next();
+        assert.equal(abort.type, 7, `PDU type ${abort.type} instead of A-ABORT`);
+        assert.deepEqual([abort.body[2], abort.body[3]], [2, reason], "source, reason");
+        await c.closed();
+      } finally {
+        c.socket.destroy();
+      }
+    }
+  });
+
+  await check("the exporter as shipped: 184 images sent, 184 Success, the archive keeps 24 of 24 and 100 of 160", async () => {
+    const from = archive.log.length;
+    const r = await runExporter(join(ct, "app.mjs"), archivePort);
+    const kept = await held(archive, from);
+    console.log(`     ${r.sent} sent, ${r.success} Success; the archive holds ${kept.join(" and ")}`);
+    assert.deepEqual([r.sent, r.success], [184, 184], r.out);
+    assert.deepEqual(kept, [24, 100]);
+  });
+
+  await check("the exporter runs through a symlinked path and fails without an archive", async () => {
+    symlinkSync(ct, join(ctWork, "linked"));
+    await assert.rejects(runExporter(join(ctWork, "linked/app.mjs"), await freePort(false)), /^Error: app exited with 1: app: connect ECONNREFUSED /);
+  });
+
+  await check("solution/fix.diff changes one line of app.mjs", async () => {
+    const diff = readFileSync(join(ct, "solution/fix.diff"), "utf8");
+    assert.deepEqual([...diff.matchAll(/^\+\+\+ (\S+)/gm)].map((m) => m[1]), ["b/examples/investigations/ct-archive/app.mjs"]);
+    assert.equal(diff.split("\n").filter((l) => /^[-+](?![-+]{2} )/.test(l)).length, 2, "one line out, one in");
+    const dir = join(ctWork, "examples/investigations/ct-archive");
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(join(ct, "app.mjs"), join(dir, "app.mjs"));
+    execFileSync("git", ["apply", join(ct, "solution/fix.diff")], { cwd: ctWork, env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(ctWork) }, stdio: "pipe" });
+    assert.notEqual(readFileSync(join(dir, "app.mjs"), "utf8"), readFileSync(join(ct, "app.mjs"), "utf8"));
+  });
+
+  await check("the fixed exporter to the archive not restarted: the old images of both series stay, 48 and 260", async () => {
+    const from = archive.log.length;
+    const r = await runExporter(join(ctWork, "examples/investigations/ct-archive/app.mjs"), archivePort);
+    assert.deepEqual([r.sent, r.success], [184, 184], r.out);
+    assert.deepEqual(await held(archive, from), [48, 260]);
+  });
+
+  await check("the fixed exporter: the archive keeps 24 and 160, 184 UIDs, and a second export replaces them", async () => {
+    // A fresh archive: the one above holds the old UIDs
+    const port = await freePort(false);
+    fresh = startArchive(port);
+    await fresh.ready;
+    for (const run of [1, 2]) {
+      const from = fresh.log.length;
+      const r = await runExporter(join(ctWork, "examples/investigations/ct-archive/app.mjs"), port);
+      const kept = await held(fresh, from);
+      if (run === 1) console.log(`     ${r.sent} sent, ${r.success} Success; the archive holds ${kept.join(" and ")}`);
+      assert.deepEqual([r.sent, r.success], [184, 184], r.out);
+      assert.deepEqual(kept, [24, 160], `export ${run}`);
+    }
+  });
+} finally {
+  archive.p.kill();
+  fresh?.p.kill();
+  rmSync(ctWork, { recursive: true, force: true });
 }
 console.log(failures ? `${failures} check(s) failed` : "all checks passed");
 process.exit(failures ? 1 : 0);
