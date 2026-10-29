@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-29
+
 - Time references, as in Wireshark's Edit menu, and the agent's `time_references` tool
 - Packet comments: add, edit and delete them as in Wireshark's Edit › Packet Comments, for the agent too; pcapng exports keep them
 
@@ -60,7 +62,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/dngames/wirebuddy/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/dngames/wirebuddy/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/dngames/wirebuddy/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dngames/wirebuddy/compare/v0.9.0...v0.10.0
