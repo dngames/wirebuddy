@@ -6,8 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-29
+
 - File › Export Objects: list the files carried in the traffic and save them to a new folder
 - `export_objects` refuses WireBuddy's own `dist` folder
+- Chrome's ResizeObserver note no longer reaches the agent as a page error
 
 ## [0.12.0] - 2026-10-29
 
@@ -65,7 +68,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/dngames/wirebuddy/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/dngames/wirebuddy/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/dngames/wirebuddy/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/dngames/wirebuddy/compare/v0.10.0...v0.10.1
