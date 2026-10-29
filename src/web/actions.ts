@@ -4,8 +4,9 @@ import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, Extensi
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks, knownFrames } from "./app.ts";
+import { confirmDialog } from "./dialog.ts";
 import { toast, toastError } from "./toast.ts";
-import { sameList, save } from "./util.ts";
+import { fmtInt, sameList, save } from "./util.ts";
 
 // ---------------------------------------------------------------- state sync
 
@@ -371,6 +372,51 @@ export async function markDisplayed(on: boolean): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------- packet comments
+
+/** Delete "…": comment `index` of `frame`, as long as it still reads `old`. */
+export async function deleteComment(frame: number, index: number, old: string): Promise<void> {
+  try {
+    await post("api/comments/delete", { frame, index, old });
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Deleting the comment failed");
+  }
+}
+
+/** Delete packet comments / Delete comments from N packets: those of the selected packets. */
+export async function deleteSelectedComments(): Promise<void> {
+  if (!(await flushSelection())) {
+    toast("error", "The selection isn't settled yet; select the packets again");
+    return;
+  }
+  try {
+    await post("api/comments/delete", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Deleting the comments failed");
+  }
+}
+
+/** Delete All Packet Comments…, the file's too. */
+export async function deleteAllComments(): Promise<void> {
+  if (!(await confirmDialog("Delete All Packet Comments", "Are you sure you want to remove all packet comments?"))) return;
+  try {
+    await post("api/comments/clear", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Deleting the comments failed");
+  }
+}
+
+/** Before the capture goes (`what` makes it go): whether comments edited and not exported may go with it. */
+export async function discardComments(what: string): Promise<boolean> {
+  const n = app.state?.commentEdits ?? 0;
+  if (!n) return true;
+  const text = `The comments edited in ${fmtInt(n)} packet${n === 1 ? "" : "s"} weren't exported: ${what} discards them. File › Save As keeps them in a new pcapng file.`;
+  return confirmDialog("Unsaved Packet Comments", text, "Discard Them");
+}
+
 /** Next/previous marked frame relative to the selection. */
 export function gotoMark(dir: 1 | -1): void {
   const frames = [...app.marks.keys()].sort((a, b) => a - b);
@@ -417,8 +463,9 @@ export function gotoTimeRef(dir: 1 | -1): void {
 
 // -------------------------------------------------------------- files, misc
 
-/** Returns an error message, or null on success. */
+/** Returns an error message, or null on success or when the user keeps the capture. */
 export async function openFile(path: string): Promise<string | null> {
+  if (!(await discardComments("opening a file"))) return null;
   try {
     await post("api/open", { path });
     if (app.conn !== "open") void refreshState();
@@ -429,6 +476,7 @@ export async function openFile(path: string): Promise<string | null> {
 }
 
 export async function closeFile(): Promise<void> {
+  if (!(await discardComments("closing the capture"))) return;
   try {
     await post("api/close", {});
     if (app.conn !== "open") void refreshState();
@@ -446,7 +494,10 @@ export async function openInWireshark(frame?: number | null): Promise<void> {
   }
 }
 
-export async function startCapture(req: CaptureRequest): Promise<boolean> {
+/** `asked`: the user agreed to discard edited comments already. */
+export async function startCapture(req: CaptureRequest, asked = false): Promise<boolean> {
+  // The view opens the capture's file
+  if (!asked && !(await discardComments("starting a capture"))) return false;
   try {
     await post("api/capture/start", req);
     if (app.conn !== "open") void refreshState();

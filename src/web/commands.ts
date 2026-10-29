@@ -5,6 +5,7 @@ import { app, captureActive, hooks } from "./app.ts";
 import { loadInterfaces, restartCaptureClicked } from "./capture.ts";
 import { captureOptionsOpen, openCaptureOptions } from "./dialogs/capopts.ts";
 import { applySelectedAsColumn, collapseAll, expandAll, expandSubtrees, selectedField } from "./details.ts";
+import { openCommentDialog } from "./dialogs/comment.ts";
 import { openConvDialog } from "./dialogs/conv.ts";
 import { openExpertDialog } from "./dialogs/expert.ts";
 import { openExportDialog } from "./dialogs/export.ts";
@@ -108,6 +109,14 @@ export const commands = {
   unsetTimeRefs: { label: "Unset All Time References", shortcut: "Ctrl+Alt+T", enabled: () => hasFile() && timeRefs().length > 0, run: () => void act.clearTimeRefs() },
   nextTimeRef: { label: "Next Time Reference", shortcut: "Ctrl+Alt+N", enabled: otherTimeRef, run: () => act.gotoTimeRef(1) },
   previousTimeRef: { label: "Previous Time Reference", shortcut: "Ctrl+Alt+B", enabled: otherTimeRef, run: () => act.gotoTimeRef(-1) },
+  addComment: {
+    label: "Add New Comment…",
+    tip: "Add a comment to the selected packets",
+    shortcut: "Ctrl+Alt+C",
+    enabled: () => hasFile() && (app.selFrame !== null || app.selRows.length > 0),
+    run: () => openCommentDialog(),
+  },
+  deleteAllComments: { label: "Delete All Packet Comments…", tip: "Remove all packet comments in the capture file", enabled: hasFile, run: () => void act.deleteAllComments() },
 
   // View
   zoomIn: {

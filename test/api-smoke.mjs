@@ -1,7 +1,7 @@
 // End-to-end check of the HTTP API against test/fixtures/http.pcapng.
 // Usage: node test/api-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, chownSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { WebSocket } from "ws";
 import { tmpdir } from "node:os";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import { writeAcmeCapture } from "./acme.mjs";
+import { epb, idb, shb, udpFrame } from "./capgen.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -44,14 +45,38 @@ const base = await new Promise((resolve, reject) => {
   server.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
 });
 
-async function api(path, body) {
-  const res = await fetch(base + path, {
+async function api(path, body, at = base) {
+  const res = await fetch(at + path, {
     method: body === undefined ? "GET" : "POST",
     headers: { "X-WireBuddy-Token": token, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const json = await res.json();
   return { status: res.status, json };
+}
+
+/** Another server, with a home of its own and `extra` in its environment. */
+async function startServer(extra) {
+  const own = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
+  const proc = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token], {
+    stdio: ["ignore", "pipe", "inherit"],
+    env: { ...env, HOME: own, XDG_CONFIG_HOME: join(own, ".config"), XDG_DATA_HOME: join(own, ".local/share"), WIREBUDDY_EXTENSIONS: "", ...extra },
+  });
+  const at = await new Promise((resolve, reject) => {
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (d) => {
+      const m = /UI at (http:\/\/[^/]+)\//.exec(d);
+      if (m) resolve(m[1]);
+    });
+    proc.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
+  });
+  return {
+    api: (path, body) => api(path, body, at),
+    close: () => {
+      proc.kill();
+      rmSync(own, { recursive: true, force: true });
+    },
+  };
 }
 
 let failures = 0;
@@ -517,6 +542,294 @@ try {
     assert.deepEqual(s.marks.map((m) => [m.frame, m.note]), [[2, "keep me"], [9, "keep me"]]);
     assert.deepEqual([s.selected, s.selectedRows], [9, [[3, 8]]]);
     await api("/api/marks/clear", {});
+  });
+
+  /** Packet comments of a capture, frame by frame, as sharkd reads them. */
+  const packetComments = (file) => {
+    const input = [
+      { id: 1, method: "load", params: { file } },
+      { id: 2, method: "frames", params: { column0: "frame.number:0" } },
+    ].map((m) => JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n").join("");
+    const lines = execFileSync("sharkd", ["-"], { input, env, stdio: ["pipe", "pipe", "ignore"], timeout: 20000, maxBuffer: 64 * 1024 * 1024 }).toString().trim().split("\n");
+    return JSON.parse(lines[lines.length - 1]).result.map((r) => r.comments ?? []);
+  };
+  const rowsOf = async (start, count) => (await api(`/api/rows?gen=${(await state()).generation}&start=${start}&count=${count}`)).json.rows;
+  const commentsOf = async (frame) => (await rowsOf(frame - 1, 1))[0].cm;
+
+  await check("packet comments: added, edited and deleted; rows and details show them as Wireshark does", async () => {
+    await api("/api/filter", { filter: "" });
+    const before = await state();
+    const r = await api("/api/comments", { frames: [3, 5, 99], comment: "first\r\nsecond line" });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.deepEqual(r.json.frames, [3, 5]);
+    let s = await state();
+    assert.ok(s.generation > before.generation, "the rows read differently");
+    assert.equal(s.rowsSince, before.rowsSince, "in the same places");
+    assert.equal(s.commentEdits, 2);
+    assert.ok(s.commentRevision > before.commentRevision);
+    const rows = await rowsOf(2, 3);
+    assert.deepEqual(rows.map((x) => x.cm), [["first\nsecond line"], undefined, ["first\nsecond line"]]);
+    let f = (await api("/api/frame?num=3")).json;
+    assert.deepEqual(f.row.cm, ["first\nsecond line"]);
+    const node = f.tree[0];
+    assert.deepEqual([node.l, node.fn, node.f, node.t, node.s], ["Packet comments", "pkt_comment", "pkt_comment", "proto", "Comment"]);
+    assert.deepEqual([node.n[0].l, node.n[0].f, node.n[0].fn], ["first [...]", 'frame.comment == "first"', "frame.comment"]);
+    assert.deepEqual(node.n[0].n.map((x) => x.l), ["first", "second line"]);
+    assert.equal(f.tree[1].fn, "frame");
+    // Add New Comment… on the rows a dialog was opened for
+    const view = { file: s.file, filter: s.filter, generation: s.generation };
+    assert.deepEqual((await api("/api/comments", { comment: 'say "hi" \\ back', frame: 3, rows: [[2, 2]], view })).json.frames, [3]);
+    assert.equal((await api("/api/comments", { comment: "late", frame: 3, rows: [[2, 2]], view: { ...view, file: "/elsewhere.pcapng" } })).status, 409);
+    assert.deepEqual(await commentsOf(3), ["first\nsecond line", 'say "hi" \\ back']);
+    f = (await api("/api/frame?num=3")).json;
+    assert.deepEqual([f.tree[0].n[1].l, f.tree[0].n[1].f], ['say "hi" \\ back', 'frame.comment == "say \\"hi\\" \\\\ back"']);
+    // Edit "…" changes one comment, and "" deletes it as in Wireshark
+    assert.deepEqual((await api("/api/comments/edit", { frame: 3, index: 0, old: "first\nsecond line", comment: "edited" })).json, { frames: [3], count: 1 });
+    assert.deepEqual(await commentsOf(3), ["edited", 'say "hi" \\ back']);
+    // Only the comment chosen: once another one is in its place, nothing changes
+    const moved = await api("/api/comments/edit", { frame: 3, index: 1, old: "edited", comment: "x" });
+    assert.deepEqual([moved.status, moved.json.error], [409, "comment 2 of frame 3 changed meanwhile"]);
+    assert.equal((await api("/api/comments/delete", { frame: 3, index: 1, old: "first\nsecond line" })).status, 409);
+    assert.deepEqual(await commentsOf(3), ["edited", 'say "hi" \\ back']);
+    await api("/api/comments/edit", { frame: 3, index: 0, old: "edited", comment: "" });
+    assert.deepEqual(await commentsOf(3), ['say "hi" \\ back']);
+    const bad = await api("/api/comments/edit", { frame: 3, index: 5, old: "x", comment: "x" });
+    assert.equal(bad.status, 400);
+    assert.match(bad.json.error, /frame 3 has no comment 6/);
+    // A comment is a string: none, or anything else, is refused rather than taken for "" or its text
+    for (const [path, body, name] of [
+      ["/api/comments/edit", { frame: 3, index: 0, old: 'say "hi" \\ back' }, "comment"],
+      ["/api/comments/edit", { frame: 3, index: 0, comment: "y" }, "old"],
+      ["/api/comments/delete", { frame: 3, index: 0 }, "old"],
+      ["/api/comments", { frames: [3], comment: { text: "x" } }, "comment"],
+      ["/api/comments", { frames: [3], comment: ["a", "b"] }, "comment"],
+    ]) {
+      const r = await api(path, body);
+      assert.deepEqual([r.status, r.json.error], [400, `"${name}" must be a string`], JSON.stringify(body));
+    }
+    assert.deepEqual(await commentsOf(3), ['say "hi" \\ back']);
+    // Delete "…", and a frame without comments loses its node
+    assert.deepEqual((await api("/api/comments/delete", { frame: 5, index: 0, old: "first\nsecond line" })).json.frames, [5]);
+    assert.equal(await commentsOf(5), undefined);
+    assert.ok(!(await api("/api/frame?num=5")).json.tree.some((n) => n.fn === "pkt_comment"));
+    // Control characters but newlines become "?"; empty and long comments are refused
+    await api("/api/comments", { frames: [7], comment: "tab\there\u0001" });
+    assert.deepEqual(await commentsOf(7), ["tab?here?"]);
+    assert.match((await api("/api/comments", { frames: [7], comment: "" })).json.error, /empty/);
+    assert.match((await api("/api/comments", { frames: [7], comment: "x".repeat(2001) })).json.error, /at most 2000 characters/);
+    // Delete packet comments of the selected packets
+    await api("/api/select", { frame: 7, rows: [[2, 6]] });
+    assert.deepEqual((await api("/api/comments/delete", {})).json.frames, [3, 7]);
+    assert.deepEqual((await rowsOf(0, 10)).filter((x) => x.cm).map((x) => x.num), []);
+    // The user's edits reach the agent
+    const texts = (await api("/api/events/take", {})).json.events.map((e) => `${e.level} ${e.text}`);
+    for (const t of [
+      'INFO The user added the packet comment "first\\r\\nsecond line" to frames 3, 5',
+      'INFO The user changed comment 1 of frame 3 to "edited"',
+      "INFO The user deleted comment 1 of frame 3",
+      "INFO The user deleted comment 1 of frame 5",
+      "INFO The user deleted the packet comments of frames 3, 7",
+    ]) {
+      assert.ok(texts.includes(t), `${t}\nin\n${texts.join("\n")}`);
+    }
+    assert.ok(texts.some((t) => /^ERROR Editing a packet comment failed: frame 3 has no comment 6/.test(t)), texts.join("\n"));
+  });
+
+  await check("packet comments: pcapng exports write them exactly, the file's own ones too, several on a frame; pcap has none", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-comments-"));
+    try {
+      // Two comments on frame 2 and one on 4 and 8 in the file itself
+      const once = join(dir, "once.pcapng");
+      const source = join(dir, "commented.pcapng");
+      execFileSync("editcap", ["-a", "2:file one", fixture, once]);
+      execFileSync("editcap", ["--preserve-packet-comments", "-a", "2:file two", "-a", "4:file four", "-a", "8:file eight", once, source]);
+      assert.equal((await api("/api/open", { path: source })).status, 200);
+      assert.deepEqual(await commentsOf(2), ["file one", "file two"]);
+      assert.equal((await state()).commentEdits, 0);
+      await api("/api/comments", { frames: [2], comment: "new on 2" });
+      await api("/api/comments/edit", { frame: 4, index: 0, old: "file four", comment: "four edited" });
+      for (const c of ["a", "b", "c"]) await api("/api/comments", { frames: [6], comment: c });
+      await api("/api/comments/delete", { frame: 2, index: 1, old: "file two" });
+      await api("/api/marks", { frames: [4, 5], note: "m" });
+      assert.deepEqual(await commentsOf(2), ["file one", "new on 2"]);
+      assert.equal((await state()).commentEdits, 3);
+      const all = join(dir, "all.pcapng");
+      const r = (await api("/api/export", { path: all, which: "all", markComments: true })).json;
+      assert.deepEqual([r.frames, r.comments, r.edited], [29, 2, 3]);
+      const want = Array.from({ length: 29 }, () => []);
+      Object.assign(want, { 1: ["file one", "new on 2"], 3: ["four edited", "WireBuddy mark (user): m"], 4: ["WireBuddy mark (user): m"], 5: ["a", "b", "c"], 7: ["file eight"] });
+      assert.deepEqual(packetComments(all), want);
+      // Every packet in pcapng: nothing is left that only the viewer holds
+      assert.equal((await state()).commentEdits, 0);
+      // Lines of a long comment, as sharkd shows them
+      const long = ['say "x" \\ y', ...Array.from({ length: 31 }, (_, i) => `line ${i + 2}`)].join("\n");
+      await api("/api/comments", { frames: [9], comment: "after" });
+      await api("/api/comments", { frames: [9], comment: long });
+      assert.equal((await state()).commentEdits, 1);
+      const made = (await api("/api/frame?num=9")).json.tree[0];
+      const some = join(dir, "some.pcapng");
+      assert.equal((await api("/api/export", { path: some, which: "range", range: "4-9" })).json.edited, 3);
+      assert.deepEqual(packetComments(some), [["four edited"], [], ["a", "b", "c"], [], ["file eight"], ["after", long]]);
+      assert.equal((await state()).commentEdits, 1, "a part of the packets keeps nothing");
+      await api("/api/export", { path: join(dir, "all.pcap"), which: "all" });
+      assert.deepEqual(packetComments(join(dir, "all.pcap")).flat(), []);
+      assert.equal((await state()).commentEdits, 1, "pcap keeps nothing");
+      // Delete All: the file's comments too
+      const cleared = (await api("/api/comments/clear", {})).json.frames;
+      assert.deepEqual(cleared, [2, 4, 6, 8, 9]);
+      assert.deepEqual((await rowsOf(0, 29)).filter((x) => x.cm).map((x) => x.num), []);
+      const none = join(dir, "none.pcapng");
+      await api("/api/export", { path: none, which: "all" });
+      assert.deepEqual(packetComments(none).flat(), []);
+      assert.ok((await api("/api/events/take", {})).json.events.some((e) => e.text === "The user deleted all packet comments (frames 2, 4, 6, 8, 9)"));
+      // The node made for edited comments reads as sharkd's for the file written
+      await api("/api/open", { path: some });
+      const read = (await api("/api/frame?num=6")).json.tree[0];
+      const shape = (n) => ({ ...n, e: undefined, n: n.n?.map(shape) });
+      assert.deepEqual(shape(made), shape(read));
+      assert.equal(made.n[1].n.length, 31);
+      assert.equal(made.n[1].n.at(-1).l, "[comment truncated at 30 lines]");
+    } finally {
+      await api("/api/marks/clear", {});
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("packet comments: a reload keeps them, opening a file or closing it drops them", async () => {
+    await api("/api/comments", { frames: [10], comment: "kept" });
+    await api("/api/reload", {});
+    assert.deepEqual(await commentsOf(10), ["kept"]);
+    assert.equal((await state()).commentEdits, 1);
+    assert.equal((await api("/api/frame?num=10")).json.tree[0].n[0].l, "kept");
+    await api("/api/open", { path: fixture });
+    assert.equal(await commentsOf(10), undefined);
+    assert.equal((await state()).commentEdits, 0);
+    await api("/api/comments", { frames: [10], comment: "gone" });
+    await api("/api/close", {});
+    assert.equal((await state()).commentEdits, 0);
+    await api("/api/open", { path: fixture });
+    assert.equal(await commentsOf(10), undefined);
+    await api("/api/events/take", {});
+  });
+
+  await check("packet comments: the list's rows carry the first five, cut short; a frame's row and details all of them", async () => {
+    const texts = Array.from({ length: 7 }, (_, i) => `${i} ${"y".repeat(400)}`);
+    for (const c of texts) await api("/api/comments", { frames: [12], comment: c });
+    assert.deepEqual((await rowsOf(11, 1))[0].cm, texts.slice(0, 5).map((c) => `${c.slice(0, 299)}…`));
+    const f = (await api("/api/frame?num=12")).json;
+    assert.deepEqual([f.row.cm, f.tree[0].n.length], [texts, 7]);
+    await api("/api/open", { path: fixture });
+    await api("/api/events/take", {});
+  });
+
+  await check("packet comments: details made for edited ones read as sharkd's, long labels cut and control characters escaped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-labels-"));
+    try {
+      const own = ["a\r\nb", "\u007f", "c1\u0085x", "x\u0001y \"q\" \\ \t\u001b", "x".repeat(300), "ü".repeat(130), `${"y".repeat(250)}\nz`, `${"v".repeat(232)}\u0001${"w".repeat(10)}`];
+      const source = join(dir, "labels.pcapng");
+      execFileSync("editcap", [...own.flatMap((c, i) => ["-a", `${i + 2}:${c}`]), fixture, source]);
+      assert.equal((await api("/api/open", { path: source })).status, 200);
+      const frames = own.map((_, i) => i + 2);
+      await api("/api/comments", { frames, comment: "mine" });
+      const made = [];
+      for (const f of frames) made.push((await api(`/api/frame?num=${f}`)).json.tree[0]);
+      const out = join(dir, "out.pcapng");
+      await api("/api/export", { path: out, which: "all" });
+      assert.deepEqual(packetComments(out).slice(1, 1 + own.length), own.map((c) => [c, "mine"]));
+      await api("/api/open", { path: out });
+      const shape = (n) => ({ ...n, e: undefined, n: n.n?.map(shape) });
+      for (const [i, f] of frames.entries()) assert.deepEqual(shape(made[i]), shape((await api(`/api/frame?num=${f}`)).json.tree[0]), JSON.stringify(own[i]));
+      assert.equal(made[4].n[0].l, `[…] ${"x".repeat(233)}`);
+    } finally {
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("packet comments: scattered packets of a big capture are read one by one; Delete All takes the comments of more than 10000", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-many-"));
+    try {
+      const plain = join(dir, "plain.pcapng");
+      const many = join(dir, "many.pcapng");
+      writeFileSync(plain, Buffer.concat([shb(), idb(1), ...Array.from({ length: 50000 }, (_, i) => epb(0, 1_700_000_000_000_000n + BigInt(i) * 1000n, udpFrame(i)))]));
+      // Every fourth packet has a comment of its own
+      execFileSync("editcap", [...Array.from({ length: 10050 }, (_, i) => ["-a", `${i * 4 + 1}:file ${i * 4 + 1}`]).flat(), plain, many]);
+      assert.equal((await api("/api/open", { path: many })).status, 200);
+      // Quicker than a search of every packet for comments, which the filter then does itself
+      let t = Date.now();
+      assert.equal((await api("/api/comments", { frames: Array.from({ length: 30 }, (_, i) => 2 + i * 1500), comment: "scattered" })).json.count, 30);
+      const added = Date.now() - t;
+      t = Date.now();
+      await api("/api/filter", { filter: "frame.comment" });
+      const searched = Date.now() - t;
+      assert.ok(added < searched, `30 packets took ${added} ms, a search of every packet ${searched} ms`);
+      await api("/api/filter", { filter: "" });
+      const r = await api("/api/comments/clear", {});
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.deepEqual([r.json.count, r.json.frames.length, r.json.frames.slice(0, 3)], [10080, 10000, [1, 2, 5]]);
+      assert.equal((await state()).commentEdits, 10080);
+      assert.deepEqual((await rowsOf(0, 500)).filter((x) => x.cm).map((x) => x.num), []);
+      assert.ok(!(await api("/api/frame?num=5")).json.tree.some((n) => n.fn === "pkt_comment"));
+      // A comment added since is all a packet has; a reload keeps that
+      await api("/api/comments", { frames: [5], comment: "after all" });
+      await api("/api/reload", {});
+      assert.deepEqual([await commentsOf(5), await commentsOf(9)], [["after all"], undefined]);
+      const out = join(dir, "out.pcapng");
+      assert.equal((await api("/api/export", { path: out, which: "all" })).json.edited, 10050);
+      const written = packetComments(out);
+      assert.deepEqual([written.length, written[4], written.flat()], [50000, ["after all"], ["after all"]]);
+      assert.equal((await state()).commentEdits, 0);
+      assert.ok((await api("/api/events/take", {})).json.events.some((e) => e.text === "The user deleted all packet comments (10080 packets)"));
+    } finally {
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assert.equal(await commentsOf(5), undefined);
+  });
+
+  await check("packet comments: an edit waiting behind another goes nowhere once its capture is gone; one more comment on a commented packet takes an export one pass", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-held-"));
+    const bin = join(dir, "bin");
+    const log = join(dir, "editcap.log");
+    const hold = { HOLD: join(dir, "hold"), HELD: join(dir, "held") };
+    mkdirSync(bin);
+    const found = (name) => process.env.PATH.split(":").map((d) => join(d, name)).find((p) => existsSync(p));
+    // sharkd holds its search for comments while HOLD exists; editcap logs its runs
+    writeFileSync(join(bin, "sharkd"), `#!/bin/sh\nexec "${process.execPath}" "${join(root, "test/holding-sharkd.mjs")}" "$@"\n`);
+    writeFileSync(join(bin, "editcap"), `#!/bin/sh\necho "$*" >> "${log}"\nexec "${found("editcap")}" "$@"\n`);
+    chmodSync(join(bin, "sharkd"), 0o755);
+    chmodSync(join(bin, "editcap"), 0o755);
+    const other = await startServer({ PATH: `${bin}:${process.env.PATH}`, REAL_SHARKD: found("sharkd"), HOLD_FILTER: "frame.comment", ...hold });
+    try {
+      const source = join(dir, "commented.pcapng");
+      execFileSync("editcap", ["-a", "2:the file's", fixture, source]);
+      assert.equal((await other.api("/api/open", { path: source })).status, 200);
+      await other.api("/api/comments", { frames: [2], comment: "mine" });
+      const out = join(dir, "out.pcapng");
+      rmSync(log, { force: true });
+      assert.equal((await other.api("/api/export", { path: out, which: "all" })).status, 200);
+      assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1, readFileSync(log, "utf8"));
+      assert.deepEqual(packetComments(out)[1], ["the file's", "mine"]);
+      // Delete All waits for its search, an edit for it, and another capture opens meanwhile
+      writeFileSync(hold.HOLD, "");
+      const cleared = other.api("/api/comments/clear", {});
+      for (const end = Date.now() + 20_000; !existsSync(hold.HELD) && Date.now() < end; ) await new Promise((r) => setTimeout(r, 20));
+      assert.ok(existsSync(hold.HELD), "the search is held");
+      const queued = other.api("/api/comments", { frames: [5], comment: "for commented.pcapng" });
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal((await other.api("/api/open", { path: fixture })).status, 200);
+      rmSync(hold.HOLD);
+      const gone = "the capture was closed or another one opened meanwhile";
+      assert.deepEqual((await Promise.all([cleared, queued])).map((r) => [r.status, r.json.error]), [[409, gone], [409, gone]]);
+      const s = (await other.api("/api/state")).json;
+      assert.deepEqual([s.file, s.commentEdits], [fixture, 0]);
+      assert.equal((await other.api(`/api/rows?gen=${s.generation}&start=4&count=1`)).json.rows[0].cm, undefined);
+    } finally {
+      rmSync(hold.HOLD, { force: true });
+      other.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   await check("rowsSince follows list rebuilds; a shrunk file resets the selected rows", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-shrink-"));

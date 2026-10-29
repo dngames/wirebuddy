@@ -5,10 +5,11 @@ import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
+import { toRanges } from "./export.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CommentResult, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
@@ -93,6 +94,22 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/timerefs": (_q, b) => viewer.setTimeRefs(numbers(b.frames), flag(b.on, "on"), "user"),
     "/api/timerefs/toggle": () => viewer.toggleTimeRefs("user"),
     "/api/timerefs/clear": () => viewer.clearTimeRefs("user"),
+    // The packets the dialog was opened for, in the view it showed, else the selected ones
+    "/api/comments": async (_q, b) => {
+      const comment = text(b.comment, "comment");
+      const view = viewKey(b.view);
+      const frames = view ? viewer.framesAbout({ frame: b.frame ?? null, rows: rowRanges(b.rows), view }) : b.frames !== undefined ? toRanges(numbers(b.frames)) : viewer.selectedOrCurrent();
+      return commentResult(await viewer.addComment(frames, comment, "user"));
+    },
+    "/api/comments/edit": async (_q, b) =>
+      commentResult(await viewer.editComment(integer(b.frame, "frame"), integer(b.index, "index"), text(b.old, "old"), text(b.comment, "comment"), "user")),
+    "/api/comments/delete": async (_q, b) =>
+      commentResult(
+        b.index !== undefined
+          ? await viewer.deleteComment(integer(b.frame, "frame"), integer(b.index, "index"), text(b.old, "old"), "user")
+          : await viewer.deleteComments(b.frames !== undefined ? toRanges(numbers(b.frames)) : viewer.selectedOrCurrent(), "user"),
+      ),
+    "/api/comments/clear": async () => commentResult(await viewer.clearComments("user")),
     "/api/wireshark": async (_q, b) => (await viewer.openInWireshark(b.frame ?? null), ok),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
@@ -267,6 +284,8 @@ function rowRanges(value: unknown): Ranges | undefined {
 }
 
 const MAX_BODY = 1024 * 1024;
+/** Frames a comment result lists. */
+const MAX_COMMENT_FRAMES = 10000;
 
 const SECURITY_HEADERS = { "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin" };
 
@@ -295,6 +314,10 @@ const ACTIONS: Record<string, string> = {
   "/api/timerefs": "Setting time references",
   "/api/timerefs/toggle": "Setting or unsetting the time reference",
   "/api/timerefs/clear": "Unsetting all time references",
+  "/api/comments": "Adding a packet comment",
+  "/api/comments/edit": "Editing a packet comment",
+  "/api/comments/delete": "Deleting packet comments",
+  "/api/comments/clear": "Deleting all packet comments",
   "/api/columns": "Changing the columns",
   "/api/tls": "Setting the TLS key log",
   "/api/export": "Exporting packets",
@@ -343,6 +366,22 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
     }
     case "/api/timerefs/clear":
       return (result as TimeRefsChange).unset.length ? { level: "INFO", text: "The user unset all time references" } : null;
+    case "/api/comments": {
+      const r = result as CommentResult;
+      return r.count ? { level: "INFO", text: `The user added the packet comment ${quoted(b.comment)} to ${framesText(r)}` } : null;
+    }
+    case "/api/comments/edit":
+    case "/api/comments/delete": {
+      const r = result as CommentResult;
+      if (!r.count) return null;
+      if (b.index === undefined) return { level: "INFO", text: `The user deleted the packet comments of ${framesText(r)}` };
+      const one = `comment ${Number(b.index) + 1} of frame ${Number(b.frame)}`;
+      return { level: "INFO", text: b.comment ? `The user changed ${one} to ${quoted(b.comment)}` : `The user deleted ${one}` };
+    }
+    case "/api/comments/clear": {
+      const r = result as CommentResult;
+      return r.count ? { level: "INFO", text: `The user deleted all packet comments (${framesText(r)})` } : null;
+    }
     case "/api/columns": {
       const r = result as FilterCheck;
       if (r && r.ok === false) return { level: "WARNING", text: `The user's columns were rejected: ${r.error ?? "invalid"}` };
@@ -374,6 +413,33 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
     default:
       return null;
   }
+}
+
+/** Frames whose comments an edit changed: those of a big one only counted. */
+function commentResult(frames: number[]): CommentResult {
+  return { frames: frames.slice(0, MAX_COMMENT_FRAMES), count: frames.length };
+}
+
+/** "frame 4", "frames 4, 9", or how many there are. */
+function framesText({ frames, count }: CommentResult): string {
+  if (count === 1) return `frame ${frames[0]}`;
+  return count <= 10 ? `frames ${frames.join(", ")}` : `${count} packets`;
+}
+
+/** A comment in an event: in quotes, short. */
+function quoted(value: unknown): string {
+  const text = String(value ?? "");
+  return JSON.stringify(text.length > 200 ? `${text.slice(0, 199)}…` : text);
+}
+
+function text(value: unknown, name: string): string {
+  if (typeof value !== "string") throw new HttpError(400, `"${name}" must be a string`);
+  return value;
+}
+
+function integer(value: unknown, name: string): number {
+  if (!Number.isInteger(value)) throw new HttpError(400, `"${name}" must be an integer`);
+  return value as number;
 }
 
 function panelHealth(value: unknown): Parameters<Viewer["panels"]["health"]>[2] {

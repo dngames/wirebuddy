@@ -4,6 +4,7 @@
 // of the whole file.
 // Usage: node test/slices.mjs   (bundles the sources itself; needs sharkd)
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -400,6 +401,15 @@ try {
     assert.deepEqual([tcp[3].l, tcp[3].f, tcp[3].fnum], ["[Frame: 18001, payload: 0-4 (5 bytes)]", "tcp.segment == 18001", 18001]);
   });
 
+  await check("packet comments: rows keep them, details leave their text as written", () => {
+    const row = renumberRow({ num: 2008, c: ["2008", "1.5", "a", "b", "TCP", "60", "x"], cm: ["see #3(66) and frame 3"] }, s, { frames: [0], info: 6, blank: [] });
+    assert.deepEqual([row.num, row.cm], [20005, ["see #3(66) and frame 3"]]);
+    const comments = { l: "Packet comments", t: "proto", f: "pkt_comment", fn: "pkt_comment", s: "Comment", n: [{ l: "see #3(66) and frame 3", f: 'frame.comment == "see #3(66) and frame 3"', fn: "frame.comment", s: "Comment", n: [] }] };
+    const [kept, frame] = renumberTree([comments, { l: "Frame 2008: 60 bytes on wire", fn: "frame" }], s);
+    assert.deepEqual(kept, comments);
+    assert.equal(frame.l, "Frame 20005: 60 bytes on wire");
+  });
+
   await check("Info: frame numbers in the forms dissectors write them; text a packet carries stays as it is", () => {
     for (const [info, want] of [
       ["Request [reply in 3]", "Request [reply in 30]"],
@@ -666,6 +676,25 @@ try {
         const want = await truth.call("frame", { frame: num, proto: true, ref_frame });
         assert.deepEqual(times((await tail.frame(num)).tree), times(want.tree), `frame ${num}`);
       }
+    } finally {
+      tail.close();
+    }
+  });
+
+  await check("packet comments in the file reach provisional rows and details: slices hold them", async () => {
+    const file = join(out, "commented.pcapng");
+    execFileSync("editcap", ["-a", "11500:see #3(66) and frame 3", "-a", "11990:second", await cutAt(12_000), file]);
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    // As the view reads rows: sharkd's comments become cm
+    const viewed = { ...view, fetch: async (engine, params) => (await engine.call("frames", params)).map(({ comments, ...r }) => (comments ? { ...r, cm: comments } : r)) };
+    try {
+      await tail.update();
+      tail.rebase(11_000);
+      const rows = await tail.rows(0, 1000, viewed);
+      assert.deepEqual(rows.filter((r) => r.cm).map((r) => [r.num, r.cm]), [[11_500, ["see #3(66) and frame 3"]], [11_990, ["second"]]]);
+      const { tree } = await tail.frame(11_500);
+      assert.deepEqual([tree[0].fn, tree[0].n[0].l], ["pkt_comment", "see #3(66) and frame 3"]);
+      assert.match(tree[1].l, /^Frame 11500:/);
     } finally {
       tail.close();
     }

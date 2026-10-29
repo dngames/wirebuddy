@@ -164,7 +164,7 @@ export function renumberRow(row: PacketRow, s: Slice, n: Numbering, bytes?: (fra
   if (n.info >= 0 && c[n.info]) c[n.info] = renumberInfo(c[n.info], (m) => toGlobal(s, m));
   for (const j of n.blank) if (j < c.length) c[j] = "";
   for (const j of n.bytes ?? []) if (j < c.length) c[j] = bytes ? String(bytes(num)) : "";
-  return { num, c, bg: row.bg, fg: row.fg, p: true };
+  return { num, c, bg: row.bg, fg: row.fg, ...(row.cm ? { cm: row.cm } : {}), p: true };
 }
 
 /**
@@ -179,12 +179,14 @@ export function renumberInfo(info: string, map: (frame: number) => number): stri
 
 /**
  * Renumbers a details tree read from slice `s`; fields counted within the
- * slice lose their value. `expert`: the nodes are an expert info's.
+ * slice lose their value, packet comments stay as written. `expert`: the
+ * nodes are an expert info's.
  */
 export function renumberTree(nodes: TreeNode[], s: Slice, expert = false): TreeNode[] {
   const g = (n: number): number => toGlobal(s, n);
   const word = (text: string, from: number, to: number): string => text.replace(new RegExp(`\\b${from}\\b`), String(to));
   return nodes.map((n) => {
+    if (n.fn === "pkt_comment") return n;
     const out: TreeNode = { ...n };
     const inExpert = expert || n.fn === "_ws.expert";
     if (n.t === "framenum" && n.fnum) {

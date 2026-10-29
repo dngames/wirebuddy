@@ -175,6 +175,34 @@ try {
   assert.equal((await userExport.json()).comments, 2);
   assert.deepEqual(packetComments(join(out, "users-marked.pcapng")).map((c) => c.length), [0, 1, 0, 0, 0, 1]);
   assert.equal((await post("/api/marks/clear", { frames: [12] })).status, 200);
+  // Packet comments: the agent's and the user's, shown to both, written by exports
+  const viewState = async () => (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json();
+  await call("packet_comments", { action: "add", frames: [3, 4, 99], comment: "agent note\nsecond line" }, (t) => {
+    assert.match(t, /^Added the comment to 2 frame\(s\); ignored 1 frame\(s\) beyond the 29 in the capture: 99; the comments of 2 packet\(s\) are edited and not exported yet/);
+  });
+  assert.equal((await viewState()).agentNotice.text, "Added a packet comment to 2 frames: agent note second line");
+  await call("packet_comments", { action: "add", frames: [3] }, (t, r) => assert.ok(r.isError && /needs a comment/.test(t), t));
+  assert.equal((await post("/api/comments", { frames: [4], comment: "the user's" })).status, 200);
+  await call("packet_comments", { action: "replace", frames: [5], comment: "replaced" }, (t) => {
+    assert.match(t, /^Set the comment of 1 frame\(s\)/);
+    assert.match(t, /INFO The user added the packet comment "the user's" to frame 4/);
+  });
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /^Packet comments edited in the viewer \(3 packets, 3 not exported yet; only export_packets to pcapng keeps them/m);
+    assert.match(t, /^ {2}3: "agent note second line"$/m);
+    assert.match(t, /^ {2}4: "agent note second line" \| "the user's"$/m);
+  });
+  await call("inspect_frame", { frame: 4 }, (t) => {
+    assert.match(t, /^Packet comments {2}<Comment>\n {2}agent note \[\.\.\.\] {2}\{frame\.comment\} {2}<Comment>\n {4}agent note {2}\{frame\.comment\}\n {4}second line {2}\{frame\.comment\}\n {2}the user's {2}\{frame\.comment\} {2}<Comment>$/m);
+  });
+  const commentsPath = join(out, "comments.pcapng");
+  await call("export_packets", { path: commentsPath, which: "range", range: "3-5" }, (t) => assert.match(t, /\(\d+ bytes, the edited comments of 3 packets\)/));
+  assert.deepEqual(packetComments(commentsPath), [["agent note\nsecond line"], ["agent note\nsecond line", "the user's"], ["replaced"]]);
+  await call("packet_comments", { action: "delete", frames: [3, 4, 5] }, (t) => assert.match(t, /^Deleted the comments of 3 frame\(s\)/));
+  await call("get_view_state", {}, (t) => assert.match(t, /^ {2}5: \(comments deleted\)$/m));
+  // Many long comments on a packet: the first in a short line, and how many more
+  for (let i = 0; i < 30; i++) await client.callTool({ name: "packet_comments", arguments: { action: "add", frames: [7], comment: `${i} ${"z".repeat(300)}` } });
+  await call("get_view_state", {}, (t) => assert.match(t, /^ {2}7: "0 z{197}…" \.\.\. and 29 more$/m));
   // Files carried in the traffic: listed, then saved into new private folders
   await call("export_objects", {}, (t) => {
     assert.match(t, /^2 HTTP objects:/);
@@ -344,7 +372,8 @@ try {
   const acmeFile = join(out, "acme.pcap");
   writeAcmeCapture(acmeFile);
   const extDir = join(home, ".local/share/wirebuddy/extensions");
-  await call("open_capture", { path: acmeFile }, (t) => assert.match(t, /20 frames/));
+  // The comments edited in the fixture weren't exported in full: the agent hears they are gone
+  await call("open_capture", { path: acmeFile }, (t) => assert.match(t, /20 frames.*; the comments edited in 4 packets and not exported were discarded$/m));
   await call("capture_summary", {}, (t) => {
     assert.match(t, /Undecoded payload \("data"\): 20 frames/);
     assert.match(t, /UDP 10\.0\.0\.1:40000 <-> 10\.0\.0\.2:50000: 20 frames/);

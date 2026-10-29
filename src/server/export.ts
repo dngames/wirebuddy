@@ -94,10 +94,61 @@ export function splitRuns(ranges: Ranges, commented: [number, number][]): Ranges
 }
 
 /**
+ * A frame's packet comments in an export: its own ones if `own`, then
+ * `texts`; `own` undefined: it has none.
+ */
+export interface FrameComments {
+  own?: boolean;
+  texts: string[];
+}
+
+/**
+ * editcap arguments that write `comments` into a run of `part` (input frame
+ * numbers), one pass after the other: editcap writes one comment per frame a
+ * pass, and keeps or replaces the frames' own ones all alike. The first pass
+ * reads the input, drops the frames' own comments if `discard`, and replaces
+ * them if some frame loses its own ones; each later pass appends the next
+ * comment, by the frame's place in what the first one wrote. Empty comments
+ * are left out: editcap can't write them.
+ */
+export function commentPasses(part: Ranges, comments: Map<number, FrameComments>, discard = false): { first: string[]; later: string[][] } {
+  const frames = [...comments].filter(([f]) => inRanges(part, f)).sort((x, y) => x[0] - y[0]);
+  const replace = !discard && frames.some(([, c]) => c.own === false);
+  const first: string[] = [];
+  const later: string[][] = [];
+  for (const [f, c] of frames) {
+    let texts = c.texts;
+    // Replacing comments, frames that keep their own ones get all of theirs later
+    if (!replace || !c.own) {
+      if (texts[0] || (replace && c.own === false)) first.push("-a", `${f}:${texts[0] ?? ""}`);
+      texts = texts.slice(1);
+    }
+    let k = 0;
+    for (const text of texts) {
+      if (!text) continue;
+      (later[k++] ??= []).push("-a", `${placeIn(part, f)}:${text}`);
+    }
+  }
+  const mode = discard ? ["--discard-packet-comments"] : replace || !first.length ? [] : ["--preserve-packet-comments"];
+  return { first: [...mode, ...first], later };
+}
+
+/** Position of frame `f` among the frames of `ranges`, from 1. */
+function placeIn(ranges: Ranges, f: number): number {
+  let n = 0;
+  for (const [a, b] of ranges) {
+    if (f <= b) return n + f - a + 1;
+    n += b - a + 1;
+  }
+  return n;
+}
+
+/**
  * Writes the frames in `ranges` of `input` to `output` with editcap, splitting
  * large selections into several runs joined by mergecap. `comments` (by input
- * frame number) become packet comments next to the ones the frames have; pcap
- * can't hold them. The result appears atomically.
+ * frame number) are the packet comments of the frames they name, and frames
+ * up to `cleared` lose their own ones; pcap can't hold them. The result
+ * appears atomically.
  */
 export async function exportFrames(opts: {
   editcap: string;
@@ -106,20 +157,39 @@ export async function exportFrames(opts: {
   output: string;
   format: "pcapng" | "pcap";
   ranges: Ranges;
-  comments?: Map<number, string>;
+  comments?: Map<number, FrameComments>;
+  cleared?: number;
 }): Promise<number> {
   const { editcap, mergecap, input, output, format, ranges } = opts;
-  const comments = format === "pcapng" ? (opts.comments ?? new Map<number, string>()) : new Map<number, string>();
+  const comments = format === "pcapng" ? (opts.comments ?? new Map<number, FrameComments>()) : new Map<number, FrameComments>();
+  const cleared = format === "pcapng" ? (opts.cleared ?? 0) : 0;
   const partial = `${output}.partial-${randomBytes(6).toString("hex")}`;
   const sel = (r: [number, number]) => (r[0] === r[1] ? String(r[0]) : `${r[0]}-${r[1]}`);
-  const commented = [...comments].map(([f, text]): [number, number] => [f, Buffer.byteLength(`${f}:${text}`) + 4]).sort((x, y) => x[0] - y[0]);
-  const runs = splitRuns(ranges, commented);
-  const args = (part: Ranges, to: string, fmt: string): string[] => {
-    const add = [...comments].filter(([f]) => inRanges(part, f)).flatMap(([f, text]) => ["-a", `${f}:${text}`]);
-    return ["-F", fmt, ...(add.length ? ["--preserve-packet-comments", ...add] : []), "-r", input, to, ...part.map(sel)];
+  const commented = [...comments]
+    .map(([f, c]): [number, number] => [f, c.texts.reduce((n, text) => n + Buffer.byteLength(`${f}:${text}`) + 4, c.own ? 0 : Buffer.byteLength(`${f}:`) + 4)])
+    .filter(([, bytes]) => bytes > 0)
+    .sort((x, y) => x[0] - y[0]);
+  // Runs of cleared frames drop their own comments, runs of the others keep them
+  const runs = [
+    ...splitRuns(clip(ranges, 1, cleared), commented).map((part) => ({ part, discard: true })),
+    ...splitRuns(clip(ranges, cleared + 1, Infinity), commented).map((part) => ({ part, discard: false })),
+  ].filter(({ part }) => part.length);
+  // Each later pass rewrites what the run wrote so far
+  const write = async ({ part, discard }: { part: Ranges; discard: boolean }, to: string, fmt: string): Promise<void> => {
+    const { first, later } = commentPasses(part, comments, discard);
+    await run(editcap, ["-F", fmt, ...first, "-r", input, to, ...part.map(sel)]);
+    for (const add of later) {
+      const next = `${to}.next`;
+      try {
+        await run(editcap, ["-F", fmt, "--preserve-packet-comments", ...add, to, next]);
+        renameSync(next, to);
+      } finally {
+        rmSync(next, { force: true });
+      }
+    }
   };
   try {
-    if (runs.length === 1) await run(editcap, args(runs[0], partial, format));
+    if (runs.length === 1) await write(runs[0], partial, format);
     else {
       // Next to the export, where there is room for it, rather than a small tmpfs
       const dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
@@ -127,7 +197,7 @@ export async function exportFrames(opts: {
         const parts: string[] = [];
         for (const part of runs) {
           const file = join(dir, `part${String(parts.length).padStart(5, "0")}.pcapng`);
-          await run(editcap, args(part, file, "pcapng"));
+          await write(part, file, "pcapng");
           parts.push(file);
         }
         // Parts are in frame order; -a concatenates instead of merging by time
@@ -150,4 +220,9 @@ export async function exportFrames(opts: {
     throw err;
   }
   return statSync(output).size;
+}
+
+/** The parts of merged `ranges` from `a` to `b`. */
+function clip(ranges: Ranges, a: number, b: number): Ranges {
+  return ranges.filter(([x, y]) => x <= b && y >= a).map(([x, y]) => [Math.max(x, a), Math.min(y, b)]);
 }

@@ -15,6 +15,7 @@ import * as act from "./actions.ts";
 import { agentName, app, bus, captureActive, hooks } from "./app.ts";
 import { promptDialog } from "./dialog.ts";
 import { openAskDialog } from "./dialogs/ask.ts";
+import { commentItems } from "./dialogs/comment.ts";
 import { openExportDialog } from "./dialogs/export.ts";
 import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
@@ -377,6 +378,7 @@ function want(first: number, last: number): void {
 async function fetchPage(p: number): Promise<void> {
   const g = gen;
   const view = viewKey();
+  const comments = app.state?.commentRevision;
   const start = p * PAGE;
   const count = Math.min(PAGE, total - start);
   if (count <= 0) return;
@@ -387,9 +389,9 @@ async function fetchPage(p: number): Promise<void> {
     if (viewKey() !== view || r.generation !== g) return;
     const rows = r.start === start ? r.rows : alignRows(r, start, count);
     if (g !== gen) {
-      // The list only grew since (a live capture): the same frames, as the server reads them now
+      // The list only grew since (a live capture): the same frames, as the server reads them now, unless their times or comments changed
       if (pages.has(p)) return;
-      if (g >= timesGen && current(rows, start)) setPage(p, rows);
+      if (g >= timesGen && current(rows, start) && comments === app.state?.commentRevision) setPage(p, rows);
       else {
         stale.set(p, [...rows, ...(stale.get(p)?.slice(rows.length) ?? [])]);
         trimStale();
@@ -500,7 +502,7 @@ function makeRow(): RowEl {
     el.appendChild(cell);
     return cell;
   });
-  el.prepend(h("span", { class: "pl-badge" }, "✦"));
+  el.prepend(h("span", { class: "pl-badge" }, "✦"), h("span", { class: "pl-cm" }));
   layer.appendChild(el);
   return { el, cells };
 }
@@ -536,11 +538,13 @@ function fillRow(r: RowEl, i: number, row: PacketRow | undefined, now: number): 
     if (mark) cls += mark.by === "agent" ? " mark-agent" : " mark-user";
     if (sel && app.state?.selectedBy === "agent" && row.num === app.state.selected) cls += " agent-sel";
     if (row.p) cls += " prov";
+    if (row.cm?.length) cls += " commented";
     const useColors = app.colorize && !sel && mark?.by !== "user";
     r.el.style.backgroundColor = useColors && row.bg ? `#${row.bg}` : "";
     r.el.style.color = useColors && row.fg ? `#${row.fg}` : "";
     const marked = mark ? `${mark.by === "agent" ? `Marked by ${agentName()}` : "Marked"}${mark.note ? `: ${mark.note}` : ""}` : "";
-    const title = row.p ? [marked, provisionalTitle()].filter(Boolean).join("\n") : marked;
+    const comments = (row.cm ?? []).map((c) => `Comment: ${c || "(empty comment)"}`);
+    const title = [marked, ...comments, row.p ? provisionalTitle() : ""].filter(Boolean).join("\n");
     if (r.el.title !== title) r.el.title = title;
   }
   if (r.el.className !== cls) r.el.className = cls;
@@ -777,6 +781,7 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
       action: () => void act.toggleMarkSelected(),
     },
     { label: n > 1 ? `Set/Unset Time References on ${n} Packets` : "Set/Unset Time Reference", action: () => void act.toggleTimeRefSelected() },
+    { label: "Packet Comments", sub: commentItems(fd) },
     SEP,
     { label: "Apply as Filter", sub: filterItems(true), disabled: !conv.length },
     { label: "Prepare as Filter", sub: filterItems(false), disabled: !conv.length },

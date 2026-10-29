@@ -1,7 +1,7 @@
 // A stand-in for dumpcap that "captures" test/media/traffic.mjs on lo: it lists lo, accepts
 // any capture filter, and writes a pcapng the way dumpcap does, at a steady rate, and the TLS
 // key log of the traffic next to it (<file>.keys). The capture filter "burst <n> rate <pps>" sets
-// the packets written at once, then per second.
+// the packets written at once, then per second; -b packets:<n> starts a new file every n packets.
 // Usage: put an executable named dumpcap first on PATH that runs node test/fake-dumpcap.mjs "$@".
 import { appendFileSync, closeSync, openSync, writeSync } from "node:fs";
 import { header, packet, traffic } from "./media/traffic.mjs";
@@ -27,14 +27,31 @@ if (args.includes("-D")) {
   const duration = Number(stops.find(([k]) => k === "duration")?.[1] ?? Infinity) * 1000;
   const limit = Number(stops.find(([k]) => k === "packets")?.[1] ?? Infinity);
   const pps = Number(rate);
-  const fd = openSync(file, "wx", 0o600);
-  writeSync(fd, header());
-  process.stderr.write(`Capturing on 'Loopback: lo'\nFile: ${file}\n`);
+  const perFile = Number(args.flatMap((a, i) => (args[i - 1] === "-b" ? [a.split(":")] : [])).find(([k]) => k === "packets")?.[1] ?? Infinity);
+  let files = 0;
+  /** Opens the next file: with -b, named as dumpcap names a ring buffer's. */
+  const next = () => {
+    const name = perFile === Infinity ? file : file.replace(/\.pcapng$/, `_${String(++files).padStart(5, "0")}_${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}.pcapng`);
+    const fd = openSync(name, "wx", 0o600);
+    writeSync(fd, header());
+    process.stderr.write(`File: ${name}\n`);
+    return fd;
+  };
+  process.stderr.write("Capturing on 'Loopback: lo'\n");
+  let fd = next();
   const gen = traffic(1, (line) => appendFileSync(`${file}.keys`, line + "\n", { mode: 0o600 }));
   let n = 0;
   const write = (count) => {
-    const parts = [];
-    for (let k = 0; k < count && n < limit; k++, n++) parts.push(packet(n, gen.next().value, { pps: Math.max(pps, 1) }));
+    let parts = [];
+    for (let k = 0; k < count && n < limit; k++, n++) {
+      if (n && n % perFile === 0) {
+        writeSync(fd, Buffer.concat(parts));
+        closeSync(fd);
+        parts = [];
+        fd = next();
+      }
+      parts.push(packet(n, gen.next().value, { pps: Math.max(pps, 1) }));
+    }
     if (parts.length) writeSync(fd, Buffer.concat(parts));
     process.stderr.write(`\rPackets: ${n} `);
   };

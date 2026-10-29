@@ -358,6 +358,117 @@ try {
       await fetch(new URL("/api/timerefs/clear", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: "{}" });
     }
   });
+
+  const key = (k, code, keyCode, modifiers = 0) => cdp("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: keyCode, modifiers });
+  // Ctrl is 2, Alt 1
+  const saveComment = () => key("Enter", "Enter", 13, 2);
+  const commentBox = (title) => evaluate(`document.querySelector('.dlg-comment .dlg-title-text')?.textContent === ${JSON.stringify(title)} && document.activeElement?.closest('.dlg-comment') !== null`);
+  const viewState = async () => (await call("get_view_state")).text;
+  const closeComment = async () => {
+    if (await evaluate("!!document.querySelector('.dlg-comment, .dlg-export')")) await key("Escape", "Escape", 27);
+  };
+  /** Clicks `label` in the open menus; on failure names what they hold. */
+  const pick = async (label) => {
+    await until(`"${label}"`, async () => !!(await box(menuItem(label)))).catch(async (err) => {
+      throw new Error(`${err.message}; the menus: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ')")}`);
+    });
+    await click(...center(await box(menuItem(label))));
+  };
+  const fromMenuBar = async (title, ...labels) => {
+    await click(...center(await box(`[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === ${JSON.stringify(title)})`)));
+    for (const label of labels) await pick(label);
+  };
+  const detailsRow = (text) => `[...document.querySelectorAll('.dt-row')].find((r) => r.querySelector('.dt-label')?.textContent === ${JSON.stringify(text)})`;
+
+  await check("browser: packet comments from the keyboard, the Edit menu, the packet list and the details; the row shows them", async () => {
+    await click(...center(await box(row(6))));
+    await until("frame 6 selected", async () => (await state()).selected === 6);
+    await key("c", "KeyC", 67, 3);
+    await until("Add Packet Comment", () => commentBox("Add Packet Comment"));
+    await cdp("Input.insertText", { text: "first line\nsecond line" });
+    await saveComment();
+    await until("the commented row", () => evaluate(`${row(6)}?.classList.contains('commented') === true`));
+    assert.equal(await evaluate(`getComputedStyle(${row(6)}.querySelector('.pl-cm')).display`), "block");
+    assert.equal(await evaluate(`${row(6)}.title`), "Comment: first line\nsecond line");
+    assert.equal(await evaluate("document.title"), "*http.pcapng — WireBuddy");
+    // The details show it as Wireshark does; opened once, comments show open in the next packets too
+    await until("the details' comment", () => evaluate(`!!(${detailsRow("Packet comments")})`));
+    await click(...center(await box(`${detailsRow("Packet comments")}.querySelector('.dt-tog')`)));
+    await until("the comment's first line", () => evaluate(`!!(${detailsRow("first line [...]")})`));
+    // Edit "…" in the Edit menu, with the comment as Wireshark shows it there
+    await fromMenuBar("Edit", "Packet Comments", 'Edit "first line second line"');
+    await until("Edit Packet Comment", () => commentBox("Edit Packet Comment"));
+    assert.equal(await evaluate("document.activeElement.value"), "first line\nsecond line");
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "edited" });
+    await saveComment();
+    await until("the edit", async () => /^ {2}6: "edited"$/m.test(await viewState()));
+    await until("the details read again", () => evaluate(`!!(${detailsRow("edited")})`));
+    // The export dialog says where they go
+    await fromMenu(6, "Export Selected Packet");
+    await until("the export dialog", () => evaluate("!!document.querySelector('.dlg-export')"));
+    const note = "[...document.querySelectorAll('.dlg-export .goto-hint')].at(-1)";
+    assert.match(await evaluate(`${note}.textContent`), /^Packet comments go along as edited \(1 packet not exported yet\)/);
+    await evaluate(`(() => { const i = document.querySelector('.ex-path'); i.value = ${JSON.stringify(join(home, "x.pcap"))}; i.dispatchEvent(new Event('input')); })()`);
+    assert.match(await evaluate(`${note}.textContent`), /^pcap holds no packet comments/);
+    await closeComment();
+    // Delete "…" in the packet list's menu
+    await fromMenu(6, "Packet Comments");
+    await pick('Delete "edited"');
+    await until("the row without comments", () => evaluate(`${row(6)}?.classList.contains('commented') === false`));
+    assert.match(await viewState(), /^ {2}6: \(comments deleted\)$/m);
+    // The details' menu of a comment edits and deletes it
+    await fromMenu(6, "Packet Comments");
+    await pick("Add New Comment");
+    await until("Add Packet Comment", () => commentBox("Add Packet Comment"));
+    await cdp("Input.insertText", { text: "in the details" });
+    await saveComment();
+    await until("the comment", () => evaluate(`!!(${detailsRow("in the details")})`));
+    await rightClick(center(await box(detailsRow("in the details"))));
+    await pick("Edit Comment…");
+    await until("Edit Packet Comment", () => commentBox("Edit Packet Comment"));
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "edited in the details" });
+    await saveComment();
+    await until("the edited comment", () => evaluate(`!!(${detailsRow("edited in the details")})`));
+    await rightClick(center(await box(detailsRow("edited in the details"))));
+    await pick("Delete Comment");
+    await until("no comment node", () => evaluate(`!(${detailsRow("Packet comments")})`));
+    assert.match(await viewState(), /INFO The user deleted comment 1 of frame 6/);
+  }).finally(closeComment);
+
+  await check("browser: the agent's comments show with a notice; editing one the agent changed meanwhile is refused; Delete All asks first; closing with unsaved comments asks too", async () => {
+    const r = await call("packet_comments", { action: "add", frames: [2, 3], comment: "from the agent" });
+    assert.match(r.text, /^Added the comment to 2 frame\(s\)/);
+    assert.match((await state()).agentNotice.text, /^Added a packet comment to 2 frames: from the agent$/);
+    await until("the agent's comments", () => evaluate(`${row(2)}?.classList.contains('commented') && ${row(3)}?.classList.contains('commented')`));
+    // A comment the agent changes while the user edits it stays the agent's
+    await click(...center(await box(row(2))));
+    await until("frame 2's details", () => evaluate(`!!(${detailsRow("from the agent")})`));
+    await fromMenuBar("Edit", "Packet Comments", 'Edit "from the agent"');
+    await until("Edit Packet Comment", () => commentBox("Edit Packet Comment"));
+    await call("packet_comments", { action: "replace", frames: [2], comment: "replaced by the agent" });
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "the user's" });
+    await saveComment();
+    await until("the refusal", () => evaluate("document.querySelector('.dlg-comment .of-err')?.textContent === 'The comment changed meanwhile; close this and choose it again'"));
+    await closeComment();
+    assert.match(await viewState(), /^ {2}2: "replaced by the agent"$/m);
+    // Within 300 ms of picking from the Edit menu, a press on it is taken for closing it
+    await sleep(300);
+    await fromMenuBar("Edit", "Delete All Packet Comments…");
+    await until("the question", () => evaluate("/Are you sure you want to remove all packet comments\\?/.test(document.querySelector('.confirm-text')?.textContent ?? '')"));
+    await click(...center(await box("document.querySelector('.dlg button.primary')")));
+    await until("no comments", () => evaluate(`!document.querySelector('.pl-row.commented')`));
+    assert.match(await viewState(), /^ {2}1-29: all comments deleted \(Delete All Packet Comments\)/m);
+    // Unexported edits: File › Close asks, and Cancel keeps the capture
+    assert.ok((await state()).commentEdits > 0);
+    await fromMenuBar("File", "Close");
+    await until("the warning", () => evaluate("/weren't exported: closing the capture discards them/.test(document.querySelector('.confirm-text')?.textContent ?? '')"));
+    await key("Escape", "Escape", 27);
+    await sleep(300);
+    assert.ok((await state()).file, "the capture stays open");
+  }).finally(closeComment);
 } finally {
   ws?.close();
   chrome.kill();

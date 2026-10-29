@@ -15,9 +15,10 @@ WireBuddy is a Wireshark-style packet viewer in a browser tab, built to sit next
 while you watch and click in the same view, and when a capture holds something Wireshark can't
 decode or a packet list can't show, the agent extends the viewer itself.
 
-- **One view for both of you.** The agent's filters, selected packet, marks and columns show up
-  in your view as it works, each with a notice; what you do there (open a file, apply a filter,
-  start a capture) reaches the agent with its next call, and it sees which packets you selected.
+- **One view for both of you.** The agent's filters, selected packet, marks, comments and columns
+  show up in your view as it works, each with a notice; what you do there (open a file, apply a
+  filter, start a capture) reaches the agent with its next call, and it sees which packets you
+  selected.
   Right-click packets to ask the agent about them without leaving the view. You check its
   findings in the packets instead of taking a summary on trust.
 - **The agent extends the viewer.** Traffic Wireshark doesn't know, such as a company's sensor
@@ -46,6 +47,9 @@ The viewer itself works like Wireshark:
 - **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
   (displayed, marked, selected or a range) to a new pcapng/pcap; in pcapng the marks and their
   notes go along as packet comments, which Wireshark shows.
+- **Packet comments** as in Wireshark's Edit › Packet Comments: add, edit and delete them, for
+  you and the agent alike; the packet list marks commented packets, and pcapng exports (Save As)
+  write the comments as edited.
 - **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
   checked as you type, new files automatically, a ring buffer and stop conditions; the view
   updates about once a second.
@@ -314,7 +318,7 @@ solution; `solution/ctseries` is the panel.
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, capture status, open and offered panels |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, edited packet comments, capture status, open and offered panels |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -322,13 +326,14 @@ solution; `solution/ctseries` is the panel.
 | `follow_stream` | Reassembled stream payload as text |
 | `expert_info` | Expert Information grouped by severity and message, with example frames |
 | `io_graph` | Packets/bytes/bits over time for up to 4 filters: peaks, empty stretches, a downsampled series |
-| `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file, marks as packet comments |
+| `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file, with their packet comments as edited and marks as comments (pcapng) |
 | `export_objects` | List the files carried in the traffic (HTTP, email, SMB, TFTP, DICOM, FTP), or save them to a new folder |
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
 | `mark_frames` / `clear_marks` | Highlight frames with a note (listed under Go → Marked Packets) |
 | `time_references` | Set or unset time references (`*REF*`), which the Time column counts from, or clear them |
+| `packet_comments` | Add, replace or delete packet comments in the user's view (kept by exports to pcapng) |
 | `set_columns` | Show fields as extra columns in the user's packet list |
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `start_capture` | Start a live capture with the Capture Options settings; the view follows it |
@@ -376,7 +381,7 @@ the questions you asked it.
   included) or a body that isn't JSON are refused. The page has a Content Security Policy.
 - The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
   into WireBuddy's capture folder. They can open any capture file you can read, read packets,
-  change the filter, marks, time references, selection and columns, open Wireshark, and write new
+  change the filter, marks, time references, packet comments, selection and columns, open Wireshark, and write new
   `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced unless the
   agent exported it itself in the same session.
 - `export_objects` saves files from the traffic, whose names and contents a sender chose, only
@@ -426,8 +431,6 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   three requests were pipelined into, read as plain TCP segments, and ones of a message that ends
   more than about 8 MiB after them don't say where it is reassembled (less when many connections
   are busy at once).
-- Packet comments can't be added or edited in the viewer (marks go into pcapng exports as
-  comments).
 - A time reference the display filter hides stays hidden, while Wireshark lists time references
   whatever the filter; the packets after it count from it all the same, and Next/Previous Time
   Reference go to it. "Open in Wireshark" doesn't take the time references along.
@@ -435,6 +438,12 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   from the first packet, not from the time references. In a filter, `frame.ref_time` stands for
   the references' frame numbers: it works only as a test of its own, not inside a function or
   with `#` or `@`, and for a few hundred scattered references at most (about 4 KB of numbers).
+- Packet comments added, edited or deleted in the viewer stay there until the capture is closed
+  or another one opened, also when a live capture goes on in a new file (ring buffer, new file
+  after …; WireBuddy says when that discards edits); only an export to pcapng (File › Save As)
+  keeps them. Display filters on `frame.comment`, Expert Information and the agent's
+  `query_packets` fields read the comments in the file: edits reach them once exported and that
+  file opened.
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
   Capture → Refresh Interfaces (F5): Wireshark skips the scan when it starts with a file.
 

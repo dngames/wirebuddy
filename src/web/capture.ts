@@ -254,7 +254,7 @@ export async function restartCaptureClicked(): Promise<void> {
   const c = app.state?.capture;
   if (!c?.iface || !captureActive()) return;
   const req: CaptureRequest = { iface: c.iface, filter: c.filter, promiscuous: c.promiscuous, autostop: c.autostop, ring: c.ring };
-  if (!(await act.stopCapture())) return;
+  if (!(await act.discardComments("restarting the capture")) || !(await act.stopCapture())) return;
   // The idle state may already be here
   const stopped = !captureActive() || await new Promise<boolean>((resolve) => {
     const done = (ok: boolean): void => {
@@ -267,7 +267,7 @@ export async function restartCaptureClicked(): Promise<void> {
       if (!captureActive(s)) done(true);
     });
   });
-  if (stopped) await act.startCapture(req);
+  if (stopped) await act.startCapture(req, true);
   else toast("error", "The capture did not stop; not restarting it");
 }
 

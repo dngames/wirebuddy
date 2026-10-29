@@ -4,8 +4,9 @@ import type { RecentFiles } from "../shared/api.ts";
 import { get } from "./api.ts";
 import * as act from "./actions.ts";
 import { agentName, app, bus, hooks } from "./app.ts";
-import { item, type CommandId } from "./commands.ts";
+import { commands, item, type CommandId } from "./commands.ts";
 import { fieldCopyItems, fieldFilterItems } from "./details.ts";
+import { commentItems } from "./dialogs/comment.ts";
 import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
 import { closeMenus, menuOpen, menuOwner, SEP, showMenu, toggleMenuAt, type MenuItem } from "./menu.ts";
@@ -103,6 +104,9 @@ const MENUS: TopMenu[] = [
       { label: "Copy", sub: [...packetCopyItems(), SEP, ...fieldCopyItems()] },
       SEP,
       ...items("find", "findNext", "findPrevious", SEP, "markToggle", "markAllDisplayed", "unmarkAllDisplayed", "unmarkAll", "nextMark", "previousMark", SEP, "timeRefToggle", "unsetTimeRefs", "nextTimeRef", "previousTimeRef"),
+      SEP,
+      { label: "Packet Comments", sub: commentItems(), disabled: !commands.addComment.enabled() },
+      item("deleteAllComments"),
     ],
   },
   {

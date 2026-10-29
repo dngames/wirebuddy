@@ -1,27 +1,31 @@
 // A stand-in for sharkd that runs the real one (REAL_SHARKD) and can hold a full read: while the
 // file HOLD exists, loading a capture outside a folder of slices waits, with the file HELD there,
 // until HOLD goes (the load goes on) or KILL appears (KILL and HOLD go, and sharkd is SIGKILLed,
-// as by the kernel's OOM killer).
+// as by the kernel's OOM killer). With HOLD_FILTER set, it holds the "frames" requests with that
+// display filter instead of loads.
 // Usage: put an executable named sharkd first on PATH that runs node test/holding-sharkd.mjs "$@".
 import { spawn } from "node:child_process";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 
-const { REAL_SHARKD, HOLD, HELD, KILL } = process.env;
+const { REAL_SHARKD, HOLD, HELD, KILL, HOLD_FILTER } = process.env;
 const sharkd = spawn(REAL_SHARKD, process.argv.slice(2), { stdio: ["pipe", "inherit", "inherit"] });
 sharkd.on("exit", (code, signal) => (signal ? process.kill(process.pid, signal) : process.exit(code ?? 0)));
 sharkd.stdin.on("error", () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Passes a request on, a held load once it may go on. */
+/** Passes a request on, a held one once it may go on. */
 async function pass(line) {
   let file = "";
+  let filter = null;
   try {
     const m = JSON.parse(line);
     if (m.method === "load") file = String(m.params?.file ?? "");
+    if (m.method === "frames") filter = m.params?.filter ?? null;
   } catch {
     // not a request
   }
-  if (file && !file.includes(".wirebuddy-slices-") && existsSync(HOLD)) {
+  const held = HOLD_FILTER ? filter === HOLD_FILTER : file && !file.includes(".wirebuddy-slices-");
+  if (held && existsSync(HOLD)) {
     writeFileSync(HELD, String(process.pid));
     while (existsSync(HOLD)) {
       if (existsSync(KILL)) {

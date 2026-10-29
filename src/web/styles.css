@@ -971,6 +971,37 @@ input[type="checkbox"] {
   display: block;
 }
 
+/* A packet with comments: a speech bubble in the comment color */
+.pl-cm {
+  display: none;
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  z-index: 1;
+  width: 11px;
+  height: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: 2px;
+  background: var(--sev-comment);
+}
+
+.pl-cm::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 1px;
+  border-top: 4px solid rgba(0, 0, 0, 0.55);
+  border-right: 4px solid transparent;
+}
+
+.pl-row.commented .pl-cm {
+  display: block;
+}
+
+.pl-row.mark-agent.commented .pl-cm {
+  left: 21px;
+}
+
 .pl-row.flash {
   animation: rowflash 1.6s ease-out;
 }
@@ -1812,6 +1843,10 @@ input[type="checkbox"] {
 .goto-hint {
   color: var(--text-dim);
   font-size: 12px;
+}
+
+.goto-hint.ex-warn {
+  color: var(--warn);
 }
 
 .ask-in {

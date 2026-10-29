@@ -4,6 +4,7 @@ import type { FrameDetail, TreeNode } from "../shared/api.ts";
 import * as act from "./actions.ts";
 import { bus, hooks } from "./app.ts";
 import { fieldInfoText, fieldName, fieldValue, frameInfo, nodeLabel, sevClass, srcIndex, walk } from "./frame.ts";
+import { openCommentDialog } from "./dialogs/comment.ts";
 import { followItems } from "./dialogs/follow.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
 import { bytesToHex, copyText, h, IS_MAC, isMod, keyLabel } from "./util.ts";
@@ -262,7 +263,21 @@ function nodeMenu(n: TreeNode, x: number, y: number): void {
   ];
   if (n.t === "framenum" && n.fnum) items.push(SEP, { label: `Go to Packet ${n.fnum}`, action: () => activateLink(n) });
   if (n.t === "url" && n.url && /^https?:\/\//i.test(n.url)) items.push(SEP, { label: "Open Link in New Tab", action: () => activateLink(n) });
+  const index = commentIndex(n);
+  if (fd && index >= 0) {
+    const { num, row } = fd;
+    const text = row?.cm?.[index] ?? fieldValue(n);
+    items.push(SEP, { label: "Edit Comment…", action: () => openCommentDialog({ frame: num, index, text }) }, { label: "Delete Comment", action: () => void act.deleteComment(num, index, text) });
+  }
   showMenu(items, x, y);
+}
+
+/** Which of the packet's comments a frame.comment item (or one of its lines) shows, or -1. */
+function commentIndex(n: TreeNode): number {
+  if (n.fn !== "frame.comment") return -1;
+  let item = n;
+  for (let p = parentOf(item); p; item = p, p = parentOf(p)) if (p.fn === "pkt_comment") return p.n?.indexOf(item) ?? -1;
+  return -1;
 }
 
 function onKey(e: KeyboardEvent): void {

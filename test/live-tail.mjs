@@ -7,7 +7,8 @@
 // reads wait, matches that later packets change are listed anew, reads in place don't fail
 // requests in flight, and one killed for memory lists the file from slices without blaming an
 // extension. A full read that dies after the stop, with the final read still to come, leaves it to
-// that one (test/holding-sharkd.mjs holds and kills it). A server ends on SIGHUP as on SIGTERM,
+// that one (test/holding-sharkd.mjs holds and kills it). A capture going on in a new file drops the
+// comments edited in the last one and says so. A server ends on SIGHUP as on SIGTERM,
 // also right as its URL is out, and removes slices killed ones left. A panel offer that only later
 // packets match is checked from slices of them. Provisional rows and details count from time
 // references, also one long before their slice. dumpcap is test/fake-dumpcap.mjs, which writes
@@ -16,7 +17,7 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -182,6 +183,32 @@ try {
     assert.equal(end.totalFrames, s.capture.packets);
   });
 
+  await check("a capture going on in a new file: comments edited in the last one and not exported are gone, and the user and the agent hear so", async () => {
+    const toasts = [];
+    const ws = new WebSocket(`${wb.ui.origin.replace("http", "ws")}/ws?token=${wb.ui.searchParams.get("token")}`);
+    ws.on("message", (m) => {
+      const e = JSON.parse(String(m));
+      if (e.type === "toast") toasts.push(e.text);
+    });
+    await new Promise((resolve, reject) => (ws.once("open", resolve), ws.once("error", reject)));
+    try {
+      await api("/api/capture/start", { iface: "lo", filter: "burst 200 rate 50", autostop: {}, ring: { packets: 400 } });
+      const first = await until("the first file", 15_000, (s) => s.file === s.capture.files[0] && s.totalFrames > 0);
+      await api("/api/comments", { frames: [5], comment: "important" });
+      const next = await until("the next file", 30_000, (s) => s.file === s.capture.files[1] && s.totalFrames > 0);
+      assert.equal(next.commentEdits, 0);
+      const text = `The packet comments edited in 1 packet of ${basename(first.file)} weren't exported and are gone: the capture went on in ${basename(next.file)}`;
+      const events = (await api("/api/events?after=0")).events.map((e) => `${e.level} ${e.text}`);
+      assert.ok(events.includes(`WARNING ${text}`), events.join("\n"));
+      for (const end = Date.now() + 5000; !toasts.includes(text) && Date.now() < end; ) await sleep(100);
+      assert.ok(toasts.includes(text), toasts.join("\n"));
+    } finally {
+      ws.close();
+      await api("/api/capture/stop", {});
+      await until("the capture to stop", 15_000, (s) => s.capture.status === "idle");
+    }
+  });
+
   // Provisional rows seen during the capture, to compare once they are exact, and the packets there were then
   const seen = new Map();
   let knownThen = 0;
@@ -310,6 +337,12 @@ try {
     await api("/api/marks", { frames: [num], note: "provisional" });
     marked = num;
     markedBytes = d.bytes;
+    // A comment on it shows in its details and its row, as on a packet read in full
+    assert.deepEqual((await api("/api/comments", { frames: [num], comment: "on a provisional packet" })).frames, [num]);
+    const commented = await api(`/api/frame?num=${num}`);
+    await stillProvisional(num, commented.provisional === true, `frame ${num} is not provisional`);
+    assert.deepEqual([commented.tree[0].fn, commented.tree[0].n[0].l, commented.row.cm], ["pkt_comment", "on a provisional packet", ["on a provisional packet"]]);
+    assert.match(commented.tree[1].l, new RegExp(`^Frame ${num}:`));
     const s = await state();
     assert.equal(s.selected, num);
     assert.equal(s.selectedIndex, s.displayedFrames + (num - s.totalFrames - 1));
@@ -525,6 +558,7 @@ try {
     const d = await api(`/api/frame?num=${marked}`);
     assert.equal(d.provisional, undefined);
     assert.equal(d.bytes, markedBytes);
+    assert.deepEqual([d.tree[0].n[0].l, d.row.cm], ["on a provisional packet", ["on a provisional packet"]], "its comment stays");
     if (!browser) return;
     let left;
     for (const end = Date.now() + 10_000; left !== 0 && Date.now() < end; await sleep(200)) left = await browser.evaluate("document.querySelectorAll('.pl-row.prov').length + (document.querySelector('.sb-live').hidden ? 0 : 1)");

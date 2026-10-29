@@ -22,6 +22,19 @@
  * few seconds after a request for the list's newest rows, the provisional
  * rows it gains are read before the list shows them.
  *
+ * Packet comments edited in the viewer (`/api/comments*`) stay in the
+ * viewer, by frame number, until the capture is closed or another one
+ * opened; only an export to pcapng writes them ({@link PacketRow.cm}). A
+ * comment holds at most 2000 characters; newlines are kept, other control
+ * characters become "?". `/api/comments` adds `comment` to `frames`, else to
+ * the rows `rows` (or the frame `frame`) of the list `view` showed (409 once
+ * that list is gone), else to the selected packets. `/api/comments/delete`
+ * deletes the comments of `frames` (else of the selected packets), or with
+ * `index` one of `frame`'s. Edits and deletes by `index` name the comment's
+ * text as `old` and get 409 once it changed; `comment` "" deletes it.
+ * `/api/comments/clear` deletes every comment in the capture, the file's too.
+ * Edits of a capture closed meanwhile get 409.
+ *
  * Endpoints:
  *
  * | Method | Path                          | Body / query                         | Response               |
@@ -55,6 +68,10 @@
  * | POST   | /api/timerefs                 | { frames, on: boolean }              | TimeRefsChange         |
  * | POST   | /api/timerefs/toggle          | (the selected frames, else the current one) | TimeRefsChange  |
  * | POST   | /api/timerefs/clear           |                                      | TimeRefsChange         |
+ * | POST   | /api/comments                 | { comment, frames?, view?, ... }     | CommentResult          |
+ * | POST   | /api/comments/edit            | { frame, index, old, comment }       | CommentResult          |
+ * | POST   | /api/comments/delete          | { frames? } or { frame, index, old } | CommentResult          |
+ * | POST   | /api/comments/clear           |                                      | CommentResult          |
  * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
  * | GET    | /api/extensions               |                                      | ExtensionList          |
@@ -98,8 +115,8 @@ export interface ViewState {
   loadError: string | null;
   /**
    * Bumps whenever the displayed rows change: file opened, live reload,
-   * filter applied, provisional rows added, time references set. Rows
-   * fetched for an older generation may be outdated.
+   * filter applied, provisional rows added, time references set, packet
+   * comments edited. Rows fetched for an older generation may be outdated.
    */
   generation: number;
   /** Random id of the server process; a new value means the server restarted. */
@@ -153,6 +170,15 @@ export interface ViewState {
    * keeps it hidden, and packets after it still count from it.
    */
   timeRefs: number[];
+  /**
+   * Packets whose comments were added, edited or deleted in the viewer and
+   * not exported since: an export of every packet to pcapng keeps them,
+   * closing or opening another capture discards them, and so does a live
+   * capture going on in a new file (a WARNING event and a toast say so).
+   */
+  commentEdits: number;
+  /** Grows with every change to packet comments: rows and details read differently. */
+  commentRevision: number;
   capture: CaptureState;
   /** Last action the agent took in the UI, shown as a dismissable banner. */
   agentNotice: AgentNotice | null;
@@ -324,6 +350,12 @@ export interface PacketRow {
   /** Coloring-rule background and foreground, hex without "#", e.g. "daeeff". */
   bg?: string;
   fg?: string;
+  /**
+   * Packet comments: as edited in the viewer, else the file's. Text from a
+   * capture file is untrusted. The list's rows (`/api/rows`) carry the first
+   * 5, each cut at 300 characters ("…" ends a cut one); others all of them.
+   */
+  cm?: string[];
   /**
    * Provisional: a live capture's packet the last full read of the file
    * didn't cover yet, dissected from a slice of the newest packets (see
@@ -557,8 +589,19 @@ export interface ExportRequest {
   range?: string;
   /** Replace an existing file. */
   overwrite?: boolean;
-  /** Write the marks of the exported packets, with their notes, as packet comments (pcapng only). */
+  /**
+   * Write the marks of the exported packets, with their notes, as packet
+   * comments after their own (pcapng only). Packet comments edited in the
+   * viewer always go along in pcapng.
+   */
   markComments?: boolean;
+}
+
+/** Packets whose comments an edit changed. */
+export interface CommentResult {
+  /** Their frame numbers, the first 10000. */
+  frames: number[];
+  count: number;
 }
 
 /** Something that happened in the viewer, for the agent: a problem or what the user did. */
@@ -595,6 +638,8 @@ export interface ExportResult {
   size: number;
   /** Marks written as packet comments. */
   comments: number;
+  /** Packets written with their comments as edited in the viewer. */
+  edited?: number;
   /** Newer packets of a live capture left out because they weren't read in full yet (export by display filter). */
   leftOut?: number;
   /** Of `frames`, packets of a live capture that weren't read in full yet (written as captured). */

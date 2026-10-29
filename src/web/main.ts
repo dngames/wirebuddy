@@ -68,7 +68,8 @@ function init(): void {
     const showWelcome = !s.file && !s.loading;
     welcome.hidden = !showWelcome;
     panes.hidden = showWelcome;
-    document.title = s.file ? `${baseName(s.file)} — ${APP_NAME}` : APP_NAME;
+    // Comments not exported yet: Wireshark's mark of unsaved changes
+    document.title = s.file ? `${s.commentEdits ? "*" : ""}${baseName(s.file)} — ${APP_NAME}` : APP_NAME;
     const hasFile = !!s.file;
     if (hasFile && !hadFile && !isTextInput(document.activeElement)) window.setTimeout(focusPacketList, 0);
     hadFile = hasFile;
@@ -95,10 +96,10 @@ function init(): void {
     setDetailsFrame(fd);
   });
 
-  // Reloaded extensions dissect the shown packet differently
+  // Reloaded extensions dissect the shown packet differently; edited comments change its details
   let extKey = "";
   bus.on("state", (s) => {
-    const key = `${s.instance}|${s.extensions.revision}`;
+    const key = `${s.instance}|${s.extensions.revision}|${s.commentRevision}`;
     if (extKey && key !== extKey) act.reloadFrame();
     extKey = key;
   });

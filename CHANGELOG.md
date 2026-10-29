@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 - Time references, as in Wireshark's Edit menu, and the agent's `time_references` tool
+- Packet comments: add, edit and delete them as in Wireshark's Edit › Packet Comments, for the agent too; pcapng exports keep them
 
 ## [0.11.0] - 2026-10-28
 

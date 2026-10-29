@@ -18,7 +18,7 @@ writeFileSync(
   ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
+const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
   await import(join(out, "units.mjs"));
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 
@@ -34,6 +34,17 @@ async function check(name, fn) {
 }
 
 const frames = (set, after = 0, limit = 1e6) => set.page(after, limit).frames;
+
+/** Packet comments of a capture, frame by frame, as sharkd reads them. */
+function packetComments(file) {
+  const input = [
+    { id: 1, method: "load", params: { file } },
+    { id: 2, method: "frames", params: { column0: "frame.number:0" } },
+  ].map((m) => JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n").join("");
+  const env = { ...process.env, HOME: out, XDG_CONFIG_HOME: join(out, ".config"), XDG_DATA_HOME: join(out, ".local/share") };
+  const lines = execFileSync("sharkd", ["-"], { input, env, stdio: ["pipe", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }).toString().trim().split("\n");
+  return JSON.parse(lines[lines.length - 1]).result.map((r) => r.comments ?? []);
+}
 
 try {
   await check("frame sets: building, clipping, intersecting, ranking, paging", () => {
@@ -271,20 +282,69 @@ try {
     const big = join(out, "big.pcapng");
     execFileSync("mergecap", ["-a", "-F", "pcapng", "-w", big, ...Array(42).fill(fixture)]);
     // 1200 comments of about 600 bytes: two runs
-    const comments = new Map(Array.from({ length: 1200 }, (_, i) => [i + 1, `note ${i + 1} ${"x".repeat(600)}`]));
+    const comments = new Map(Array.from({ length: 1200 }, (_, i) => [i + 1, { own: true, texts: [`note ${i + 1} ${"x".repeat(600)}`] }]));
     const output = join(out, "commented.pcapng");
     await exportFrames({ editcap: "editcap", mergecap: "mergecap", input: big, output, format: "pcapng", ranges: [[1, 1218]], comments });
-    const input = [
-      { id: 1, method: "load", params: { file: output } },
-      { id: 2, method: "frames", params: { column0: "frame.number:0" } },
-    ].map((m) => JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n").join("");
-    const env = { ...process.env, HOME: out, XDG_CONFIG_HOME: join(out, ".config"), XDG_DATA_HOME: join(out, ".local/share") };
-    const lines = execFileSync("sharkd", ["-"], { input, env, stdio: ["pipe", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }).toString().trim().split("\n");
-    const rows = JSON.parse(lines[lines.length - 1]).result;
+    const rows = packetComments(output);
     assert.equal(rows.length, 1218);
-    for (const [i, r] of rows.entries()) assert.deepEqual(r.comments ?? [], i < 1200 ? [comments.get(i + 1)] : []);
+    for (const [i, r] of rows.entries()) assert.deepEqual(r, i < 1200 ? comments.get(i + 1).texts : []);
     assert.doesNotMatch(execFileSync("capinfos", ["-k", output], { encoding: "utf8" }), /merging/);
     assert.deepEqual(readdirSync(out).filter((f) => f.startsWith(".wirebuddy-export-")), []);
+  });
+
+  await check("export: several comments a frame, in place of its own ones or after them, also over several runs", async () => {
+    // Frame 2 has two comments of its own, frame 4 one
+    const once = join(out, "own1.pcapng");
+    const own = join(out, "own.pcapng");
+    execFileSync("editcap", ["-a", "2:own a", join(root, "test/fixtures/http.pcapng"), once]);
+    execFileSync("editcap", ["--preserve-packet-comments", "-a", "2:own b", "-a", "4:own c", once, own]);
+    const comments = new Map([
+      [2, { own: false, texts: ["x", "", "y", "z"] }],
+      [3, { own: true, texts: ["mark 3"] }],
+      [4, { own: true, texts: ["mark 4", "more 4"] }],
+      [6, { own: false, texts: [] }],
+      [9, { own: false, texts: ["", "nine"] }],
+    ]);
+    // Empty comments are left out: editcap can't write them
+    const want = { 2: ["x", "y", "z"], 3: ["mark 3"], 4: ["own c", "mark 4", "more 4"], 9: ["nine"] };
+    // Later passes find a frame by its place in what the first one wrote
+    for (const ranges of [[[1, 29]], [[2, 4], [9, 20]]]) {
+      const output = join(out, "passes.pcapng");
+      await exportFrames({ editcap: "editcap", mergecap: "mergecap", input: own, output, format: "pcapng", ranges, comments });
+      const frames = ranges.flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i));
+      assert.deepEqual(packetComments(output), frames.map((f) => want[f] ?? []));
+    }
+    // Two runs, each with the passes its frames need
+    const frames = [...Array.from({ length: 600 }, (_, i) => i * 2 + 1), 2, 1100].sort((a, b) => a - b);
+    const spread = new Map([
+      [2, { own: false, texts: ["a", "b"] }],
+      [1100, { own: true, texts: ["c", "d", "e"] }],
+    ]);
+    const output = join(out, "spread.pcapng");
+    await exportFrames({ editcap: "editcap", mergecap: "mergecap", input: join(out, "big.pcapng"), output, format: "pcapng", ranges: frames.map((f) => [f, f]), comments: spread });
+    const got = packetComments(output);
+    assert.equal(got.length, 602);
+    assert.deepEqual([got[frames.indexOf(2)], got[frames.indexOf(1100)], got.flat().length], [["a", "b"], ["c", "d", "e"], 5]);
+    assert.deepEqual(readdirSync(out).filter((f) => /\.next$|^\.wirebuddy-export-/.test(f)), []);
+  });
+
+  await check("export: one pass for comments added to frames that keep their own ones and to frames without; frames up to cleared lose theirs", async () => {
+    // Frames without comments of their own take a comment in a pass that keeps or replaces them
+    const added = new Map([
+      [2, { own: true, texts: ["after own"] }],
+      [5, { texts: ["new"] }],
+    ]);
+    assert.deepEqual(commentPasses([[1, 29]], added), { first: ["--preserve-packet-comments", "-a", "2:after own", "-a", "5:new"], later: [] });
+    added.set(4, { own: false, texts: ["instead"] });
+    assert.deepEqual(commentPasses([[1, 29]], added), { first: ["-a", "4:instead", "-a", "5:new"], later: [["-a", "2:after own"]] });
+    assert.deepEqual(commentPasses([[1, 29]], added, true), { first: ["--discard-packet-comments", "-a", "2:after own", "-a", "4:instead", "-a", "5:new"], later: [] });
+    // Frames 2 and 4 have comments of their own; up to 3 they go, the rest keep theirs
+    const own = join(out, "own.pcapng");
+    const output = join(out, "cleared.pcapng");
+    await exportFrames({ editcap: "editcap", mergecap: "mergecap", input: own, output, format: "pcapng", ranges: [[1, 29]], comments: new Map([[3, { texts: ["three"] }]]), cleared: 3 });
+    const want = Array.from({ length: 29 }, () => []);
+    Object.assign(want, { 2: ["three"], 3: ["own c"] });
+    assert.deepEqual(packetComments(output), want);
   });
 
   await check("saved objects: safe names, a new private folder, never over a file", () => {
