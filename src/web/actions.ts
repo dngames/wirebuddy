@@ -6,7 +6,7 @@ import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks, knownFrames } from "./app.ts";
 import { confirmDialog } from "./dialog.ts";
 import { toast, toastError } from "./toast.ts";
-import { fmtInt, sameList, save } from "./util.ts";
+import { fmtInt, save } from "./util.ts";
 
 // ---------------------------------------------------------------- state sync
 
@@ -116,7 +116,7 @@ export function applyState(s: ViewState): void {
   if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
   // A provisional packet read in full now: its exact details; other time references: its times
   if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) reloadFrame();
-  else if (app.selFrame !== null && prev?.file === s.file && !sameList(prev.timeRefs, s.timeRefs)) reloadFrame();
+  else if (app.selFrame !== null && prev?.file === s.file && prev.timeRefsRevision !== s.timeRefsRevision) reloadFrame();
   else if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
   if (reveal) bus.emit("reveal", reveal.index, reveal.flash);
 }

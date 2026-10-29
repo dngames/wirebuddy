@@ -21,7 +21,7 @@ import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
 import { toastError } from "./toast.ts";
-import { clamp, copyText, csvField, fontOf, h, IS_MAC, isMod, keyLabel, keyLetter, load, measureText, sameList, save } from "./util.ts";
+import { clamp, copyText, csvField, fontOf, h, IS_MAC, isMod, keyLabel, keyLetter, load, measureText, save } from "./util.ts";
 
 const RH = 20;
 const PAGE = 200;
@@ -926,7 +926,7 @@ export function createPacketList(): HTMLElement {
       if (sameRows) {
         stale = new Map([...stale, ...pages]);
         // Other time references: pages asked for before come again
-        if (!sameList(prev.timeRefs, s.timeRefs)) {
+        if (prev.timeRefsRevision !== s.timeRefsRevision) {
           timesGen = s.generation;
           inflight = new Map();
         }

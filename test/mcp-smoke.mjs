@@ -264,7 +264,7 @@ try {
   // Time references: the user sees them with a notice; the agent's rows, fields and details count from them
   const notice = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice?.text;
   assert.ok(names.includes("time_references"));
-  assert.match(client.getInstructions() ?? "", /mark_frames, time_references and set_columns change what the user sees/);
+  assert.match(client.getInstructions() ?? "", /mark_frames, time_references, packet_comments and set_columns change what the user sees/);
   await call("set_display_filter", { filter: "" });
   await call("time_references", { action: "set" }, (t, r) => assert.ok(r.isError && /give the frames to set/.test(t), t));
   await call("time_references", { action: "set", frames: [8, 4, 500] }, (t) => assert.match(t, /^Set time references on 2 frames; ignored 1 frame\(s\) beyond the 29 in the capture: 500; 2 time reference\(s\): 4, 8/));
@@ -372,7 +372,8 @@ try {
   const acmeFile = join(out, "acme.pcap");
   writeAcmeCapture(acmeFile);
   const extDir = join(home, ".local/share/wirebuddy/extensions");
-  // The comments edited in the fixture weren't exported in full: the agent hears they are gone
+  // Comments edited and not exported: the agent hears they are gone
+  await call("packet_comments", { action: "add", frames: [3, 4, 5, 7], comment: "left behind" });
   await call("open_capture", { path: acmeFile }, (t) => assert.match(t, /20 frames.*; the comments edited in 4 packets and not exported were discarded$/m));
   await call("capture_summary", {}, (t) => {
     assert.match(t, /Undecoded payload \("data"\): 20 frames/);

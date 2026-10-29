@@ -170,6 +170,8 @@ export interface ViewState {
    * keeps it hidden, and packets after it still count from it.
    */
   timeRefs: number[];
+  /** Grows with every change to the time references, also one undone before the next state: rows and details read differently. */
+  timeRefsRevision: number;
   /**
    * Packets whose comments were added, edited or deleted in the viewer and
    * not exported since: an export of every packet to pcapng keeps them,

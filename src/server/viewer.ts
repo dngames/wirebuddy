@@ -380,6 +380,7 @@ export class Viewer extends EventEmitter {
       rowsSince: 0,
       marks: [],
       timeRefs: [],
+      timeRefsRevision: 0,
       commentEdits: 0,
       commentRevision: 0,
       capture: this.capture.state,
@@ -1706,10 +1707,10 @@ export class Viewer extends EventEmitter {
         const was = this.displayed;
         if (displayed && !(was && was.length === displayed.length && was.every((f, i) => f === displayed[i]))) {
           this.displayed = displayed;
-          this.state = { ...this.state, timeRefs: refs, displayedFrames: displayed.length, generation, rowsSince: generation };
+          this.state = { ...this.state, timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, displayedFrames: displayed.length, generation, rowsSince: generation };
           const selectedIndex = this.indexOf(this.state.selected);
           this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
-        } else this.set({ timeRefs: refs, generation });
+        } else this.set({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, generation });
         if (by === "agent") {
           const text = changeText(change);
           this.notice(notice ?? text[0].toUpperCase() + text.slice(1));

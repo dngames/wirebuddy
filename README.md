@@ -441,7 +441,7 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
 - Packet comments added, edited or deleted in the viewer stay there until the capture is closed
   or another one opened, also when a live capture goes on in a new file (ring buffer, new file
   after …; WireBuddy says when that discards edits); only an export to pcapng (File › Save As)
-  keeps them. Display filters on `frame.comment`, Expert Information and the agent's
+  keeps them, and "Open in Wireshark" opens the file without them. Display filters on `frame.comment`, Expert Information and the agent's
   `query_packets` fields read the comments in the file: edits reach them once exported and that
   file opened.
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
