@@ -1,6 +1,7 @@
 # WireBuddy
 
 [![CI](https://github.com/dngames/wirebuddy/actions/workflows/ci.yml/badge.svg)](https://github.com/dngames/wirebuddy/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/wirebuddy)](https://www.npmjs.com/package/wirebuddy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 <p align="center">
