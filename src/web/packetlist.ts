@@ -20,7 +20,7 @@ import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
 import { toastError } from "./toast.ts";
-import { clamp, copyText, csvField, fontOf, h, IS_MAC, isMod, keyLabel, keyLetter, load, measureText, save } from "./util.ts";
+import { clamp, copyText, csvField, fontOf, h, IS_MAC, isMod, keyLabel, keyLetter, load, measureText, sameList, save } from "./util.ts";
 
 const RH = 20;
 const PAGE = 200;
@@ -69,6 +69,8 @@ let stale = new Map<number, PacketRow[]>();
 let ghosts = new Map<number, PacketRow[]>();
 /** Pages asked for, with the rows asked for; requests for older generations of the list count too. */
 let inflight = new Map<number, number>();
+/** Generation the time references last changed at: rows of older generations read other times. */
+let timesGen = 0;
 const failed = new Map<number, number>();
 let errorToastAt = 0;
 
@@ -387,7 +389,7 @@ async function fetchPage(p: number): Promise<void> {
     if (g !== gen) {
       // The list only grew since (a live capture): the same frames, as the server reads them now
       if (pages.has(p)) return;
-      if (current(rows, start)) setPage(p, rows);
+      if (g >= timesGen && current(rows, start)) setPage(p, rows);
       else {
         stale.set(p, [...rows, ...(stale.get(p)?.slice(rows.length) ?? [])]);
         trimStale();
@@ -411,7 +413,7 @@ async function fetchPage(p: number): Promise<void> {
       toastError(e, "Loading packets failed");
     }
   } finally {
-    if (inflight.get(p) === count && viewKey() === view) inflight.delete(p);
+    if (inflight.get(p) === count && viewKey() === view && g >= timesGen) inflight.delete(p);
     scheduleRender();
   }
 }
@@ -774,6 +776,7 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
       shortcut: keyLabel("Ctrl+M"),
       action: () => void act.toggleMarkSelected(),
     },
+    { label: n > 1 ? `Set/Unset Time References on ${n} Packets` : "Set/Unset Time Reference", action: () => void act.toggleTimeRefSelected() },
     SEP,
     { label: "Apply as Filter", sub: filterItems(true), disabled: !conv.length },
     { label: "Prepare as Filter", sub: filterItems(false), disabled: !conv.length },
@@ -915,12 +918,19 @@ export function createPacketList(): HTMLElement {
     // Provisional rows of a live capture follow the ones read in full
     total = s.file ? Math.max(0, s.displayedFrames + (s.tail?.displayed ?? 0)) : 0;
     if (genChanged) {
-      if (sameRows) stale = new Map([...stale, ...pages]);
-      else {
+      if (sameRows) {
+        stale = new Map([...stale, ...pages]);
+        // Other time references: pages asked for before come again
+        if (!sameList(prev.timeRefs, s.timeRefs)) {
+          timesGen = s.generation;
+          inflight = new Map();
+        }
+      } else {
         // Same file and filter: old rows stay as placeholders until refetched
         ghosts = sameView ? new Map([...ghosts, ...stale, ...pages]) : new Map();
         stale = new Map();
         inflight = new Map();
+        timesGen = 0;
       }
       gen = s.generation;
       pages = new Map();

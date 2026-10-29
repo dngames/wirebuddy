@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
 import { writeAcmeCapture } from "./acme.mjs";
+import * as g from "./capgen.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -232,6 +233,41 @@ try {
   await call("goto_frame", { frame: 4 }, (t) => assert.match(t, /row 1 of 4/));
   await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /Selected packets/));
   await call("clear_marks", {}, (t) => assert.match(t, /0 marks left/));
+  // Time references: the user sees them with a notice; the agent's rows, fields and details count from them
+  const notice = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice?.text;
+  assert.ok(names.includes("time_references"));
+  assert.match(client.getInstructions() ?? "", /mark_frames, time_references and set_columns change what the user sees/);
+  await call("set_display_filter", { filter: "" });
+  await call("time_references", { action: "set" }, (t, r) => assert.ok(r.isError && /give the frames to set/.test(t), t));
+  await call("time_references", { action: "set", frames: [8, 4, 500] }, (t) => assert.match(t, /^Set time references on 2 frames; ignored 1 frame\(s\) beyond the 29 in the capture: 500; 2 time reference\(s\): 4, 8/));
+  assert.equal(await notice(), "Set time references on 2 frames");
+  await call("get_view_state", {}, (t) => {
+    assert.match(t, /^Time references \(2\): 4, 8$/m);
+    assert.match(t, /Time columns show \*REF\* on them and count each later packet from the nearest one before it/);
+    assert.match(t, /display filters on frame\.time_relative still count from the first packet; the filter frame\.ref_time matches them$/m);
+  });
+  await call("query_packets", { filter: "frame.number >= 7 && frame.number <= 9" }, (t) => {
+    assert.match(t, /^3 frames match/);
+    assert.match(t, /^8 \| \*REF\* \|/m);
+    assert.match(t, /^9 \| 0\.000005433 \|/m);
+  });
+  await call("query_packets", { filter: "frame.ref_time", fields: ["frame.time_relative", "frame.ref_time"] }, (t) => {
+    assert.match(t, /^2 frames match "frame\.ref_time"/);
+    assert.match(t, /^8 \| 0\.000000000 \| ✓$/m);
+  });
+  await call("inspect_frame", { frame: 9, protocols: ["frame"] }, (t) => assert.match(t, /Time since reference or first frame: 5\.433 microseconds/));
+  await call("time_references", { action: "unset", frames: [4] }, (t) => assert.match(t, /^Unset the time reference on frame 4; 1 time reference\(s\): 8/));
+  await call("time_references", { action: "clear" }, (t) => assert.match(t, /^Unset the time reference on frame 8; 0 time reference\(s\)/));
+  assert.equal(await notice(), "Unset all time references");
+  await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /Time references/));
+  // Too many scattered ones for frame.ref_time: said, not claimed
+  const many = join(out, "many.pcap");
+  writeFileSync(many, Buffer.concat([g.pcapHeader(), ...Array.from({ length: 3000 }, (_, i) => g.pcapRecord(1_700_000_000 + i, 0, g.udpFrame(i + 1)))]));
+  await call("open_capture", { path: many }, (t) => assert.match(t, /3000 frames/));
+  await call("time_references", { action: "set", frames: Array.from({ length: 1500 }, (_, i) => 2 * i + 1) });
+  await call("get_view_state", {}, (t) => assert.match(t, /the filter frame\.ref_time can't stand for this many scattered ones \(unset some to use it\)$/m));
+  await call("set_display_filter", { filter: "frame.ref_time" }, (t, r) => assert.ok(r.isError && /too long for sharkd; unset some of them/.test(t), t));
+  await call("open_capture", { path: fixture });
   // Problems the user runs into come back with the next tool result, and wake a watcher
   const command = /`"([^"]+)" "([^"]+)" --watch "([^"]+)"`/.exec(client.getInstructions() ?? "");
   assert.ok(command, "the instructions name the watch command");

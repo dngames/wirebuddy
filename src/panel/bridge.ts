@@ -231,7 +231,7 @@ const FILTER_WAIT_MS = 5 * 60_000;
 
   // --- the view, and events about it
 
-  let view: PanelView = JSON.parse(meta("wb-view") || "null") ?? { file: null, epoch: 0, frames: 0, displayed: 0, filter: "", selected: null, selection: null, marked: 0, live: false, capture: "idle" };
+  let view: PanelView = JSON.parse(meta("wb-view") || "null") ?? { file: null, epoch: 0, frames: 0, displayed: 0, filter: "", selected: null, selection: null, marked: 0, timeRefs: 0, live: false, capture: "idle" };
   const listeners = new Map<WbEvent, Set<(v: never) => unknown>>();
   /** Calls `fn` on an event; returns a function that stops it. */
   function on(event: WbEvent, fn: (v: never) => unknown): () => void {

@@ -9,7 +9,8 @@
 // extension. A full read that dies after the stop, with the final read still to come, leaves it to
 // that one (test/holding-sharkd.mjs holds and kills it). A server ends on SIGHUP as on SIGTERM,
 // also right as its URL is out, and removes slices killed ones left. A panel offer that only later
-// packets match is checked from slices of them. dumpcap is test/fake-dumpcap.mjs, which writes
+// packets match is checked from slices of them. Provisional rows and details count from time
+// references, also one long before their slice. dumpcap is test/fake-dumpcap.mjs, which writes
 // generated traffic. The packet list's marking is checked in headless Chrome when there is one.
 // Usage: node test/live-tail.mjs   (after npm run build; CHROME=<path> picks the browser)
 import { spawn } from "node:child_process";
@@ -243,6 +244,54 @@ try {
       }
     }
   });
+
+  await check("time references among provisional packets: *REF*, and rows and details count from the nearest one, also one long before them", async () => {
+    try {
+      for (let attempt = 1; ; attempt++) {
+        const s = await until("newer packets", 10_000, (s) => s.tail?.frames > 50 && s.totalFrames > 1000);
+        try {
+          // One far from the slices' flows' first packets, and a provisional one
+          await provisionalRefs(Math.floor(s.totalFrames / 2) + 7, s.totalFrames + s.tail.frames - 20);
+          return;
+        } catch (err) {
+          if (attempt >= 5 || !err.overtaken) throw err;
+        }
+      }
+    } finally {
+      await tool("time_references", { action: "clear" });
+    }
+  });
+
+  /** Sets the exact frame `early` and the provisional `ref` as time references and checks the rows and details around `ref`. */
+  async function provisionalRefs(early, ref) {
+    const set = await tool("time_references", { action: "set", frames: [early, ref] });
+    assert.match(set.text, new RegExp(`^Set time references on 2 frames; 2 time reference\\(s\\): ${early}, ${ref}`), set.text);
+    assert.equal((await state()).agentNotice.text, "Set time references on 2 frames");
+    // No display filter: the row of frame n is n - 1
+    const { rows } = await wb.rows(ref - 3, 5);
+    await stillProvisional(ref, rows.length === 5 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
+    const row = new Map(rows.map((r) => [r.num, r]));
+    assert.equal(row.get(ref).c[1], "*REF*");
+    const UNITS = { day: 86400, hour: 3600, minute: 60, second: 1, millisecond: 1e-3, microsecond: 1e-6, nanosecond: 1e-9 };
+    /** Nanoseconds since 1970, and seconds since the reference ("2 minutes, 9.984000000 seconds"), as the frame's details say. */
+    const times = async (num) => {
+      const d = await api(`/api/frame?num=${num}`);
+      const node = (fn) => d.tree.find((n) => n.fn === "frame").n.find((n) => n.fn === fn)?.l ?? "";
+      const parts = [...node("frame.time_relative").matchAll(/([\d.]+) (day|hour|minute|second|millisecond|microsecond|nanosecond)s?\b/g)];
+      assert.ok(parts.length, node("frame.time_relative"));
+      const [s, f = ""] = /: (\d+(?:\.\d+)?)/.exec(node("frame.time_epoch"))[1].split(".");
+      return { provisional: !!d.provisional, ref: !!node("frame.ref_time"), epoch: BigInt(s) * 1_000_000_000n + BigInt(f.padEnd(9, "0")), since: parts.reduce((t, [, v, unit]) => t + Number(v) * UNITS[unit], 0) };
+    };
+    const [first, before, at, after] = await Promise.all([early, ref - 2, ref, ref + 1].map(times));
+    await stillProvisional(ref, before.provisional && at.provisional && after.provisional, "details not provisional");
+    assert.deepEqual([at.ref, at.since, after.ref], [true, 0, false]);
+    const seconds = (ns) => Number(ns) / 1e9;
+    for (const [what, t, from, num] of [["after it", after, at, ref + 1], [`before it, from frame ${early}`, before, first, ref - 2]]) {
+      const want = seconds(t.epoch - from.epoch);
+      assert.ok(Math.abs(t.since - want) < 2e-6, `${what}: details ${t.since}, want ${want}`);
+      assert.ok(Math.abs(Number(row.get(num).c[1]) - want) < 2e-6, `${what}: row ${row.get(num).c[1]}, want ${want}`);
+    }
+  }
 
   /** Throws `message` unless `ok`; one a full read covering `num` by now explains may be tried again. */
   async function stillProvisional(num, ok, message) {

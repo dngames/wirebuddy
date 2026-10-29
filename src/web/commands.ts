@@ -52,6 +52,9 @@ const hasFile = (): boolean => !!app.state?.file && !app.state.loading;
 // From the state, not the packet list: listeners run in registration order
 const hasRows = (): boolean => hasFile() && (app.state?.displayedFrames ?? 0) > 0;
 const capturing = (): boolean => app.state?.capture.status === "running" || app.state?.capture.status === "starting";
+const timeRefs = (): number[] => app.state?.timeRefs ?? [];
+/** A time reference other than the current packet: Next/Previous Time Reference go somewhere. */
+const otherTimeRef = (): boolean => hasFile() && timeRefs().some((f) => f !== app.selFrame);
 
 /** Follow > <proto> Stream for the current packet, if it has one. */
 export function followerOf(proto: string): string | null {
@@ -95,6 +98,16 @@ export const commands = {
   // Chrome keeps Wireshark's Ctrl+Shift+N for incognito windows: not advertised, it works where the browser lets it through
   nextMark: { label: "Next Mark", keys: ["Ctrl+Shift+N"], enabled: () => app.marks.size > 0, run: () => act.gotoMark(1) },
   previousMark: { label: "Previous Mark", shortcut: "Ctrl+Shift+B", enabled: () => app.marks.size > 0, run: () => act.gotoMark(-1) },
+  // Browsers keep Wireshark's Ctrl+T for new tabs: not advertised, it works where the browser lets it through
+  timeRefToggle: {
+    label: "Set/Unset Time Reference",
+    keys: ["Ctrl+T"],
+    enabled: () => hasFile() && (app.selFrame !== null || app.selRows.length > 0),
+    run: () => void act.toggleTimeRefSelected(),
+  },
+  unsetTimeRefs: { label: "Unset All Time References", shortcut: "Ctrl+Alt+T", enabled: () => hasFile() && timeRefs().length > 0, run: () => void act.clearTimeRefs() },
+  nextTimeRef: { label: "Next Time Reference", shortcut: "Ctrl+Alt+N", enabled: otherTimeRef, run: () => act.gotoTimeRef(1) },
+  previousTimeRef: { label: "Previous Time Reference", shortcut: "Ctrl+Alt+B", enabled: otherTimeRef, run: () => act.gotoTimeRef(-1) },
 
   // View
   zoomIn: {

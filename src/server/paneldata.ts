@@ -23,6 +23,7 @@ import { FrameStore } from "./framestore.ts";
 import { findLayer, parse, Parsed, type Layer } from "./layers.ts";
 import { matchingFrames, Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
 import { printable } from "./text.ts";
+import { framesWithRefs, refBefore, refsOf, refTimeError, refTimeFilter } from "./timerefs.ts";
 import { encodePage, type PageRow } from "./wbpk.ts";
 
 /** One sharkd call (a load: LOAD_BUDGET_MS) may take this long; then the engine restarts. */
@@ -99,11 +100,13 @@ export interface PanelSource {
   /** The view follows a capture that is running. */
   live(): boolean;
   totalFrames(): number;
-  /** The frames the view shows, and its display filter. */
+  /** The frames the view shows, and its display filter as sharkd matches it. */
   displayed(): { set: FrameSet; filter: string };
   /** The packets the user selected, else the selected one. */
   selected(): FrameSet;
   marked(): FrameSet;
+  /** Time references, ascending: what frame.ref_time matches and time fields count from. */
+  timeRefs(): readonly number[];
   tlsKeylog(): string | null;
   /** Inode and first bytes of the file as the view read it. */
   fileId(): { ino: number; head: Buffer };
@@ -548,8 +551,9 @@ export class PanelData {
   private async checkFilter(ctx: Ctx, filter: string, what = "display filter"): Promise<void> {
     const error = await this.cached(`check:${filter}`, async () => {
       try {
-        await this.run(ctx.label, (e) => e.call("check", { filter }), CALL_BUDGET_MS, ctx.loaded);
-        return "";
+        const check = (f: string) => this.run(ctx.label, (e) => e.call("check", { filter: f }), CALL_BUDGET_MS, ctx.loaded);
+        await check(filter);
+        return (await refTimeError(filter, check)) ?? "";
       } catch (err) {
         if (err instanceof SharkdError) return err.message.replace(/^Filter invalid - /, "");
         throw err;
@@ -561,17 +565,24 @@ export class PanelData {
     throw new ApiError(400, "filter", `invalid display filter "${printable(filter).slice(0, 200)}": ${printable(error)}`, unknown ? { hint: LUA_HINT } : {});
   }
 
-  /** The frames a display filter matches in the loaded file. */
-  private async matching(ctx: Ctx, filter: string): Promise<FrameSet> {
+  /** The frames a display filter matches in the loaded file, and the filter as sharkd matched it (frame.ref_time spelled out). */
+  private async matching(ctx: Ctx, filter: string): Promise<{ set: FrameSet; sharkd: string }> {
     await this.checkFilter(ctx, filter);
-    return this.cached(
-      filter,
+    let sharkd: string;
+    try {
+      sharkd = refTimeFilter(filter, this.opts.source.timeRefs());
+    } catch (err) {
+      throw new ApiError(400, "filter", `invalid display filter "${printable(filter).slice(0, 200)}": ${(err as Error).message}`);
+    }
+    const set = await this.cached(
+      sharkd,
       async () => {
-        return FrameSet.fromSorted(await this.run(ctx.label, (e) => matchingFrames(e, filter, MATCH_PAGE), CALL_BUDGET_MS, ctx.loaded));
+        return FrameSet.fromSorted(await this.run(ctx.label, (e) => matchingFrames(e, sharkd, MATCH_PAGE), CALL_BUDGET_MS, ctx.loaded));
       },
       this.sets,
       MAX_CACHED_SETS,
     );
+    return { set, sharkd };
   }
 
   // --- methods
@@ -630,9 +641,9 @@ export class PanelData {
       if (source.epoch() !== epoch) throw stale(source.epoch());
     }
     if (filter) {
-      const m = await this.matching(ctx!, filter);
+      const { set: m, sharkd } = await this.matching(ctx!, filter);
       set = which || match ? set.intersect(m) : m.clip(known);
-      byFilter = which || match ? "" : filter;
+      byFilter = which || match ? "" : sharkd;
     }
 
     const { frames, more } = set.page(after, limit);
@@ -721,14 +732,16 @@ export class PanelData {
     });
   }
 
-  /** Column values per frame: one sharkd call per page of a filter, else per stretch of nearby frames. */
+  /** Column values per frame: one sharkd call per page of a filter, else per stretch of nearby frames; times count from the view's time references. */
   private async columns(ctx: Ctx, frames: number[], columns: string[], byFilter: string, set: FrameSet): Promise<Map<number, string[]>> {
     const out = new Map<number, string[]>();
     if (!frames.length) return out;
     const params = Object.fromEntries(columns.map((f, i) => [`column${i}`, `${f}:0`]));
+    const timeRefs = this.opts.source.timeRefs();
     if (byFilter) {
       const skip = set.rank(frames[0] - 1);
-      const rows = await this.run(ctx.label, (e) => e.call<{ num: number; c: string[] }[]>("frames", { filter: byFilter, ...page(skip, frames.length), ...params }), CALL_BUDGET_MS, ctx.loaded).catch((err) => {
+      const refs = (from: number, to: number) => refsOf(timeRefs, frames.slice(from, to));
+      const rows = await this.run(ctx.label, (e) => framesWithRefs({ filter: byFilter, ...page(skip, frames.length), ...params }, refs, (p) => e.call<{ num: number; c: string[] }[]>("frames", p)), CALL_BUDGET_MS, ctx.loaded).catch((err) => {
         // The view's filter, read differently by the panel engine: by stretches below
         if (err instanceof SharkdError) return [];
         throw err;
@@ -743,7 +756,9 @@ export class PanelData {
       let j = i;
       while (j + 1 < frames.length && frames[j + 1] - frames[i] + 1 <= 2 * (j + 2 - i) + 64) j++;
       const [a, b] = [frames[i], frames[j]];
-      const rows = await this.run(ctx.label, (e) => e.call<{ num: number; c: string[] }[]>("frames", { ...page(a - 1, b - a + 1), ...params }), CALL_BUDGET_MS, ctx.loaded);
+      const stretch = Int32Array.from({ length: b - a + 1 }, (_, k) => a + k);
+      const refs = (from: number, to: number) => refsOf(timeRefs, stretch.subarray(from, to));
+      const rows = await this.run(ctx.label, (e) => framesWithRefs({ ...page(a - 1, b - a + 1), ...params }, refs, (p) => e.call<{ num: number; c: string[] }[]>("frames", p)), CALL_BUDGET_MS, ctx.loaded);
       for (const r of rows) out.set(r.num, r.c);
       i = j + 1;
     }
@@ -799,6 +814,7 @@ export class PanelData {
       throw new ApiError(429, "busy", `the panel engine has not read frame ${frame} of the live file yet`, { retryMs: LIVE_LOAD_MS });
     }
     if (frame > loaded.frames) throw new ApiError(404, "gone", `no frame ${frame}: the capture has ${loaded.frames}`);
+    const ref = refBefore(this.opts.source.timeRefs(), frame);
     const r = await this.run(
       label,
       (e) =>
@@ -806,6 +822,7 @@ export class PanelData {
           frame,
           ...(tree ? { proto: true } : {}),
           ...(bytes ? { bytes: true } : {}),
+          ...(ref ? { ref_frame: ref } : {}),
         }),
       CALL_BUDGET_MS,
       loaded,

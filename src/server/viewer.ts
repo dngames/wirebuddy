@@ -14,6 +14,7 @@ import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts"
 import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
 import { Panels } from "./panels.ts";
 import { printable } from "./text.ts";
+import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
 import { launchWireshark } from "./wireshark.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
@@ -41,6 +42,7 @@ import type {
   PhsNode,
   ProvisionalTail,
   RowsResponse,
+  TimeRefsChange,
   TreeNode,
   ViewState,
 } from "../shared/api.ts";
@@ -149,7 +151,8 @@ const OFFER_LIVE_MS = 30_000;
 
 /**
  * Everything the UI and the agent share: the open capture, display filter,
- * selection, marks and the live capture. Emits "state" on every change.
+ * selection, marks, time references and the live capture. Emits "state" on
+ * every change.
  *
  * Two sharkd instances alternate during a live capture: one answers queries
  * while the other reloads the growing file, then they swap. Once such a full
@@ -237,7 +240,7 @@ export class Viewer extends EventEmitter {
   private paused: string | null = null;
   /** Why the last full read failed while nothing would read the file again by itself: newer packets stay provisional until one succeeds. */
   private readFailed: string | null = null;
-  /** Marks and the selection on frames up to here stay although the tail that listed them closed. */
+  /** Marks, time references and the selection on frames up to here stay although the tail that listed them closed. */
   private keptFrames = 0;
   /** Provisional rows, details or filter passes that failed in a row. */
   private tailFailures = 0;
@@ -288,7 +291,7 @@ export class Viewer extends EventEmitter {
       totalFrames: () => this.state.totalFrames,
       displayed: () => ({
         set: this.panelSet("displayed", [this.displayed, this.state.totalFrames], () => (this.displayed ? FrameSet.fromSorted(this.displayed) : FrameSet.all(this.state.totalFrames))),
-        filter: this.state.filter,
+        filter: this.sharkdFilter(this.state.filter),
       }),
       selected: () => {
         const s = this.state;
@@ -297,6 +300,7 @@ export class Viewer extends EventEmitter {
         );
       },
       marked: () => this.panelSet("marked", [this.state.marks], () => FrameSet.fromSorted(this.state.marks.map((m) => m.frame).sort((a, b) => a - b))),
+      timeRefs: () => this.state.timeRefs,
       tlsKeylog: () => this.state.tlsKeylog,
       fileId: () => ({ ino: this.loadedIno, head: this.loadedHead }),
     };
@@ -329,6 +333,7 @@ export class Viewer extends EventEmitter {
       selectedCount: 0,
       rowsSince: 0,
       marks: [],
+      timeRefs: [],
       capture: this.capture.state,
       agentNotice: null,
       agent: { attached: false, pending: 0, name: "Agent", watching: false },
@@ -414,6 +419,7 @@ export class Viewer extends EventEmitter {
       selected: s.selected,
       selection: ranges && ranges.length <= 1000 ? ranges : null,
       marked: s.marks.length,
+      timeRefs: s.timeRefs.length,
       live: this.followingCapture() && this.capture.running,
       capture: s.capture.status,
     };
@@ -461,13 +467,13 @@ export class Viewer extends EventEmitter {
   }
 
   /**
-   * Loads `file` into `engine` and computes the displayed frames for `filter`;
-   * with `fallback`, a filter that doesn't compile (its protocol is gone) is
-   * dropped and the result's `filter` is "". `inPlace`: the engine read the
-   * only copy, so a kill (SIGKILL) is the memory running out, not an
-   * extension.
+   * Loads `file` into `engine` and computes the displayed frames for `filter`
+   * (frame.ref_time: the time references `refs`); with `fallback`, a filter
+   * that doesn't compile (its protocol is gone) is dropped and the result's
+   * `filter` is "". `inPlace`: the engine read the only copy, so a kill
+   * (SIGKILL) is the memory running out, not an extension.
    */
-  private async loadInto(engine: Sharkd, file: string, filter: string, fallback = false, inPlace = false) {
+  private async loadInto(engine: Sharkd, file: string, filter: string, refs: readonly number[], fallback = false, inPlace = false) {
     const memory = (err: unknown): boolean => inPlace && err instanceof SharkdExit && err.signal === "SIGKILL";
     const once = (dropFilter: boolean) =>
       this.crashRetries(async () => {
@@ -478,7 +484,7 @@ export class Viewer extends EventEmitter {
         const status = await engine.call<SharkdStatus>("status");
         if (!filter) return { status, displayed: null, filter, rolledBack: false as RollBack };
         try {
-          return { status, displayed: await matchingFrames(engine, filter), filter, rolledBack: false as RollBack };
+          return { status, displayed: await matchingFrames(engine, refTimeFilter(filter, refs)), filter, rolledBack: false as RollBack };
         } catch (err) {
           if (!(err instanceof SharkdError) || !dropFilter) throw err;
           return { status, displayed: null, filter: "", rolledBack: false as RollBack };
@@ -567,7 +573,7 @@ export class Viewer extends EventEmitter {
     this.columnFormats = (status.column_info ?? []).map((c) => c.format);
     this.loads++;
     const totalFrames = status.frames;
-    // Marks and the selection on packets listed before stay until a read covers them
+    // Marks, time references and the selection on packets listed before stay until a read covers them
     if (why === "file" || why === "rewritten" || totalFrames >= this.keptFrames) this.keptFrames = 0;
     const known = Math.max(totalFrames + (this.listedTail?.frames ?? 0), this.keptFrames);
     const selected = keepSelection && this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
@@ -581,6 +587,7 @@ export class Viewer extends EventEmitter {
       totalFrames,
       displayedFrames: displayed ? displayed.length : totalFrames,
       marks: this.state.marks.filter((m) => m.frame <= known),
+      timeRefs: refsUpTo(this.state.timeRefs, known),
       duration: status.duration ?? 0,
       filter,
       selected,
@@ -589,6 +596,7 @@ export class Viewer extends EventEmitter {
       epoch,
       tail: this.tailState(),
     };
+    this.tail?.setRefs(this.state.timeRefs);
     // A shorter file is a rewritten one, filtered or not
     const keepRows = keepSelection && status.frames >= before.exact && startsWith(this.rowFrames(), before);
     const selectedIndex = this.indexOf(selected);
@@ -623,7 +631,7 @@ export class Viewer extends EventEmitter {
         // A live capture's file may not have its header yet
         if (!this.capture.state.files.includes(file) && !(await looksLikeCapture(file))) throw new Error(`not a capture file: ${file}`);
         // The filter may not apply to this capture's protocols; then it shows everything
-        const result = await this.loadInto(this.engines[standby], file, filter, true);
+        const result = await this.loadInto(this.engines[standby], file, filter, [], true);
         filter = result.filter;
         this.active = standby;
         this.forgetTypes();
@@ -633,7 +641,7 @@ export class Viewer extends EventEmitter {
         this.loadedSize = st.size;
         this.loadedIno = st.ino;
         this.loadedHead = fileHead(file);
-        this.state = { ...this.state, marks: [], selected: null, selectedBy: null };
+        this.state = { ...this.state, marks: [], timeRefs: [], selected: null, selectedBy: null };
         this.applyLoad(file, filter, result, false);
         this.remember(file);
         void this.checkOffers(true);
@@ -678,7 +686,7 @@ export class Viewer extends EventEmitter {
     const started = Date.now();
     let result: Awaited<ReturnType<Viewer["loadInto"]>>;
     try {
-      result = await this.loadInto(this.engines[target], file, this.state.filter, fallback, inPlace);
+      result = await this.loadInto(this.engines[target], file, this.state.filter, this.state.timeRefs, fallback, inPlace);
     } catch (err) {
       this.readStartedAt = 0;
       if (final) this.finalRead = false;
@@ -766,12 +774,14 @@ export class Viewer extends EventEmitter {
       totalFrames: 0,
       displayedFrames: 0,
       marks: this.state.marks.filter((m) => m.frame <= known),
+      timeRefs: refsUpTo(this.state.timeRefs, known),
       selected,
       selectedBy: selected === null ? null : this.state.selectedBy,
       generation,
       rowsSince: generation,
       tail: this.tailState(),
     };
+    tail?.setRefs(this.state.timeRefs);
     const selectedIndex = this.indexOf(selected);
     this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
     this.events.add("ERROR", loadError);
@@ -843,6 +853,7 @@ export class Viewer extends EventEmitter {
       if (this.tail && this.tail.file !== file) this.closeTail();
       if (!this.tail) this.tailFailures = 0;
       const tail = (this.tail ??= new LiveTail({ file, dir: dirname(file), sharkd: () => this.tailEngine() }));
+      tail.setRefs(this.state.timeRefs);
       await tail.update();
       if (this.tail !== tail) return;
       const broken = tail.broken();
@@ -968,7 +979,8 @@ export class Viewer extends EventEmitter {
 
   /**
    * Closes the tail; the view forgets its packets until a full read covers
-   * them. Marks and the selection stay on frames up to `keep` meanwhile.
+   * them. Marks, time references and the selection stay on frames up to
+   * `keep` meanwhile.
    */
   private closeTail(keep = this.state.totalFrames): void {
     this.dropTail();
@@ -985,6 +997,7 @@ export class Viewer extends EventEmitter {
       selected,
       selectedBy: selected === null ? null : s.selectedBy,
       marks: s.marks.filter((m) => m.frame <= keep),
+      timeRefs: refsUpTo(s.timeRefs, keep),
     };
     this.set({ selectedIndex: this.indexOf(selected), ...rowSelection(clipRanges(s.selectedRows, s.displayedFrames)) });
   }
@@ -1099,7 +1112,7 @@ export class Viewer extends EventEmitter {
     const { epoch, columns, customColumns } = this.state;
     return {
       numbering,
-      fetch: (engine, params) => this.framesWithColumns(engine, params),
+      fetch: (engine, params, refs) => this.framesWithColumns(engine, params, refs),
       key: [epoch, ...columns, ...customColumns.map((c) => c.field), JSON.stringify(numbering)].join("\u0001"),
     };
   }
@@ -1141,6 +1154,7 @@ export class Viewer extends EventEmitter {
         selectedBy: null,
         ...rowSelection([]),
         marks: [],
+        timeRefs: [],
         generation: this.state.generation + 1,
         rowsSince: this.state.generation + 1,
         epoch: this.newEpoch("closed"),
@@ -1154,6 +1168,8 @@ export class Viewer extends EventEmitter {
     if (!filter.trim()) return { ok: true };
     try {
       const r = await this.engine.call<{ status: string; warning?: string }>("check", { filter });
+      const refTime = await refTimeError(filter, (f) => this.engine.call("check", { filter: f }));
+      if (refTime) return { ok: false, error: refTime };
       return r.warning ? { ok: true, warning: r.warning } : { ok: true };
     } catch (err) {
       const message = (err as Error).message.replace(/^Filter invalid - /, "");
@@ -1167,8 +1183,15 @@ export class Viewer extends EventEmitter {
       const check = await this.checkFilter(filter);
       if (!check.ok) return check;
       if (this.state.file) {
-        const displayed = filter ? await matchingFrames(this.engine, filter) : null;
-        const held = this.listedTail ? await this.heldReason(filter) : null;
+        let refs: number[];
+        let displayed: Int32Array | null;
+        let held: string | null;
+        // Time references set meanwhile: frame.ref_time matches other frames
+        do {
+          refs = this.state.timeRefs;
+          displayed = filter ? await matchingFrames(this.engine, refTimeFilter(filter, refs)) : null;
+          held = this.listedTail ? await this.heldReason(filter) : null;
+        } while (refs !== this.state.timeRefs && usesRefTime(filter));
         this.displayed = displayed;
         this.listedTail?.setFilter(filter, held);
         this.state = {
@@ -1210,9 +1233,11 @@ export class Viewer extends EventEmitter {
     if (count === 0 || start < 0) return { generation, start, rows: [] };
     const exact = Math.max(0, Math.min(count, displayedFrames - start));
     const params = page(start, exact);
-    if (filter) params.filter = filter;
+    const refs = this.state.timeRefs;
+    const sharkd = refTimeFilter(filter, refs);
+    if (filter) params.filter = sharkd;
     const [head, rest] = await Promise.all([
-      exact ? this.framesWithColumns(this.engine, params) : [],
+      exact ? this.pageRefs(refs, filter, sharkd, start, exact).then((r) => this.framesWithColumns(this.engine, params, r)) : [],
       tail && count > exact ? this.tailRows(tail, generation, start + exact - displayedFrames, count - exact) : [],
     ]);
     if (this.state.rowsSince !== rowsSince) throw new StaleGenerationError("stale generation");
@@ -1245,23 +1270,27 @@ export class Viewer extends EventEmitter {
       return r ?? null;
     }
     if (num < 1 || num > this.state.totalFrames) return null;
-    const rows = await this.framesWithColumns(this.engine, page(num - 1, 1));
+    const rows = await this.framesWithColumns(this.engine, page(num - 1, 1), () => refsOf(this.state.timeRefs, [num]));
     const r = rows[0];
     return r && r.num === num ? r : null;
   }
 
-  /** sharkd "frames" rows with the custom columns appended. */
-  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>): Promise<PacketRow[]> {
+  /** sharkd "frames" rows with the custom columns appended; times count from the references `refs` names (see framesWithRefs). */
+  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>, refs: RowRefs = () => []): Promise<PacketRow[]> {
     const custom = this.state.customColumns;
-    const [rows, extra] = await Promise.all([
-      engine.call<PacketRow[]>("frames", params),
-      // Custom column params replace sharkd's default columns, so they come in a second request
-      custom.length ? engine.call<PacketRow[]>("frames", { ...params, ...columnParams(custom.map((c) => c.field)) }) : null,
-    ]);
-    return rows.map((r, i) => {
-      const values = extra?.[i]?.num === r.num ? extra[i].c.map(clip) : custom.map(() => "");
-      return { num: r.num, c: [...r.c, ...values], bg: r.bg, fg: r.fg };
-    });
+    const columns = custom.length ? columnParams(custom.map((c) => c.field)) : null;
+    // The longer request decides how many rows a part has
+    return framesWithRefs(params, refs, async (base) => {
+      const [rows, extra] = await Promise.all([
+        engine.call<PacketRow[]>("frames", base),
+        // Custom column params replace sharkd's default columns, so they come in a second request
+        columns ? engine.call<PacketRow[]>("frames", { ...base, ...columns }) : null,
+      ]);
+      return rows.map((r, i) => {
+        const values = extra?.[i]?.num === r.num ? extra[i].c.map(clip) : custom.map(() => "");
+        return { num: r.num, c: [...r.c, ...values], bg: r.bg, fg: r.fg };
+      });
+    }, columns ?? {});
   }
 
   /**
@@ -1273,11 +1302,26 @@ export class Viewer extends EventEmitter {
     await this.checkFields(fields);
     const check = await this.checkFilter(filter);
     if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
+    const refs = this.state.timeRefs;
+    const sharkd = refTimeFilter(filter, refs);
     const total = await this.countMatching(filter);
     const params: Record<string, unknown> = { ...page(offset, limit), ...columnParams(fields) };
-    if (filter) params.filter = filter;
-    const rows = await this.engine.call<PacketRow[]>("frames", params);
+    if (filter) params.filter = sharkd;
+    const rows = await framesWithRefs(params, await this.pageRefs(refs, filter, sharkd, offset, limit), (p) => this.engine.call<PacketRow[]>("frames", p));
     return { total, rows: rows.map((r) => ({ num: r.num, values: r.c.map(clip) })) };
+  }
+
+  /**
+   * The time references rows offset..offset+limit-1 of `filter` (`sharkd`:
+   * as sharkd matches it) count from, by row.
+   */
+  private async pageRefs(refs: readonly number[], filter: string, sharkd: string, offset: number, limit: number): Promise<RowRefs> {
+    if (!refs.length || limit <= 0) return () => [];
+    let frames: Int32Array;
+    if (!filter) frames = Int32Array.from({ length: Math.max(0, Math.min(limit, this.state.totalFrames - offset)) }, (_, i) => offset + 1 + i);
+    else if (filter === this.state.filter && this.displayed) frames = this.displayed.subarray(offset, offset + limit);
+    else frames = Int32Array.from(await this.engine.call<{ num: number }[]>("frames", { filter: sharkd, ...page(offset, limit), column0: "frame.number:0" }), (r) => r.num);
+    return (from, to) => refsOf(refs, frames.subarray(from, to));
   }
 
   private async checkFields(fields: string[]): Promise<void> {
@@ -1337,7 +1381,8 @@ export class Viewer extends EventEmitter {
       return this.tailFrame(tail, num);
     }
     if (!Number.isInteger(num) || num < 1 || num > this.state.totalFrames) throw new Error(`no frame ${num}`);
-    const [f, row] = await Promise.all([this.engine.call<SharkdFrame>("frame", { frame: num, proto: true, bytes: true }), this.row(num)]);
+    const ref = refBefore(this.state.timeRefs, num);
+    const [f, row] = await Promise.all([this.engine.call<SharkdFrame>("frame", { frame: num, proto: true, bytes: true, ...(ref ? { ref_frame: ref } : {}) }), this.row(num)]);
     return { num, tree: f.tree, bytes: f.bytes ?? "", ds: f.ds ?? [], followers: followersOf(f), row };
   }
 
@@ -1381,10 +1426,12 @@ export class Viewer extends EventEmitter {
     this.requireFile();
     const check = await this.checkFilter(filter);
     if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
+    const refs = this.state.timeRefs;
+    const sharkd = refTimeFilter(filter, refs);
     const total = await this.countMatching(filter);
     const params = page(offset, limit);
-    if (filter) params.filter = filter;
-    const rows = await this.framesWithColumns(this.engine, params);
+    if (filter) params.filter = sharkd;
+    const rows = await this.framesWithColumns(this.engine, params, await this.pageRefs(refs, filter, sharkd, offset, limit));
     return { total, rows };
   }
 
@@ -1394,6 +1441,8 @@ export class Viewer extends EventEmitter {
   private async countMatching(filter: string): Promise<number> {
     if (!filter) return this.state.totalFrames;
     if (filter === this.state.filter) return this.state.displayedFrames;
+    // As the time references now spell frame.ref_time out
+    filter = this.sharkdFilter(filter);
     // Provisional rows bump the generation, not what the engine read
     const { loads } = this;
     const c = this.countCache;
@@ -1401,6 +1450,11 @@ export class Viewer extends EventEmitter {
     const total = (await matchingFrames(this.engine, filter)).length;
     this.countCache = { loads, filter, total };
     return total;
+  }
+
+  /** `filter` as sharkd matches it: frame.ref_time spelled out as the time references (see refTimeFilter). */
+  private sharkdFilter(filter: string): string {
+    return refTimeFilter(filter, this.state.timeRefs);
   }
 
   /**
@@ -1537,6 +1591,76 @@ export class Viewer extends EventEmitter {
     this.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
   }
 
+  /** Sets (`on`) or unsets time references on `frames`; frames the view doesn't know are left out. */
+  setTimeRefs(frames: number[], on: boolean, by: "user" | "agent"): Promise<TimeRefsChange> {
+    this.requireFile();
+    const known = this.known();
+    const given = new Set(frames.filter((f) => Number.isInteger(f) && f >= 1 && f <= known));
+    return this.changeRefs((refs) => {
+      if (!on) return refs.filter((f) => !given.has(f));
+      const all = new Set([...refs, ...given]);
+      if (all.size > MAX_TIME_REFS) throw new Error(`at most ${MAX_TIME_REFS} frames can be time references`);
+      return [...all].sort((a, b) => a - b);
+    }, by);
+  }
+
+  /** Wireshark's Set/Unset Time Reference: flips the reference of each selected frame, else of the current one. */
+  toggleTimeRefs(by: "user" | "agent"): Promise<TimeRefsChange> {
+    this.requireFile();
+    const frames = this.selectedOrCurrent();
+    return this.changeRefs((refs) => {
+      const removed = refs.filter((f) => inRanges(frames, f)).length;
+      if (refs.length - 2 * removed + countRanges(frames) > MAX_TIME_REFS) throw new Error(`at most ${MAX_TIME_REFS} frames can be time references`);
+      const had = new Set(refs);
+      const added: number[] = [];
+      for (const [a, b] of frames) for (let f = a; f <= b; f++) if (!had.has(f)) added.push(f);
+      return [...refs.filter((f) => !inRanges(frames, f)), ...added].sort((a, b) => a - b);
+    }, by);
+  }
+
+  /** Wireshark's Unset All Time References. */
+  clearTimeRefs(by: "user" | "agent"): Promise<TimeRefsChange> {
+    return this.changeRefs(() => [], by, "Unset all time references");
+  }
+
+  /**
+   * Makes `next` of the time references the ones the view has. Rows and
+   * details read again; a display filter on frame.ref_time is matched again
+   * (after reads under way), which may list other rows. The agent's changes
+   * show `notice`, or what changed.
+   */
+  private changeRefs(next: (refs: number[]) => number[], by: "user" | "agent", notice?: string): Promise<TimeRefsChange> {
+    const apply = async (): Promise<TimeRefsChange> => {
+      for (;;) {
+        const before = this.state.timeRefs;
+        const refs = next(before);
+        const had = new Set(before);
+        const now = new Set(refs);
+        const change = { set: refs.filter((f) => !had.has(f)), unset: before.filter((f) => !now.has(f)) };
+        if (!change.set.length && !change.unset.length) return change;
+        const filter = this.state.filter;
+        const displayed = this.state.file && usesRefTime(filter) ? await matchingFrames(this.engine, refTimeFilter(filter, refs)) : null;
+        // A tail that closed meanwhile took some along
+        if (this.state.timeRefs !== before) continue;
+        this.tail?.setRefs(refs);
+        const generation = this.state.generation + 1;
+        const was = this.displayed;
+        if (displayed && !(was && was.length === displayed.length && was.every((f, i) => f === displayed[i]))) {
+          this.displayed = displayed;
+          this.state = { ...this.state, timeRefs: refs, displayedFrames: displayed.length, generation, rowsSince: generation };
+          const selectedIndex = this.indexOf(this.state.selected);
+          this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+        } else this.set({ timeRefs: refs, generation });
+        if (by === "agent") {
+          const text = changeText(change);
+          this.notice(notice ?? text[0].toUpperCase() + text.slice(1));
+        }
+        return change;
+      }
+    };
+    return usesRefTime(this.state.filter) ? this.exclusive(apply) : apply();
+  }
+
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
   attachAgent(name = this.state.agent.name): void {
     this.set({ agent: { ...this.state.agent, attached: true, name } });
@@ -1588,7 +1712,7 @@ export class Viewer extends EventEmitter {
     if (!filter?.trim()) return { tap0: tap };
     const check = await this.checkFilter(filter);
     if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-    return { tap0: tap, filter: filter.trim() };
+    return { tap0: tap, filter: this.sharkdFilter(filter.trim()) };
   }
 
   async phs(filter?: string): Promise<PhsNode[]> {
@@ -1659,7 +1783,7 @@ export class Viewer extends EventEmitter {
       if (filter) {
         const check = await this.checkFilter(filter);
         if (!check.ok) throw new Error(`invalid display filter "${filter}": ${check.error}`);
-        params[`filter${i}`] = filter;
+        params[`filter${i}`] = this.sharkdFilter(filter);
       }
     }
     const spanUs = Math.max(Math.round(this.state.duration * 1e6), 1);
@@ -1678,7 +1802,7 @@ export class Viewer extends EventEmitter {
     this.requireFile();
     if (!Number.isFinite(seconds) || seconds < 0) throw new Error("time must be a non-negative number of seconds");
     const at = `frame.time_relative >= ${seconds.toFixed(9)}`;
-    return this.firstMatching(this.engine, this.state.filter ? `(${this.state.filter}) && ${at}` : at);
+    return this.firstMatching(this.engine, this.state.filter ? `(${this.sharkdFilter(this.state.filter)}) && ${at}` : at);
   }
 
   private async firstMatching(engine: Sharkd, filter: string): Promise<number | null> {
@@ -1701,7 +1825,7 @@ export class Viewer extends EventEmitter {
     if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
     const engine = this.engine;
     const { file, filter: view } = this.state;
-    const match = view ? `(${view}) && (${filter})` : `(${filter})`;
+    const match = this.sharkdFilter(view ? `(${view}) && (${filter})` : `(${filter})`);
     let frame: number | null;
     let wrapped = false;
     if (dir === 1) {
@@ -1773,7 +1897,7 @@ export class Viewer extends EventEmitter {
     if (req.filter !== undefined && req.filter.trim()) {
       const check = await this.checkFilter(req.filter);
       if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-      ranges = toRanges(await matchingFrames(this.engine, req.filter.trim()));
+      ranges = toRanges(await matchingFrames(this.engine, this.sharkdFilter(req.filter.trim())));
       leftOut = known - this.state.totalFrames;
     } else if (req.filter !== undefined || req.which === "all") ranges = everything;
     else if (req.which === "displayed") {
@@ -1919,7 +2043,8 @@ export class Viewer extends EventEmitter {
     const args = ["-r", this.state.file!];
     if (this.profile) args.push("-C", this.profile);
     if (this.state.tlsKeylog) args.push("-o", `tls.keylog_file:${this.state.tlsKeylog}`);
-    if (this.state.filter) args.push("-Y", this.state.filter);
+    // Wireshark has none of the view's time references: frame.ref_time goes as their frame numbers
+    if (this.state.filter) args.push("-Y", this.sharkdFilter(this.state.filter));
     const target = frame ?? this.state.selected;
     if (target) args.push("-g", String(target));
     await launchWireshark(this.wiresharkBin, args, this.extensions.env());

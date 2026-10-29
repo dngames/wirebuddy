@@ -7,8 +7,9 @@
  * The file is cut into chunks of CHUNK frames, fewer when they would take
  * more than CHUNK_BYTES. A chunk's slice holds the chunk, the CONTEXT frames
  * before and after it (later packets complete reassembled PDUs), and what
- * FlowIndex finds the chunk's flows need from further away: frame 1 (the time
- * reference), their first packets, their messages under way before the slice,
+ * FlowIndex finds the chunk's flows need from further away: frame 1 and the
+ * nearest time reference before it (what times count from), their first
+ * packets, their messages under way before the slice,
  * their data under way after it and the answers they still owe. Every part
  * has a byte budget too, so a slice takes about 64 MiB at most whatever the
  * packet sizes. A chunk's rows always come from a slice of its own, so they
@@ -27,6 +28,7 @@ import { join } from "node:path";
 import { FrameStore } from "./framestore.ts";
 import { FlowIndex, HEAD_BYTES } from "./flows.ts";
 import { matchingFrames, SharkdError, type Sharkd } from "./sharkd.ts";
+import { refBefore, refsOf, type RowRefs } from "./timerefs.ts";
 import type { PacketRow, TreeNode } from "../shared/api.ts";
 
 const MiB = 2 ** 20;
@@ -97,6 +99,8 @@ export interface Slice {
   c0: number;
   extras: Int32Array;
   after: Int32Array;
+  /** The nearest time reference before c0, one of `extras`; 0 for none. */
+  ref: number;
   /** The chunk won't grow. */
   complete: boolean;
   /** Nothing more comes before hi: the chunk's slices differ only in `after` from now on. */
@@ -130,6 +134,13 @@ export function toGlobal(s: Slice, local: number): number {
 /** The slice's frame number of the file's frame `frame` (c0..hi). */
 export function toLocal(s: Slice, frame: number): number {
   return s.extras.length + frame - s.c0 + 1;
+}
+
+/** The slice's frame number of the time reference `ref` (in c0..hi, or the one before c0 it holds), else 0. */
+export function refLocal(s: Slice, ref: number): number {
+  if (!ref) return 0;
+  if (ref >= s.c0 && ref <= s.hi) return toLocal(s, ref);
+  return ref === s.ref ? indexIn(s.extras, ref) + 1 : 0;
 }
 
 /** Which columns of a row show frame numbers, and which are numbered or counted within a slice. */
@@ -219,8 +230,8 @@ export async function heldReason(filter: string, type: (field: string) => Promis
 /** How the view's rows read. */
 export interface RowView {
   numbering: Numbering;
-  /** Reads rows from a sharkd like the view's packet list does (its columns, custom ones too). */
-  fetch: (engine: Sharkd, params: Record<string, unknown>) => Promise<PacketRow[]>;
+  /** Reads rows from a sharkd like the view's packet list does (its columns, custom ones too), counting time from the references `refs` names (the slice's numbers). */
+  fetch: (engine: Sharkd, params: Record<string, unknown>, refs: RowRefs) => Promise<PacketRow[]>;
   /** Changes whenever rows would read differently (columns, extensions, TLS keys). */
   key: string;
 }
@@ -249,10 +260,10 @@ class Engine {
     return next;
   }
 
-  /** Whether frames of `s`'s chunk up to `last` can be read from the slice it holds: `s` itself, or while the chunk grows an earlier one. */
+  /** Whether frames of `s`'s chunk up to `last` can be read from the slice it holds: `s` itself, or while the chunk grows an earlier one with the same time reference before it. */
   serves(s: Slice, last: number): boolean {
     const held = this.slice;
-    if (!held || held.lo !== s.lo || last > held.end || this.sharkd.outdated()) return false;
+    if (!held || held.lo !== s.lo || held.ref !== s.ref || last > held.end || this.sharkd.outdated()) return false;
     return !s.complete || sliceKey(held) === sliceKey(s);
   }
 }
@@ -291,6 +302,10 @@ export class LiveTail {
   private readonly unsettled = new Map<number, { key: string; checked: number; looked: number }>();
   /** Changes when a check changed provisional matches listed before. */
   revision = 0;
+  /** Time references, ascending: what rows count time from. */
+  private refs: number[] = [];
+  /** Changes with them: rows read with others aren't kept. */
+  private refsSeq = 0;
   /** Changes with the filter and on close: passes started before are dropped. */
   private seq = 0;
   private folder: string | null = null;
@@ -386,6 +401,21 @@ export class LiveTail {
     this.seq++;
   }
 
+  /**
+   * Rows count time from `refs` (ascending) now: the rows kept go, and
+   * slices bring the nearest one before their chunk along.
+   */
+  setRefs(refs: number[]): void {
+    if (refs === this.refs) return;
+    this.refs = refs;
+    this.refsSeq++;
+    this.slices.clear();
+    this.cache.clear();
+    this.cachedRows = 0;
+    this.recent.clear();
+    this.recentRows = 0;
+  }
+
   /** Rows the tail adds to the view's list. */
   listed(): number {
     if (!this.filter) return this.frames;
@@ -434,8 +464,9 @@ export class LiveTail {
     const settled = complete && (hi === end + CONTEXT || hi < this.count);
     const openFlows = new Set<number>();
     const after = settled ? this.flows.after(lo, end, hi, { ...AFTER, size }, openFlows) : { frames: new Int32Array(0), open: true };
-    const extras = this.flows.context(c0, end, { ...BEFORE, size });
-    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, complete, settled, openFlows, final: settled && !after.open };
+    const ref = refBefore(this.refs, c0 - 1);
+    const extras = this.flows.context(c0, end, { ...BEFORE, size }, ref);
+    const s: Slice = { lo, end, hi, c0, extras, after: after.frames, ref, complete, settled, openFlows, final: settled && !after.open };
     this.slices.delete(lo);
     this.slices.set(lo, { count: this.count, slice: s });
     if (this.slices.size > MAX_SLICES) this.slices.delete(this.slices.keys().next().value!);
@@ -452,6 +483,7 @@ export class LiveTail {
   /** Rows of the given tail frames (ascending), whatever the filter; slices are read only while `wanted` says so. */
   async rowsOf(frames: number[], view: RowView, wanted: () => boolean = () => true): Promise<PacketRow[]> {
     this.useView(view);
+    const refs = this.refsSeq;
     const got = new Map<number, PacketRow>();
     for (let i = 0; i < frames.length; ) {
       const { lo, end, complete } = this.chunk(frames[i]);
@@ -477,7 +509,8 @@ export class LiveTail {
       }
       if (part.length) {
         const { rows, slice } = await this.readChunk(part, view, wanted);
-        this.keepAll(slice, part, rows, got);
+        // Read with time references set or unset meanwhile: not kept
+        this.keepAll(slice, part, rows, got, refs === this.refsSeq);
       }
       i = j + 1;
     }
@@ -494,12 +527,12 @@ export class LiveTail {
     this.cacheKey = view.key;
   }
 
-  /** Rows read from slice `s` of `frames` into `got`, kept while they read so. */
-  private keepAll(s: Slice, frames: number[], rows: Map<number, PacketRow>, got?: Map<number, PacketRow>): void {
+  /** Rows read from slice `s` of `frames` into `got`, kept (with `keep`) while they read so. */
+  private keepAll(s: Slice, frames: number[], rows: Map<number, PacketRow>, got?: Map<number, PacketRow>, keep = true): void {
     for (const f of frames) {
       const row = rows.get(f);
       got?.set(f, row ?? { num: f, c: [], p: true });
-      if (!row) continue;
+      if (!row || !keep) continue;
       if (this.settled(s, f)) this.keep(s.lo, f, row);
       else this.remember(s, f, row);
     }
@@ -593,12 +626,22 @@ export class LiveTail {
       else byFrame.push(local);
     }
     const rows = new Map<number, PacketRow>();
-    const fetch = async (params: Record<string, unknown>): Promise<void> => {
-      for (const r of await view.fetch(engine.sharkd, params)) rows.set(toGlobal(s, r.num), renumberRow(r, s, view.numbering, (f) => this.cumBytes[f - 1]));
+    // `local`: the slice's frames the request returns
+    const fetch = async (params: Record<string, unknown>, local: Int32Array): Promise<void> => {
+      const refs = (from: number, to: number) => this.refsIn(s, local.subarray(from, to));
+      for (const r of await view.fetch(engine.sharkd, params, refs)) rows.set(toGlobal(s, r.num), renumberRow(r, s, view.numbering, (f) => this.cumBytes[f - 1]));
     };
-    for (const [first, n] of runs(byMatch)) await fetch({ filter, ...(first ? { skip: first } : {}), limit: n });
-    for (const [first, n] of runs(byFrame)) await fetch({ ...(first > 1 ? { skip: first - 1 } : {}), limit: n });
+    for (const [first, n] of runs(byMatch)) await fetch({ filter, ...(first ? { skip: first } : {}), limit: n }, matched!.subarray(first, first + n));
+    for (const [first, n] of runs(byFrame)) await fetch({ ...(first > 1 ? { skip: first - 1 } : {}), limit: n }, Int32Array.from({ length: n }, (_, i) => first + i));
     return { rows, slice: s };
+  }
+
+  /** The time references rows of the slice's frames `local` (ascending) count from, by its numbers. */
+  private refsIn(s: Slice, local: ArrayLike<number>): number[] {
+    if (!this.refs.length) return [];
+    return refsOf(this.refs, Array.from(local, (l) => toGlobal(s, l)))
+      .map((r) => refLocal(s, r))
+      .filter((l) => l > 0);
   }
 
   /** The frames of the slice `engine` holds that `filter` matches, by their numbers there. */
@@ -647,7 +690,13 @@ export class LiveTail {
       const s = this.slice(num);
       if (!engine.serves(s, num)) await this.load(engine, s);
       const held = engine.slice!;
-      const f = await engine.sharkd.call<{ tree: TreeNode[]; bytes?: string; ds?: { name: string; bytes: string }[] }>("frame", { frame: toLocal(held, num), proto: true, bytes: true });
+      const ref = refLocal(held, refBefore(this.refs, num));
+      const f = await engine.sharkd.call<{ tree: TreeNode[]; bytes?: string; ds?: { name: string; bytes: string }[] }>("frame", {
+        frame: toLocal(held, num),
+        proto: true,
+        bytes: true,
+        ...(ref ? { ref_frame: ref } : {}),
+      });
       return { tree: renumberTree(f.tree, held), bytes: f.bytes ?? "", ds: f.ds ?? [], first: this.flows.firstOf(num) };
     });
   }
@@ -692,8 +741,10 @@ export class LiveTail {
       if (s.complete && !s.final) this.unsettled.set(s.lo, { key: sliceKey(s), checked: this.count, looked: this.count });
       if (view && rows > 0 && next === from && now.length) {
         this.useView(view);
+        const refs = this.refsSeq;
         const newest = now.slice(-rows);
-        this.keepAll(s, newest, (await this.read(engine, newest, view)).rows);
+        const read = await this.read(engine, newest, view);
+        this.keepAll(s, newest, read.rows, undefined, refs === this.refsSeq);
         if (seq !== this.seq) return false;
       }
       if (!s.complete) this.growingAt = 2 * Date.now() - started;
@@ -908,7 +959,7 @@ export class LiveTail {
 
 /** Which slice an engine holds. */
 function sliceKey(s: Slice): string {
-  return `${s.lo}-${s.end}-${s.hi}-${s.extras.length}-${s.after.length}`;
+  return `${s.lo}-${s.end}-${s.hi}-${s.extras.length}-${s.after.length}-${s.ref}`;
 }
 
 /** Where `v` is in the ascending `a`, or -1. */

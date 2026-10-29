@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { printable } from "./text.ts";
 
 /** sharkd silently drops request lines of 8 KiB or more. */
-const MAX_REQUEST_BYTES = 8190;
+export const MAX_REQUEST_BYTES = 8190;
 /** A request this slow means sharkd is wedged; it is restarted. */
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Of a stderr line without an end (a plugin writing on and on), only this much is kept. */

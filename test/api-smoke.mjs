@@ -546,6 +546,165 @@ try {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  const timeOf = (rows, frame) => rows.find((r) => r.num === frame).c[1];
+  const frameNode = (d) => d.tree.find((n) => n.fn === "frame").n;
+  /** Seconds a details label like "Time since reference or first frame: 5.433 microseconds" says. */
+  const seconds = (label) => {
+    const [, v, unit] = /: ([\d.]+) (seconds|milliseconds|microseconds|nanoseconds)$/.exec(label);
+    return Number(v) / { seconds: 1, milliseconds: 1e3, microseconds: 1e6, nanoseconds: 1e9 }[unit];
+  };
+  await check("time references: rows show *REF* and count from the nearest one, details say so, the agent hears of it", async () => {
+    await api("/api/filter", { filter: "" });
+    const before = await state();
+    const plain = (await api(`/api/rows?gen=${before.generation}&start=0&count=29`)).json.rows;
+    const since = (await api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json.last;
+    const r = await api("/api/timerefs", { frames: [8, 4, 99], on: true });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.deepEqual(r.json, { set: [4, 8], unset: [] });
+    const s = await state();
+    assert.deepEqual(s.timeRefs, [4, 8]);
+    // The same rows, read again
+    assert.ok(s.generation > before.generation);
+    assert.equal(s.rowsSince, before.rowsSince);
+    const rows = (await api(`/api/rows?gen=${s.generation}&start=0&count=29`)).json.rows;
+    assert.deepEqual([timeOf(rows, 4), timeOf(rows, 8)], ["*REF*", "*REF*"]);
+    const t = (f) => Number(timeOf(plain, f));
+    for (const [f, ref] of [[5, 4], [7, 4], [9, 8], [29, 8]]) assert.ok(Math.abs(Number(timeOf(rows, f)) - (t(f) - t(ref))) < 2e-9, `frame ${f}: ${timeOf(rows, f)}`);
+    assert.deepEqual(rows.slice(0, 3).map((x) => x.c), plain.slice(0, 3).map((x) => x.c));
+    // A page that starts after them
+    const page = (await api(`/api/rows?gen=${s.generation}&start=20&count=3`)).json.rows;
+    assert.ok(Math.abs(Number(page[0].c[1]) - (t(21) - t(8))) < 2e-9, page[0].c[1]);
+    const ref = frameNode((await api("/api/frame?num=8")).json);
+    assert.ok(ref.some((n) => n.fn === "frame.ref_time" && n.l === "This is a Time Reference frame"));
+    assert.match(ref.find((n) => n.fn === "frame.time_relative").l, /: 0\.000000000 seconds$/);
+    const later = (await api("/api/frame?num=9")).json;
+    assert.equal(later.row.c[1], timeOf(rows, 9));
+    assert.ok(!frameNode(later).some((n) => n.fn === "frame.ref_time"));
+    const relative = seconds(frameNode(later).find((n) => n.fn === "frame.time_relative").l);
+    assert.ok(Math.abs(relative - (t(9) - t(8))) < 2e-9, String(relative));
+    const texts = (await api(`/api/events?after=${since}`)).json.events.map((e) => `${e.level} ${e.text}`);
+    assert.ok(texts.includes("INFO The user set time references on 2 frames"), texts.join("\n"));
+  });
+  await check("time references: frame.ref_time filters match them, also once they change; hidden ones stay hidden", async () => {
+    await api("/api/timerefs/clear", {});
+    await api("/api/timerefs", { frames: [4, 8], on: true });
+    assert.equal((await api("/api/filter", { filter: "frame.ref_time" })).json.ok, true);
+    let s = await state();
+    assert.deepEqual([s.filter, s.displayedFrames], ["frame.ref_time", 2]);
+    let rows = (await api(`/api/rows?gen=${s.generation}&start=0&count=10`)).json.rows;
+    assert.deepEqual(rows.map((r) => [r.num, r.c[1]]), [[4, "*REF*"], [8, "*REF*"]]);
+    // Set on the selected packet: the list is rebuilt
+    await api("/api/select", { frame: 12 });
+    assert.deepEqual((await api("/api/timerefs/toggle", {})).json, { set: [12], unset: [] });
+    s = await state();
+    assert.deepEqual([s.displayedFrames, s.selectedIndex, s.rowsSince], [3, 2, s.generation]);
+    assert.equal((await api("/api/stats/phs?filter=frame.ref_time")).json[0].frames, 3);
+    assert.deepEqual((await find("frame.ref_time && frame.number > 5", 0, 1)).json, { frame: 8, index: 1, wrapped: false });
+    // Hidden by the filter: not listed, yet later packets count from them
+    assert.equal((await api("/api/filter", { filter: "!frame.ref_time && frame.number <= 10" })).json.ok, true);
+    s = await state();
+    rows = (await api(`/api/rows?gen=${s.generation}&start=0&count=10`)).json.rows;
+    assert.deepEqual(rows.map((r) => r.num), [1, 2, 3, 5, 6, 7, 9, 10]);
+    assert.equal(timeOf(rows, 9), (await api("/api/frame?num=9")).json.row.c[1]);
+    assert.ok(Number(timeOf(rows, 9)) < 0.001, timeOf(rows, 9));
+    // None left: frame.ref_time matches nothing
+    await api("/api/filter", { filter: "frame.ref_time" });
+    assert.deepEqual((await api("/api/timerefs/clear", {})).json, { set: [], unset: [4, 8, 12] });
+    s = await state();
+    assert.deepEqual([s.filter, s.displayedFrames, s.timeRefs], ["frame.ref_time", 0, []]);
+    await api("/api/filter", { filter: "" });
+  });
+  await check("time references: a reload keeps them, opening a file clears them; bad requests change nothing", async () => {
+    await api("/api/filter", { filter: "" });
+    await api("/api/timerefs/clear", {});
+    await api("/api/timerefs", { frames: [3, 20], on: true });
+    await api("/api/reload", {});
+    assert.deepEqual((await state()).timeRefs, [3, 20]);
+    for (const body of [{}, { frames: 3, on: true }, { frames: [3] }, { frames: [3], on: "yes" }]) assert.equal((await api("/api/timerefs", body)).status, 400, JSON.stringify(body));
+    assert.deepEqual((await state()).timeRefs, [3, 20]);
+    assert.deepEqual((await api("/api/timerefs", { frames: [20, 21], on: false })).json, { set: [], unset: [20] });
+    assert.deepEqual((await api("/api/timerefs", { frames: [3], on: true })).json, { set: [], unset: [] });
+    assert.equal((await api("/api/open", { path: fixture })).status, 200);
+    assert.deepEqual((await state()).timeRefs, []);
+    await api("/api/timerefs", { frames: [3], on: true });
+    await api("/api/close", {});
+    assert.deepEqual((await state()).timeRefs, []);
+    assert.equal((await api("/api/timerefs", { frames: [3], on: true })).status, 400);
+    assert.equal((await api("/api/timerefs/toggle", {})).status, 400);
+    assert.deepEqual((await api("/api/timerefs/clear", {})).json, { set: [], unset: [] });
+    assert.equal((await api("/api/open", { path: fixture })).status, 200);
+  });
+  await check("time references: a page whose references don't fit in one request with a long filter still counts from each", async () => {
+    const all = Array.from({ length: 29 }, (_, i) => i + 1);
+    await api("/api/timerefs", { frames: all, on: true });
+    const size = (params, id = 99_999) => Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id, method: "frames", params }));
+    // As long as the view's own pass over the file allows
+    let filter = "frame.number > 0";
+    while (size({ filter: `${filter} && frame.number != 1000000`, limit: 1_000_000, column0: "frame.number:0" }) < 8180) filter += " && frame.number != 1000000";
+    assert.ok(size({ limit: 29, filter, refs: all.join(",") }, Number.MAX_SAFE_INTEGER) >= 8190);
+    try {
+      const r = await api("/api/filter", { filter });
+      assert.equal(r.json.ok, true, JSON.stringify(r.json));
+      const s = await state();
+      const rows = (await api(`/api/rows?gen=${s.generation}&start=0&count=29`)).json.rows;
+      assert.deepEqual(rows.filter((x) => x.c[1] !== "*REF*").map((x) => `${x.num}: ${x.c[1]}`), []);
+      assert.equal(rows.length, 29);
+    } finally {
+      await api("/api/filter", { filter: "" });
+      await api("/api/timerefs/clear", {});
+    }
+  });
+  await check("time references: frame.ref_time inside a function, with # or @ is refused with a reason", async () => {
+    await api("/api/timerefs", { frames: [4], on: true });
+    try {
+      for (const filter of ["count(frame.ref_time) == 1", "frame.ref_time#1", "@frame.ref_time"]) {
+        const c = (await api(`/api/filter/check?filter=${encodeURIComponent(filter)}`)).json;
+        assert.equal(c.ok, false, filter);
+        assert.match(c.error, /frame\.ref_time .*only works as a test of its own/, filter);
+        assert.equal((await api("/api/filter", { filter })).json.ok, false, filter);
+      }
+      assert.equal((await state()).filter, "");
+      assert.deepEqual((await api("/api/filter/check?filter=" + encodeURIComponent("!frame.ref_time && frame.number < 3"))).json, { ok: true });
+    } finally {
+      await api("/api/timerefs/clear", {});
+    }
+  });
+  await check("time references: Open in Wireshark gets a frame.ref_time filter as their frame numbers", async () => {
+    // A stand-in that writes down what it was started with
+    const bin = join(home, "fake-wireshark");
+    const argsFile = join(home, "wireshark-args.txt");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "wireshark"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\n`, { mode: 0o755 });
+    const t = "fake-wireshark-token";
+    const p = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", t], {
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...env, PATH: `${bin}:${process.env.PATH}`, DISPLAY: ":wirebuddy-test" },
+    });
+    try {
+      const url = await new Promise((resolve, reject) => {
+        p.stdout.setEncoding("utf8");
+        p.stdout.on("data", (d) => {
+          const m = /UI at (http:\/\/[^/]+)\//.exec(d);
+          if (m) resolve(m[1]);
+        });
+        p.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
+      });
+      const call = async (path, body) => {
+        const res = await fetch(url + path, { method: body ? "POST" : "GET", headers: { "X-WireBuddy-Token": t, "content-type": "application/json" }, body: body && JSON.stringify(body) });
+        const json = await res.json();
+        assert.equal(res.status, 200, JSON.stringify(json));
+        return json;
+      };
+      await call("/api/open", { path: fixture });
+      await call("/api/timerefs", { frames: [4, 8], on: true });
+      await call("/api/filter", { filter: "frame.ref_time || frame.number == 1" });
+      await call("/api/wireshark", {});
+      const args = readFileSync(argsFile, "utf8").split("\n");
+      assert.equal(args[args.indexOf("-Y") + 1], "(frame.number in {4, 8}) || frame.number == 1");
+    } finally {
+      p.kill();
+    }
+  });
   await check("events: problems and user activity for the agent, long-poll for watchers", async () => {
     const start = (await api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json;
     assert.equal((await state()).agent.attached, false);

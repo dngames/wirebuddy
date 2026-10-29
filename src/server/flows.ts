@@ -178,7 +178,8 @@ export class FlowIndex {
 
   /**
    * Frames before `c0` that the frames c0..to need, ascending, within
-   * `budget`. First frame 1 (the time reference) and each flow's last packet
+   * `budget`. First frame 1, `ref` (what times count from: the first frame,
+   * the nearest time reference before c0) and each flow's last packet
    * before c0 each way, then the flows' first packets, then for each flow its
    * packets before c0 from the other side's last message on (a request and
    * its response so far; a flow without one from its start), whole or not
@@ -187,9 +188,10 @@ export class FlowIndex {
    * requests were pipelined into, an upload after a 100 Continue). It walks
    * no more than about twice the budget's frames, however long the flows.
    */
-  context(c0: number, to: number, budget: Budget): Int32Array {
+  context(c0: number, to: number, budget: Budget, ref = 0): Int32Array {
     const out = new Taken(budget);
     if (c0 > 1) out.add(1);
+    if (ref > 1 && ref < c0) out.add(ref);
     const seen = new Set<number>();
     /** Per flow, its last frame before c0. */
     const lasts = new Set<number>();

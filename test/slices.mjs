@@ -625,6 +625,52 @@ try {
     assert.ok(!readdirSync(out).some((n) => n.startsWith(".wirebuddy-slices-")), "slices removed");
   });
 
+  await check("time references: provisional rows and details count from the nearest one, before their chunk's slice or in it, as sharkd's full read does", async () => {
+    const cut = 37_000;
+    const file = await cutAt(cut);
+    await truth.call("load", { file, max_packets: cut });
+    // Long before every slice; in the first chunk's context, before the tail; in chunks, one right after another
+    const refs = [500, 12_345, 25_000, 25_001, 36_000];
+    const base = cut - 24_000;
+    const exact = [];
+    for (let at = base + 1; at <= cut; at += 1000) exact.push(...(await truth.call("frames", { skip: at - 1, limit: Math.min(1000, cut - at + 1), refs: refs.join(",") })));
+    const counted = {
+      ...view,
+      fetch: (engine, params, refs) => {
+        const local = refs(0, params.limit);
+        return engine.call("frames", local.length ? { ...params, refs: local.join(",") } : params);
+      },
+    };
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      await tail.update();
+      tail.rebase(base);
+      tail.active = true;
+      // Rows read before the references were set are read again, also from the growing chunk whose slice is held (30001.., from 25001)
+      const growing = 30_001 - base - 1;
+      await tail.rows(0, 500, counted);
+      await tail.rows(growing, 500, counted);
+      tail.setRefs(refs);
+      const held = await tail.rows(growing, 500, counted);
+      const rows = [];
+      for (let i = 0; i < tail.listed(); i += 500) rows.push(...(await tail.rows(i, 500, counted)));
+      const differ = [...rows.filter((r, i) => !same(r, exact[i])), ...held.filter((r, i) => !same(r, exact[growing + i]))];
+      assert.equal(differ.length, 0, `${differ.length} rows differ, e.g. ${differ.slice(0, 3).map((r) => `${r.num}: ${r.c[1]}`).join(", ")}`);
+      assert.deepEqual(rows.filter((r) => r.c[1] === "*REF*").map((r) => r.num), [25_000, 25_001, 36_000]);
+      const slice = tail.slice(base + 1);
+      assert.ok(slice.c0 > 500 && slice.extras.includes(500), "the nearest reference before the slice comes along");
+      // The frame node's times: since the reference, and whether it is one
+      const times =(tree) => tree.find((n) => n.fn === "frame").n.filter((n) => /^frame\.(time|ref_time)/.test(n.fn ?? ""));
+      for (const num of [base + 1, 20_001, 25_000, 25_002, 30_001, 36_000, 36_999]) {
+        const ref_frame = refs.findLast((r) => r <= num);
+        const want = await truth.call("frame", { frame: num, proto: true, ref_frame });
+        assert.deepEqual(times((await tail.frame(num)).tree), times(want.tree), `frame ${num}`);
+      }
+    } finally {
+      tail.close();
+    }
+  });
+
   await check("a growing file: newer packets read from slices as they come", async () => {
     const file = await cutAt(CHUNK - 300);
     const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Time references, as in Wireshark's Edit menu, and the agent's `time_references` tool
+
 ## [0.11.0] - 2026-10-28
 
 - Install from npm: `npm install -g wirebuddy`, or `claude mcp add wirebuddy -- npx -y wirebuddy --mcp`

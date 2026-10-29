@@ -102,7 +102,7 @@ const MENUS: TopMenu[] = [
     items: () => [
       { label: "Copy", sub: [...packetCopyItems(), SEP, ...fieldCopyItems()] },
       SEP,
-      ...items("find", "findNext", "findPrevious", SEP, "markToggle", "markAllDisplayed", "unmarkAllDisplayed", "unmarkAll", "nextMark", "previousMark"),
+      ...items("find", "findNext", "findPrevious", SEP, "markToggle", "markAllDisplayed", "unmarkAllDisplayed", "unmarkAll", "nextMark", "previousMark", SEP, "timeRefToggle", "unsetTimeRefs", "nextTimeRef", "previousTimeRef"),
     ],
   },
   {

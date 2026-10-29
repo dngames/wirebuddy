@@ -6,8 +6,9 @@ import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
 import { ApiError } from "./paneldata.ts";
+import { changeText } from "./timerefs.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, PanelAct, RecentFiles, ServerEvent, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
@@ -89,6 +90,9 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/marks/clear": (_q, b) => (viewer.clearMarks(b.frames ? numbers(b.frames) : undefined), ok),
     "/api/marks/toggle": () => (viewer.toggleMarks("user"), ok),
     "/api/marks/displayed": (_q, b) => (viewer.markDisplayed(flag(b.on, "on"), "user"), ok),
+    "/api/timerefs": (_q, b) => viewer.setTimeRefs(numbers(b.frames), flag(b.on, "on"), "user"),
+    "/api/timerefs/toggle": () => viewer.toggleTimeRefs("user"),
+    "/api/timerefs/clear": () => viewer.clearTimeRefs("user"),
     "/api/wireshark": async (_q, b) => (await viewer.openInWireshark(b.frame ?? null), ok),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
@@ -288,6 +292,9 @@ const ACTIONS: Record<string, string> = {
   "/api/marks": "Marking packets",
   "/api/marks/toggle": "Marking packets",
   "/api/marks/displayed": "Marking the displayed packets",
+  "/api/timerefs": "Setting time references",
+  "/api/timerefs/toggle": "Setting or unsetting the time reference",
+  "/api/timerefs/clear": "Unsetting all time references",
   "/api/columns": "Changing the columns",
   "/api/tls": "Setting the TLS key log",
   "/api/export": "Exporting packets",
@@ -329,6 +336,13 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       return { level: "INFO", text: "The user marked or unmarked the selected packets" };
     case "/api/marks/displayed":
       return { level: "INFO", text: b.on ? "The user marked all displayed packets" : "The user unmarked all displayed packets" };
+    case "/api/timerefs":
+    case "/api/timerefs/toggle": {
+      const did = changeText(result as TimeRefsChange);
+      return did ? { level: "INFO", text: `The user ${did}` } : null;
+    }
+    case "/api/timerefs/clear":
+      return (result as TimeRefsChange).unset.length ? { level: "INFO", text: "The user unset all time references" } : null;
     case "/api/columns": {
       const r = result as FilterCheck;
       if (r && r.ok === false) return { level: "WARNING", text: `The user's columns were rejected: ${r.error ?? "invalid"}` };

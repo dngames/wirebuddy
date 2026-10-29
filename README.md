@@ -36,7 +36,8 @@ The viewer itself works like Wireshark:
 
 - **Packet list, details and bytes** with Wireshark's menu bar, toolbar and keyboard shortcuts:
   coloring rules, a display filter bar with live validation and field autocompletion, linked tree
-  and hex highlighting, custom columns ("Apply as Column"), Find Packet, packet history, zoom.
+  and hex highlighting, custom columns ("Apply as Column"), time references the Time column counts
+  from, Find Packet, packet history, zoom.
 - **Follow Stream** like Wireshark's window (TCP, UDP, TLS, HTTP and more), and **several
   packets selected** with Ctrl+click and Shift+click to mark, copy or export them; the agent sees
   the selection too, so you can ask "what's wrong with these packets?".
@@ -313,7 +314,7 @@ solution; `solution/ctseries` is the panel.
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, capture status, open and offered panels |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, capture status, open and offered panels |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -327,6 +328,7 @@ solution; `solution/ctseries` is the panel.
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
 | `mark_frames` / `clear_marks` | Highlight frames with a note (listed under Go → Marked Packets) |
+| `time_references` | Set or unset time references (`*REF*`), which the Time column counts from, or clear them |
 | `set_columns` | Show fields as extra columns in the user's packet list |
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `start_capture` | Start a live capture with the Capture Options settings; the view follows it |
@@ -374,7 +376,7 @@ the questions you asked it.
   included) or a body that isn't JSON are refused. The page has a Content Security Policy.
 - The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
   into WireBuddy's capture folder. They can open any capture file you can read, read packets,
-  change the filter, marks, selection and columns, open Wireshark, and write new
+  change the filter, marks, time references, selection and columns, open Wireshark, and write new
   `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced unless the
   agent exported it itself in the same session.
 - `export_objects` saves files from the traffic, whose names and contents a sender chose, only
@@ -425,7 +427,14 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   more than about 8 MiB after them don't say where it is reassembled (less when many connections
   are busy at once).
 - Packet comments can't be added or edited in the viewer (marks go into pcapng exports as
-  comments), and there are no time references yet.
+  comments).
+- A time reference the display filter hides stays hidden, while Wireshark lists time references
+  whatever the filter; the packets after it count from it all the same, and Next/Previous Time
+  Reference go to it. "Open in Wireshark" doesn't take the time references along.
+- Display filters on `frame.time_relative` (also Apply as Filter on "Time since reference") count
+  from the first packet, not from the time references. In a filter, `frame.ref_time` stands for
+  the references' frame numbers: it works only as a test of its own, not inside a function or
+  with `#` or `@`, and for a few hundred scattered references at most (about 4 KB of numbers).
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
   Capture → Refresh Interfaces (F5): Wireshark skips the scan when it starts with a file.
 

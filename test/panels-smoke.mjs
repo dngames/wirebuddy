@@ -450,6 +450,34 @@ try {
     assert.equal(json(await call("objects", { kind: "http", epoch: view.epoch })).objects[0].id, objs[0].id);
   });
 
+  await check("panel data: fields, details and filters count time from the view's time references", async () => {
+    await api("/api/timerefs", { frames: [4, 8], on: true });
+    try {
+      const s = (await api("/api/state")).json;
+      const list = (await api(`/api/rows?gen=${s.generation}&start=0&count=29`)).json.rows;
+      const fields = ["frame.time_relative", "frame.ref_time"];
+      // By frames, and by a filter
+      for (const q of [{ frames: [[3, 9]] }, { filter: "frame.number >= 3 && frame.number <= 9" }]) {
+        const p = decodePage((await call("packets", { ...q, fields })).raw);
+        assert.deepEqual(p.frames, [3, 4, 5, 6, 7, 8, 9]);
+        assert.deepEqual(p.fields["frame.ref_time"].map((v) => v !== ""), [false, true, false, false, false, true, false]);
+        for (const [k, f] of p.frames.entries()) {
+          const time = list[f - 1].c[1];
+          assert.ok(time === "*REF*" ? Number(p.fields["frame.time_relative"][k]) === 0 : Math.abs(Number(p.fields["frame.time_relative"][k]) - Number(time)) < 2e-9, `${f}: ${p.fields["frame.time_relative"][k]} vs ${time}`);
+        }
+      }
+      assert.deepEqual(decodePage((await call("packets", { filter: "frame.ref_time" })).raw).frames, [4, 8]);
+      const frameNode = async (n) => json(await call("frame", { frame: n })).tree.find((x) => x.fn === "frame").n;
+      assert.ok((await frameNode(8)).some((x) => x.fn === "frame.ref_time"));
+      const [, v, unit] = /: ([\d.]+) (seconds|milliseconds|microseconds|nanoseconds)$/.exec((await frameNode(9)).find((x) => x.fn === "frame.time_relative").l);
+      assert.ok(Math.abs(Number(v) / { seconds: 1, milliseconds: 1e3, microseconds: 1e6, nanoseconds: 1e9 }[unit] - Number(list[8].c[1])) < 2e-9, `${v} ${unit} vs ${list[8].c[1]}`);
+      const view = await readEvents(dhost, doc, (ev) => ev.some((e) => e.event === "view"));
+      assert.equal(view.events.find((e) => e.event === "view").data.timeRefs, 2);
+    } finally {
+      await api("/api/timerefs/clear", {});
+    }
+  });
+
   await check("panel data: events tell the page about the view, resets and the end", async () => {
     const got = await readEvents(dhost, doc, (ev) => ev.some((e) => e.event === "view" && e.data.selected === 7), () => api("/api/select", { frame: 7 }));
     assert.equal(got.events[0].event, "view");

@@ -15,11 +15,12 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
   await import(join(out, "units.mjs"));
+const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -185,6 +186,66 @@ try {
       s.close();
     }
   });
+  await check("time references: the nearest per row, refs within sharkd's request limit, frame.ref_time spelled out", () => {
+    const refs = [5, 9, 20];
+    assert.deepEqual([refBefore(refs, 4), refBefore(refs, 5), refBefore(refs, 19), refBefore(refs, 99), refBefore([], 7)], [0, 5, 9, 20, 0]);
+    assert.deepEqual(refsOf(refs, [1, 2, 3]), []);
+    assert.deepEqual(refsOf(refs, [6, 7, 8]), [5]);
+    assert.deepEqual(refsOf(refs, [4, 9, 10, 25]), [9, 20]);
+    assert.deepEqual(refsOf(refs, Int32Array.from([12, 30])), [9, 20]);
+    assert.equal(refsUpTo(refs, 20), refs);
+    assert.deepEqual(refsUpTo(refs, 19), [5, 9]);
+    assert.equal(refsParam([]), undefined);
+    assert.equal(refsParam([5, 9]), "5,9");
+    // Only ascending frame numbers: anything else gets no answer from sharkd
+    assert.equal(refsParam([0, 5, 5, 3, 9.5, 12]), "5,12");
+    assert.equal(refsParam([0, -1]), undefined);
+    // frame.ref_time as a field; not in strings, nor as part of another name
+    assert.equal(refTimeFilter("frame.ref_time", refs), "(frame.number in {5, 9, 20})");
+    assert.equal(refTimeFilter('!frame.ref_time && frame.comment == "frame.ref_time"', [3, 4]), '!(frame.number in {3..4}) && frame.comment == "frame.ref_time"');
+    assert.equal(refTimeFilter("frame.ref_time || tcp", []), "(frame.number == 0) || tcp");
+    assert.equal(refTimeFilter("frame.ref_timex || xframe.ref_time", refs), "frame.ref_timex || xframe.ref_time");
+    assert.equal(usesRefTime('ip && "frame.ref_time"'), false);
+    assert.equal(usesRefTime("(frame.ref_time)"), true);
+    assert.throws(() => refTimeFilter("frame.ref_time", Array.from({ length: 2000 }, (_, i) => 2 * i + 1)), /too long for sharkd; unset some of them/);
+    assert.deepEqual([refTimeFits(refs), refTimeFits([]), refTimeFits(Array.from({ length: 2000 }, (_, i) => 2 * i + 1))], [true, true, false]);
+    assert.equal(changeText({ set: [5], unset: [] }), "set the time reference on frame 5");
+    assert.equal(changeText({ set: [5, 6], unset: [9] }), "set time references on 2 frames and unset the time reference on frame 9");
+    assert.equal(changeText({ set: [], unset: [] }), "");
+  });
+
+  await check("time references: rows whose references don't fit in one request come in parts, each with its own", async () => {
+    // Every row of 1,000,001.. a reference, after a long filter
+    const frames = Int32Array.from({ length: 500 }, (_, i) => 1_000_001 + i);
+    const refs = (from, to) => refsOf(Array.from(frames), frames.subarray(from, to));
+    const asked = [];
+    const read = async (p) => {
+      asked.push(p);
+      const size = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, method: "frames", params: { ...p, column0: "x" } }));
+      assert.ok(size < 8190, `${size} bytes`);
+      const skip = p.skip ?? 0;
+      const given = new Set(p.refs.split(",").map(Number));
+      return Array.from(frames.subarray(skip, skip + p.limit), (f) => ({ num: f, ref: given.has(f) }));
+    };
+    const rows = await framesWithRefs({ filter: "x".repeat(6000), limit: 500 }, refs, read, { column0: "x" });
+    assert.deepEqual(rows.map((r) => r.num), Array.from(frames));
+    assert.ok(rows.every((r) => r.ref));
+    assert.ok(asked.length > 1);
+    assert.equal(asked.reduce((n, p) => n + p.limit, 0), 500);
+    // Room for them all: one request; none: no refs param
+    assert.equal((await framesWithRefs({ limit: 10 }, refs, async (p) => [p])).length, 1);
+    assert.deepEqual(await framesWithRefs({ limit: 10, skip: 3 }, () => [], async (p) => [p]), [{ limit: 10, skip: 3 }]);
+  });
+
+  await check("time references: frame.ref_time inside a function, with # or @ is refused with a reason", async () => {
+    const check = async (f) => {
+      if (/\(\(|\)#|@\(/.test(f)) throw new SharkdError("Filter invalid - unexpected", -5001);
+    };
+    assert.equal(await refTimeError("frame.ref_time || tcp", check), null);
+    assert.equal(await refTimeError("count(frame.number) == 1", check), null);
+    for (const f of ["count(frame.ref_time) == 1", "frame.ref_time#1", "@frame.ref_time"]) assert.match(await refTimeError(f, check), /only works as a test of its own/, f);
+  });
+
   await check("export runs: at most 500 ranges and 512 KiB of comment arguments each", () => {
     assert.deepEqual(splitRuns([[1, 10]], []), [[[1, 10]]]);
     const many = Array.from({ length: 1200 }, (_, i) => [i * 2 + 1, i * 2 + 1]);

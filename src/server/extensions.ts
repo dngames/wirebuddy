@@ -981,7 +981,8 @@ Rules:
 
 API (global wb):
   wb.view          what the user's view shows: {file, epoch, frames, displayed, filter, selected,
-                   selection (frame ranges or null), marked, live (a capture runs), capture}
+                   selection (frame ranges or null), marked, timeRefs (time references, which
+                   frame.time_relative and frame.ref_time read from), live (a capture runs), capture}
   wb.on(event, fn) "view", "select" (frame or null), "packets" (the file grew), "reset",
                    "visible" (true/false), "theme" ("light"/"dark"); returns a function that stops it
   wb.packets(q)    one page of packets, q:

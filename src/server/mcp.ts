@@ -13,6 +13,7 @@ import { framesFilter, inRanges, type Ranges } from "../shared/ranges.ts";
 import { VERSION } from "../shared/version.ts";
 import { OBJECT_KINDS } from "./objects.ts";
 import { printable as oneLine } from "./text.ts";
+import { changeText, refTimeFits } from "./timerefs.ts";
 
 function instructions(watchCommand: string, tag: string): string {
   return `wirebuddy is a lightweight Wireshark-style capture viewer running in the user's browser pane.
@@ -28,7 +29,7 @@ You and the user look at the same view: the open capture, display filter, select
 - export_packets writes the relevant packets to a new small capture file, e.g. a minimal repro for a bug report; in pcapng your marks and their notes go along as packet comments.
 - TLS payloads are only readable when the user has set a key log file in the UI; get_view_state tells you whether it is set.
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
-- set_display_filter, goto_frame, mark_frames and set_columns change what the user sees; the user gets a notice for each.
+- set_display_filter, goto_frame, mark_frames, time_references and set_columns change what the user sees; the user gets a notice for each.
 - start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
 - Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say which frames those are and how many newer packets the user's list shows provisionally.
 - When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
@@ -318,7 +319,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "get_view_state",
     {
-      description: "What the user is looking at right now: open file, frame counts, display filter, selected frame (with its summary row), the packets the user selected with Ctrl/Shift+click (as a display filter for query_packets), marks and live-capture status.",
+      description: "What the user is looking at right now: open file, frame counts, display filter, selected frame (with its summary row), the packets the user selected with Ctrl/Shift+click (as a display filter for query_packets), marks, time references and live-capture status.",
       annotations: { readOnlyHint: true },
     },
     tool(async () => {
@@ -348,6 +349,12 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         if (s.marks.length) {
           lines.push(`Marks (${s.marks.length}):`);
           for (const m of s.marks.slice(0, 50)) lines.push(`  ${m.frame} [${m.by}]${m.note ? ` ${m.note}` : ""}`);
+        }
+        if (s.timeRefs.length) {
+          const more = s.timeRefs.length > 50 ? `, ... (${s.timeRefs.length - 50} more)` : "";
+          lines.push(`Time references (${s.timeRefs.length}): ${s.timeRefs.slice(0, 50).join(", ")}${more}`);
+          const refTime = refTimeFits(s.timeRefs) ? "the filter frame.ref_time matches them" : "the filter frame.ref_time can't stand for this many scattered ones (unset some to use it)";
+          lines.push(`  Time columns show *REF* on them and count each later packet from the nearest one before it, as do the fields frame.time_relative and frame.ref_time and the details; display filters on frame.time_relative still count from the first packet; ${refTime}`);
         }
       }
       lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
@@ -602,6 +609,29 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const removed = before - viewer.state.marks.length;
       if (removed) viewer.notice(frames ? `Unmarked ${removed} frame${removed === 1 ? "" : "s"}` : "Cleared all marks");
       return `${viewer.state.marks.length} marks left`;
+    }, true, "view"),
+  );
+
+  server.registerTool(
+    "time_references",
+    {
+      description:
+        "Wireshark's time references (Edit › Set/Unset Time Reference) in the user's view: the Time column shows *REF* on a reference and counts each later packet from the nearest one before it, and so do the fields frame.time_relative and frame.ref_time and the details, while display filters on frame.time_relative count from the first packet. \"set\" or \"unset\" them on frames, or \"clear\" them all. They go when another capture is opened.",
+      inputSchema: {
+        action: z.enum(["set", "unset", "clear"]),
+        frames: z.array(z.number().int().min(1)).min(1).max(5000).optional().describe("For set and unset"),
+      },
+    },
+    tool(async ({ action, frames }) => {
+      if (action !== "clear" && !frames) throw new Error(`give the frames to ${action}`);
+      const change = action === "clear" ? await viewer.clearTimeRefs("agent") : await viewer.setTimeRefs(frames!, action === "set", "agent");
+      const s = viewer.state;
+      const known = s.totalFrames + (s.tail?.frames ?? 0);
+      const beyond = action === "set" ? [...new Set(frames)].filter((f) => f > known) : [];
+      const skipped = beyond.length ? `; ignored ${beyond.length} frame(s) beyond the ${known} in the capture: ${beyond.slice(0, 20).join(", ")}${beyond.length > 20 ? ", ..." : ""}` : "";
+      const did = changeText(change);
+      const refs = s.timeRefs.length ? `: ${s.timeRefs.slice(0, 50).join(", ")}${s.timeRefs.length > 50 ? ", ..." : ""}` : "";
+      return `${did ? did[0].toUpperCase() + did.slice(1) : "Nothing changed"}${skipped}; ${s.timeRefs.length} time reference(s)${refs}`;
     }, true, "view"),
   );
 

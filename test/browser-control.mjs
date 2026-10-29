@@ -1,7 +1,8 @@
 // A panel in headless Chrome: wb.select is refused without a click in the panel and works after
 // one, wb.setFilter needs "control", wb.storage round-trips, panel action "snapshot" returns the
 // panel's canvas, and offers show as status-bar chips. Then the packet menu: asking the agent about
-// a packet, and the export dialog writing marks as packet comments.
+// a packet, the export dialog writing marks as packet comments, and time references set there and
+// in the Edit menu.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -284,6 +285,78 @@ try {
       throw new Error(`${err.message}; toasts: ${await toasts()}; dialog: ${await evaluate("document.querySelector('.dlg-export')?.textContent")}`);
     });
     assert.ok(existsSync(join(home, "selected.pcapng")));
+  });
+
+  await check("browser: Set/Unset Time Reference in a packet's menu and in the Edit menu, Ctrl+Alt+T unsets all: the rows show *REF* and count from them", async () => {
+    const time = (frame) => evaluate(`${row(frame)}?.querySelectorAll('.pl-cell')[1]?.textContent`);
+    const before = await time(9);
+    await fromMenu(6, "Set/Unset Time Reference");
+    await until("frame 6's *REF*", async () => (await time(6)) === "*REF*");
+    assert.deepEqual((await state()).timeRefs, [6]);
+    await until("frame 9 counting from it", async () => (await time(9)) !== before);
+    // The Edit menu's acts on the selected packet; Ctrl+Alt+T is Unset All Time References
+    await click(...center(await box(row(9))));
+    await until("frame 9 selected", async () => (await state()).selected === 9);
+    await click(...center(await box("[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === 'Edit')")));
+    await until("the Edit menu", async () => !!(await box(menuItem("Set/Unset Time Reference"))));
+    await click(...center(await box(menuItem("Set/Unset Time Reference"))));
+    await until("frame 9's *REF*", async () => (await time(9)) === "*REF*");
+    assert.deepEqual((await state()).timeRefs, [6, 9]);
+    // Its details, shown already, are read again
+    const details = () => evaluate("[...document.querySelectorAll('.dt-label')].map((l) => l.textContent).join('\\n')");
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39, modifiers: 2 });
+    await until("frame 9's details as a reference", async () => /Time since reference or first frame: 0\.000000000 seconds/.test(await details()));
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "t", code: "KeyT", windowsVirtualKeyCode: 84, modifiers: 3 });
+    await until("no time references", async () => (await state()).timeRefs.length === 0);
+    await until("frame 9's time from the first packet", async () => (await time(9)) === before);
+    await until("frame 9's details from the first packet", async () => /Time since reference or first frame: (?!0\.000000000 )/.test(await details()));
+  });
+
+  await check("browser: the packet menu says how many packets get time references; the menus don't offer the browser's Ctrl+T", async () => {
+    await click(...center(await box(row(2))));
+    await until("frame 2 selected", async () => (await state()).selected === 2);
+    const [x, y] = center(await box(row(4)));
+    for (const type of ["mousePressed", "mouseReleased"]) await cdp("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1, modifiers: 8 });
+    await until("3 rows selected", async () => (await state()).selectedCount === 3);
+    await fromMenu(3, "Set/Unset Time References on 3 Packets");
+    await until("their references", async () => (await state()).timeRefs.length === 3);
+    assert.deepEqual((await state()).timeRefs, [2, 3, 4]);
+    await click(...center(await box("[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === 'Edit')")));
+    await until("the Edit menu", async () => !!(await box(menuItem("Set/Unset Time Reference"))));
+    const entry = await evaluate(`${menuItem("Set/Unset Time Reference")}.textContent`);
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    assert.doesNotMatch(entry, /Ctrl\+T|⌘T/);
+    await fetch(new URL("/api/timerefs/clear", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: "{}" });
+    await until("no time references", async () => (await state()).timeRefs.length === 0);
+  });
+
+  await check("browser: rows asked for before the time references changed are asked for again", async () => {
+    const time = (frame) => evaluate(`${row(frame)}?.querySelectorAll('.pl-cell')[1]?.textContent`);
+    const timeRefs = (frames) => fetch(new URL("/api/timerefs", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: JSON.stringify({ frames, on: true }) });
+    // The next page's answer waits until released
+    await evaluate(`(() => {
+      const f = window.fetch;
+      window.__held = null;
+      window.fetch = async (...a) => {
+        const r = await f(...a);
+        if (!String(a[0]).includes("api/rows") || window.__held) return r;
+        await new Promise((resolve) => (window.__held = resolve));
+        return r;
+      };
+    })()`);
+    try {
+      await timeRefs([6]);
+      await until("a page in flight", () => evaluate("!!window.__held"));
+      await timeRefs([10]);
+      await until("the page asked for again", async () => (await time(10)) === "*REF*");
+      await evaluate("window.__held()");
+      await sleep(500);
+      assert.equal(await time(10), "*REF*");
+      assert.equal(await time(6), "*REF*");
+    } finally {
+      await evaluate("window.__held?.()");
+      await fetch(new URL("/api/timerefs/clear", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: "{}" });
+    }
   });
 } finally {
   ws?.close();

@@ -5,7 +5,7 @@ import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks, knownFrames } from "./app.ts";
 import { toast, toastError } from "./toast.ts";
-import { save } from "./util.ts";
+import { sameList, save } from "./util.ts";
 
 // ---------------------------------------------------------------- state sync
 
@@ -113,8 +113,9 @@ export function applyState(s: ViewState): void {
 
   bus.emit("state", s, prev);
   if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
-  // A provisional packet read in full now: its exact details
+  // A provisional packet read in full now: its exact details; other time references: its times
   if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) reloadFrame();
+  else if (app.selFrame !== null && prev?.file === s.file && !sameList(prev.timeRefs, s.timeRefs)) reloadFrame();
   else if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
   if (reveal) bus.emit("reveal", reveal.index, reveal.flash);
 }
@@ -376,6 +377,41 @@ export function gotoMark(dir: 1 | -1): void {
   if (!frames.length) return;
   const cur = app.selFrame ?? (dir > 0 ? 0 : Number.MAX_SAFE_INTEGER);
   const next = dir > 0 ? frames.find((f) => f > cur) ?? frames[0] : [...frames].reverse().find((f) => f < cur) ?? frames[frames.length - 1];
+  jumpToFrame(next);
+}
+
+// ---------------------------------------------------------- time references
+
+/** Set/Unset Time Reference: flips the time reference of each selected packet. */
+export async function toggleTimeRefSelected(): Promise<void> {
+  if (!(await flushSelection())) {
+    toast("error", "The selection isn't settled yet; select the packets again");
+    return;
+  }
+  try {
+    await post("api/timerefs/toggle", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Setting the time reference failed");
+  }
+}
+
+/** Unset All Time References. */
+export async function clearTimeRefs(): Promise<void> {
+  try {
+    await post("api/timerefs/clear", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Unsetting the time references failed");
+  }
+}
+
+/** Next/previous time reference relative to the selection. */
+export function gotoTimeRef(dir: 1 | -1): void {
+  const refs = app.state?.timeRefs ?? [];
+  if (!refs.length) return;
+  const cur = app.selFrame ?? (dir > 0 ? 0 : Number.MAX_SAFE_INTEGER);
+  const next = dir > 0 ? refs.find((f) => f > cur) ?? refs[0] : refs.findLast((f) => f < cur) ?? refs[refs.length - 1];
   jumpToFrame(next);
 }
 

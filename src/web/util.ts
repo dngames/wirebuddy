@@ -301,6 +301,10 @@ export function isTextInput(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true;
 }
 
+export function sameList(a: readonly number[], b: readonly number[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
 export function csvField(s: string): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }

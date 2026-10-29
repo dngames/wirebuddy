@@ -52,6 +52,9 @@
  * | POST   | /api/marks/clear              | { frames? } (omit: clear all)        | { ok: true }           |
  * | POST   | /api/marks/toggle             |                                      | { ok: true }           |
  * | POST   | /api/marks/displayed          | { on: boolean }                      | { ok: true }           |
+ * | POST   | /api/timerefs                 | { frames, on: boolean }              | TimeRefsChange         |
+ * | POST   | /api/timerefs/toggle          | (the selected frames, else the current one) | TimeRefsChange  |
+ * | POST   | /api/timerefs/clear           |                                      | TimeRefsChange         |
  * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
  * | GET    | /api/extensions               |                                      | ExtensionList          |
@@ -95,8 +98,8 @@ export interface ViewState {
   loadError: string | null;
   /**
    * Bumps whenever the displayed rows change: file opened, live reload,
-   * filter applied, provisional rows added. Rows fetched for an older
-   * generation may be outdated.
+   * filter applied, provisional rows added, time references set. Rows
+   * fetched for an older generation may be outdated.
    */
   generation: number;
   /** Random id of the server process; a new value means the server restarted. */
@@ -140,6 +143,16 @@ export interface ViewState {
   rowsSince: number;
   /** Frames the agent (or the user) marked, keyed by frame number. */
   marks: Mark[];
+  /**
+   * Time references (Edit › Set/Unset Time Reference), ascending frame
+   * numbers: the Time column shows *REF* on them and counts each packet from
+   * the nearest one before it, and so do the details' times. A change bumps
+   * {@link generation} (rows read again, rowsSince stays unless a display
+   * filter on frame.ref_time lists other frames now); the shown packet's
+   * details are read again too. A display filter that hides a reference
+   * keeps it hidden, and packets after it still count from it.
+   */
+  timeRefs: number[];
   capture: CaptureState;
   /** Last action the agent took in the UI, shown as a dismissable banner. */
   agentNotice: AgentNotice | null;
@@ -277,6 +290,8 @@ export interface PanelView {
   /** Frame ranges of the user's selected rows; null when there are too many. */
   selection: Ranges | null;
   marked: number;
+  /** Time references the view has (see {@link ViewState.timeRefs}): frame.time_relative and frame.ref_time read from them. */
+  timeRefs: number;
   /** The view follows a capture that is running. */
   live: boolean;
   capture: CaptureStatus;
@@ -286,6 +301,12 @@ export interface Mark {
   frame: number;
   note: string;
   by: "agent" | "user";
+}
+
+/** What a change of time references did: frames that became references, and frames that stopped being ones. */
+export interface TimeRefsChange {
+  set: number[];
+  unset: number[];
 }
 
 export interface AgentNotice {
