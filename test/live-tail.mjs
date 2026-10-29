@@ -282,6 +282,8 @@ try {
           return;
         } catch (err) {
           if (attempt >= 5 || !err.overtaken) throw err;
+          // A retry starts without the last attempt's references
+          await tool("time_references", { action: "clear" });
         }
       }
     } finally {
