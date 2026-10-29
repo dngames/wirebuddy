@@ -460,8 +460,14 @@ export class Extensions {
   /** Why extensions can't load, or null when they can. */
   unavailable: string | null = "not set up yet";
 
-  /** `examples`: the folder of the example extensions that ship with WireBuddy, for the panel guide. */
-  constructor(private readonly examples = "") {
+  /**
+   * `examples`: the folder of the example extensions that ship with WireBuddy, for the panel guide.
+   * `app`: WireBuddy's own built code, the pages it serves among it.
+   */
+  constructor(
+    private readonly examples = "",
+    private readonly app = "",
+  ) {
     const data = process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
     this.dir = join(data, "wirebuddy/extensions");
     this.stateFile = join(data, "wirebuddy/extensions-state.json");
@@ -472,13 +478,14 @@ export class Extensions {
   }
 
   /**
-   * Folders whose files Wireshark or WireBuddy load as code: the extensions',
-   * every WireBuddy's plugin folders, Wireshark's global and personal plugin
-   * and configuration folders.
+   * Folders whose files Wireshark or WireBuddy load as code: WireBuddy's own,
+   * the extensions', every WireBuddy's plugin folders, Wireshark's global and
+   * personal plugin and configuration folders.
    */
   codeFolders(): string[] {
     const config = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
     return [
+      this.app,
       this.dir,
       ...this.shared,
       this.home,

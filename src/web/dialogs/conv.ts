@@ -62,7 +62,7 @@ function endptCols(withPorts: boolean): Col[] {
   return cols;
 }
 
-function cmp(a: string | number, b: string | number): number {
+export function cmp(a: string | number, b: string | number): number {
   if (typeof a === "number" && typeof b === "number") return a - b;
   const na = Number(a);
   const nb = Number(b);

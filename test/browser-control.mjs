@@ -2,12 +2,12 @@
 // one, wb.setFilter needs "control", wb.storage round-trips, panel action "snapshot" returns the
 // panel's canvas, and offers show as status-bar chips. Then the packet menu: asking the agent about
 // a packet, the export dialog writing marks as packet comments, and time references set there and
-// in the Edit menu.
+// in the Edit menu. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,12 +49,17 @@ mkdirSync(join(offered, "panel"), { recursive: true });
 writeFileSync(join(offered, "extension.json"), JSON.stringify({ label: "Offered", version: "1", panel: { offer: { filter: "http.response.code == 404", text: "Show it" } } }));
 writeFileSync(join(offered, "panel/main.js"), "wb.ready();\n");
 
+const bin = join(home, "bin");
+mkdirSync(bin);
+writeFileSync(join(bin, "dumpcap"), `#!/bin/sh\nexec "${process.execPath}" "${join(root, "test/fake-dumpcap.mjs")}" "$@"\n`);
+chmodSync(join(bin, "dumpcap"), 0o755);
+
 const client = new Client({ name: "browser-control", version: "0" });
 await client.connect(
   new StdioClientTransport({
     command: process.execPath,
     args: [join(root, "dist/server/main.js"), "--mcp", "--port", "0"],
-    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
     stderr: "ignore",
   }),
 );
@@ -478,6 +483,106 @@ try {
     await sleep(300);
     assert.ok((await state()).file, "the capture stays open");
   }).finally(closeComment);
+
+  const rows = () => evaluate("document.querySelectorAll('.dlg-objects tbody tr').length");
+  const type = (field, text) => evaluate(`(() => { const i = document.querySelector('.dlg-objects ${field}'); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input')); })()`);
+  const button = (label) => box(`[...document.querySelectorAll('.dlg-objects .dlg-footer button')].find((b) => b.textContent === ${JSON.stringify(label)})`);
+  const listMsg = () => evaluate("document.querySelector('.dlg-objects .stat-msg')?.textContent ?? null");
+  const footer = () => evaluate("document.querySelector('.dlg-objects .dlg-footer-left').textContent");
+  const saveErr = () => evaluate("(() => { const e = document.querySelector('.dlg-objects .of-err'); return e && !e.hidden ? e.textContent : ''; })()");
+  // Escape closes a modeless dialog only while it has the focus; toasts may cover the button
+  const closeObjects = () => evaluate("[...document.querySelectorAll('.dlg-objects .dlg-footer button')].find((b) => b.textContent === 'Close')?.click()");
+
+  await check("browser: File › Export Objects › HTTP… goes to a packet and saves the chosen object", async () => {
+    // The default is the fixture's folder, in the source tree
+    const out = mkdtempSync("/tmp/wirebuddy-objects-");
+    try {
+      await fromMenuBar("File", "Export Objects", "HTTP…");
+      await until("the two objects", async () => (await rows()) === 2);
+      await type(".ex-search", "big");
+      await until("the filtered object", async () => (await rows()) === 1);
+      await click(...center(await box("document.querySelector('.dlg-objects tbody tr')")));
+      await until("frame 12 selected", async () => (await state()).selected === 12);
+      const notice = (await state()).agentNotice?.id;
+      await type(".ex-path", out);
+      await click(...center(await button("Save")));
+      await until("the saved note", async () => /^Saved 1 HTTP object to http-objects$/.test(await footer())).catch(async (err) => {
+        throw new Error(`${err.message}; dialog: ${await evaluate("document.querySelector('.dlg-objects')?.textContent")}`);
+      });
+      assert.doesNotMatch(await toasts(), /Saved/, "a toast would cover the dialog's buttons");
+      assert.equal(await evaluate("document.querySelector('.dlg-objects .dlg-footer-left').title"), join(realpathSync(out), "http-objects"));
+      assert.deepEqual(readdirSync(join(out, "http-objects")), ["f12-big.txt"]);
+      assert.match(await viewState(), /The user saved 1 HTTP object/);
+      assert.equal((await state()).agentNotice?.id, notice);
+      await type(".ex-search", "");
+      await until("both objects", async () => (await rows()) === 2);
+      await click(...center(await button("Save All")));
+      await until("the second folder", () => existsSync(join(out, "http-objects-2")) && readdirSync(join(out, "http-objects-2")).length === 2);
+      await until("its note", async () => /^Saved 2 HTTP objects to http-objects-2$/.test(await footer()));
+      await type(".ex-search", "big");
+      await until("the count again", async () => /^1 of 2 HTTP objects/.test(await footer()));
+    } finally {
+      await closeObjects();
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  await check("browser: Export Objects fits long names, names at most 10,000 objects in a save, and lists nothing itself when a save is stale", async () => {
+    // 10,001 objects with long names listed and every save refused as stale, each request noted
+    await evaluate(`(() => {
+      const f = window.fetch;
+      const long = "-".repeat(200);
+      const objects = Array.from({ length: 10001 }, (_, i) => ({ frame: 1, host: "h" + long, type: "text/plain" + long, filename: "f" + i + long, size: 1, sha1: "" }));
+      const answer = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      window.__fetch = f;
+      window.__asked = [];
+      window.fetch = async (...a) => {
+        const url = String(a[0]);
+        if (!url.includes("api/objects")) return f(...a);
+        window.__asked.push(url.includes("save") ? "save" : "list");
+        return url.includes("save") ? answer(409, { error: "the capture changed; list the objects again" }) : answer(200, { objects, dir: "/tmp" });
+      };
+    })()`);
+    try {
+      await fromMenuBar("File", "Export Objects", "HTTP…");
+      await until("the first 5,000 rows", async () => (await rows()) === 5000);
+      assert.ok(await evaluate("(() => { const w = document.querySelector('.dlg-objects .stat-wrap'); return w.scrollWidth <= w.clientWidth; })()"), "the table is wider than the dialog");
+      await type(".ex-search", "h");
+      await until("all of them matching", async () => /^10,001 of 10,001 /.test(await evaluate("document.querySelector('.dlg-objects .dlg-footer-left').textContent")));
+      // The toasts of the checks before cover the dialog's buttons
+      await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
+      await click(...center(await button("Save All")));
+      await until("the reason", saveErr);
+      assert.match(await saveErr(), /clear the filter to save all$/);
+      await click(...center(await box("document.querySelector('.dlg-objects tbody tr')")));
+      await click(...center(await button("Save")));
+      await until("the refusal", async () => /nothing was saved/.test(await saveErr()));
+      // The state that changed the capture lists again
+      await sleep(500);
+      assert.deepEqual(await evaluate("window.__asked"), ["list", "save"]);
+    } finally {
+      await evaluate("window.fetch = window.__fetch");
+      await closeObjects();
+    }
+  });
+
+  // Last: the capture replaces the fixture
+  await check("browser: Export Objects lists a live capture only on Refresh", async () => {
+    const waiting = "Capturing: Refresh lists the HTTP objects";
+    try {
+      await fromMenuBar("File", "Export Objects", "HTTP…");
+      await until("the two objects", async () => (await rows()) === 2);
+      await call("start_capture", { interface: "lo", filter: "burst 2000 rate 500" });
+      await until("the capture's file unlisted", async () => (await listMsg()) === waiting);
+      await until("more packets", async () => (await state()).totalFrames > 3000);
+      assert.equal(await listMsg(), waiting);
+      await click(...center(await box("document.querySelector('.dlg-objects .ex-bar button')")));
+      await until("the captured objects", async () => (await rows()) > 0);
+    } finally {
+      await call("stop_capture");
+      await closeObjects();
+    }
+  });
 } finally {
   ws?.close();
   chrome.kill();

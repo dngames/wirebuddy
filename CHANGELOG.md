@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- File › Export Objects: list the files carried in the traffic and save them to a new folder
+- `export_objects` refuses WireBuddy's own `dist` folder
+
 ## [0.12.0] - 2026-10-29
 
 - Time references, as in Wireshark's Edit menu, and the agent's `time_references` tool

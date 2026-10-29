@@ -417,6 +417,9 @@ try {
         const code = new Extensions().codeFolders();
         assert.throws(() => objectDir(join(base, "cfg/plugins"), code), /loads code from/);
         assert.throws(() => objectDir(join(base, "xdg/wireshark/plugins"), code), /loads code from/);
+        // WireBuddy's own code, the pages it serves among it
+        mkdirSync(join(base, "dist/web"), { recursive: true });
+        assert.throws(() => objectDir(join(base, "dist/web"), new Extensions("", join(base, "dist")).codeFolders()), /loads code from/);
       } finally {
         for (const [k, v] of [["WIRESHARK_CONFIG_DIR", saved.config], ["XDG_CONFIG_HOME", saved.xdg]]) {
           if (v === undefined) delete process.env[k];

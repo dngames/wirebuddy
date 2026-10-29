@@ -819,12 +819,12 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "export_objects",
     {
-      description: "Files carried in the traffic (Wireshark's File > Export Objects): list them, or save them to a new folder to read or check them. Kinds: http (also multipart parts), imf (email messages), smb, tftp, dicom, ftp-data.",
+      description: "Files carried in the traffic (Wireshark's File > Export Objects): list them, or save them to a new folder to read or check them. Kinds: http, imf (email messages), smb, tftp, dicom, ftp-data.",
       inputSchema: {
         kind: z.enum(OBJECT_KINDS).default("http"),
         action: z.enum(["list", "save"]).default("list"),
         frames: z.array(z.number().int().min(1)).min(1).max(5000).optional().describe("save: only the objects of these frames (the frame list shows), else all"),
-        dir: z.string().optional().describe("save: an existing absolute directory that no other user can change, nor any folder above it (/tmp works); not hidden and not a Wireshark plugin or configuration folder. The files go into a new folder in it (http-objects, http-objects-2, …), named f<frame>-<name>"),
+        dir: z.string().optional().describe("save: an existing absolute directory that no other user can change, nor any folder above it (/tmp works); not hidden, not a Wireshark plugin or configuration folder and not WireBuddy's own dist. The files go into a new folder in it (http-objects, http-objects-2, …), named f<frame>-<name>"),
       },
     },
     tool(async ({ kind, action, frames, dir }) => {
@@ -837,7 +837,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         return `${all.length} ${what} object${all.length === 1 ? "" : "s"}:\n${lines.join("\n")}${more}`;
       }
       if (!dir) throw new Error("save needs dir, an absolute directory to save into");
-      const r = await viewer.saveObjects(kind, frames, dir);
+      const r = await viewer.saveObjects(kind, frames ? { frames } : {}, dir, "agent");
       const lines = r.saved.slice(0, MAX_OBJECT_LINES).map((o) => `${o.name} — ${o.size} bytes, frame ${o.frame}${o.type ? `, ${oneLine(o.type)}` : ""}`);
       if (r.saved.length > MAX_OBJECT_LINES) lines.push(`… and ${r.saved.length - MAX_OBJECT_LINES} more`);
       for (const { object: o, reason } of r.skipped.slice(0, MAX_OBJECT_LINES)) lines.push(`skipped frame ${o.frame} ${oneLine(o.filename)} (${o.size} bytes): ${reason}`);

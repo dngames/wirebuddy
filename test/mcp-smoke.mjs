@@ -236,6 +236,7 @@ try {
   assert.equal(statSync(join(saved, "f12-big.txt")).mode & 0o777, 0o600);
   await call("export_objects", { action: "save", dir: out, frames: [25] }, (t) => assert.match(t, /^Saved 1 HTTP object to .*http-objects-2 /));
   assert.deepEqual(readdirSync(join(out, "http-objects-2")), ["f25-nothere"]);
+  assert.match((await viewState()).agentNotice.text, /^Saved 1 HTTP object to .*http-objects-2$/);
   await call("set_display_filter", { filter: "" }, (t) => assert.match(t, /29 of 29 frames/));
   assert.equal((await post("/api/select", { frame: 5, rows: [[2, 4], [6, 8], [10, 10]] })).status, 200);
   let selection;

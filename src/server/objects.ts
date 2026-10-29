@@ -1,26 +1,22 @@
 /**
  * Files carried in the traffic (Wireshark's File > Export Objects), saved for
- * the agent. Names and contents come from the capture, so every save goes into
- * a new private folder that other users can't redirect, under names of its
- * own, never over an existing file and never where code is loaded from.
+ * the user or the agent. Names and contents come from the capture, so every
+ * save goes into a new private folder that other users can't redirect, under
+ * names of its own, never over an existing file and never where code is
+ * loaded from.
  */
 
 import { closeSync, mkdirSync, openSync, realpathSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { rootTrust } from "./extensions.ts";
 import { printable } from "./text.ts";
+import type { ObjectKind, ObjectRow } from "../shared/api.ts";
 
-export const OBJECT_KINDS = ["http", "imf", "smb", "tftp", "dicom", "ftp-data"] as const;
-export type ObjectKind = (typeof OBJECT_KINDS)[number];
+export type { ObjectKind };
+export const OBJECT_KINDS = ["http", "imf", "smb", "tftp", "dicom", "ftp-data"] as const satisfies readonly ObjectKind[];
 
 /** One file sharkd found in the traffic; `token` downloads it. */
-export interface CapturedObject {
-  frame: number;
-  host: string;
-  type: string;
-  filename: string;
-  size: number;
-  sha1: string;
+export interface CapturedObject extends ObjectRow {
   token: string;
 }
 
@@ -89,7 +85,7 @@ export function newObjectFolder(real: string, kind: ObjectKind, codeFolders: str
       } catch {
         // Gone or swapped: nothing of the user's to clean up
       }
-      throw new Error(`${printable(folder)} ${problem}; choose a directory that only you can change`);
+      throw new Error(`${printable(folder)} ${problem}; choose a directory that only you can change (/tmp works)`);
     }
     return folder;
   }

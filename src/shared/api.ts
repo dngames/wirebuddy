@@ -648,6 +648,32 @@ export interface ExportResult {
   provisional?: number;
 }
 
+/** File > Export Objects: what carries the files. */
+export type ObjectKind = "http" | "imf" | "smb" | "tftp" | "dicom" | "ftp-data";
+
+/** One file sharkd found in the traffic; `frame:sha1` names it for a save. */
+export interface ObjectRow {
+  frame: number;
+  host: string;
+  type: string;
+  filename: string;
+  size: number;
+  sha1: string;
+}
+
+export interface ObjectList {
+  objects: ObjectRow[];
+  /** Where saves go unless the user names another directory. */
+  dir: string;
+}
+
+export interface ObjectSaveResult {
+  /** The new folder, or null when every object was skipped. */
+  folder: string | null;
+  saved: number;
+  skipped: { frame: number; filename: string; reason: string }[];
+}
+
 export type ServerEvent =
   | { type: "state"; state: ViewState }
   | { type: "toast"; level: "info" | "error"; text: string };

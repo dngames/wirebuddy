@@ -31,11 +31,12 @@ Supported versions: the latest `main` and the latest release.
   `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
   file, except one the agent exported itself in the same session and WireBuddy's own record of
   switched-off extensions.
-- `export_objects` saves files carried in the traffic only into a new folder it creates in a
-  directory the agent names, under names made of the frame number and the object's name
-  reduced to letters, digits, `.`, `_` and `-`. The new folder must not be in or below a hidden
-  folder or a folder Wireshark or WireBuddy loads code or configuration from (the extension
-  folders, every WireBuddy's plugin folders, Wireshark's global plugin folder, its personal
+- File › Export Objects and `export_objects` save files carried in the traffic only into a new
+  folder they create in a directory the user or the agent names, under names made of the frame
+  number and the object's name reduced to letters, digits, `.`, `_` and `-`. The new folder must
+  not be in or below a hidden folder or a folder Wireshark or WireBuddy loads code or
+  configuration from (WireBuddy's own `dist`, whose pages it serves, the extension folders,
+  every WireBuddy's plugin folders, Wireshark's global plugin folder, its personal
   configuration and plugin folders, `WIRESHARK_PLUGIN_DIR` and `WIRESHARK_CONFIG_DIR`). Every
   folder from `/` down to it must belong to root or the user and be closed to other writers,
   except sticky ones like `/tmp`, below which only the user's own entries count; unlike for

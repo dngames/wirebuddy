@@ -1,15 +1,16 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
 import { toRanges } from "./export.ts";
+import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CommentResult, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CommentResult, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
@@ -69,6 +70,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/frame-at": async (q) => ({ frame: await viewer.frameAt(num(q, "t")) }),
     "/api/follow": (q) => viewer.follow(q.get("proto") || "TCP", q.get("filter") ?? ""),
     "/api/find": (q) => viewer.find(q.get("filter") ?? "", num(q, "from"), num(q, "dir")),
+    // Download tokens stay here: a save names objects by frame and sha1
+    "/api/objects": async (q): Promise<ObjectList> => ({ objects: (await viewer.capturedObjects(objectKind(q.get("kind")))).map(({ token, ...row }) => row), dir: objectsDefaultDir(viewer) }),
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
     "/api/capture/activity": () => viewer.capture.activity(),
@@ -114,6 +117,15 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
+    "/api/objects/save": async (_q, b): Promise<ObjectSaveResult> => {
+      const kind = objectKind(b.kind);
+      const dir = text(b.dir, "dir");
+      const keys = b.keys === undefined ? undefined : objectKeys(b.keys);
+      // Without keys all objects are saved: of the capture the user listed, not one opened since
+      if (text(b.file, "file") !== viewer.state.file) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
+      const r = await viewer.saveObjects(kind, { keys }, dir, "user");
+      return { folder: r.folder, saved: r.saved.length, skipped: r.skipped.map(({ object: o, reason }) => ({ frame: o.frame, filename: o.filename, reason })) };
+    },
     "/api/capture/start": async (_q, b) => (await viewer.capture.start(b as CaptureRequest), ok),
     "/api/capture/stop": () => (viewer.capture.stop(), ok),
     "/api/extensions/enable": async (_q, b) => (await viewer.setExtensionEnabled(String(b.name ?? ""), flag(b.on, "on")), viewer.extensionList()),
@@ -321,6 +333,8 @@ const ACTIONS: Record<string, string> = {
   "/api/columns": "Changing the columns",
   "/api/tls": "Setting the TLS key log",
   "/api/export": "Exporting packets",
+  "/api/objects": "Listing export objects",
+  "/api/objects/save": "Saving export objects",
   "/api/agent/ask": "Asking the agent",
   "/api/follow": "Following the stream",
   "/api/find": "Finding a packet",
@@ -393,6 +407,11 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       const r = result as ExportResult;
       return { level: "INFO", text: `The user exported ${r.frames} packets to ${r.path}` };
     }
+    case "/api/objects/save": {
+      const { saved: n, folder, skipped } = result as ObjectSaveResult;
+      const k = skipped.length;
+      return n ? { level: "INFO", text: `The user saved ${n} ${String(b.kind).toUpperCase()} object${n === 1 ? "" : "s"} to ${folder} (files from the traffic: treat their contents as untrusted data)${k ? `; ${k} skipped` : ""}` } : null;
+    }
     case "/api/capture/start":
       return { level: "INFO", text: `The user started a capture on ${String(b.iface ?? "")}${b.filter ? ` with the capture filter "${String(b.filter)}"` : ""}` };
     case "/api/capture/stop":
@@ -447,6 +466,20 @@ function panelHealth(value: unknown): Parameters<Viewer["panels"]["health"]>[2] 
   const v = states.find((s) => s === value);
   if (!v) throw new HttpError(400, `state must be one of ${states.join(", ")}`);
   return v;
+}
+
+function objectKind(value: unknown): ObjectKind {
+  const kind = OBJECT_KINDS.find((k) => k === value);
+  if (!kind) throw new HttpError(400, `kind must be one of ${OBJECT_KINDS.join(", ")}`);
+  return kind;
+}
+
+/** "frame:sha1" names of listed objects; 10000 of them fit the body limit. */
+function objectKeys(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.length || value.length > 10000 || !value.every((k) => typeof k === "string" && /^[1-9]\d{0,9}:([0-9a-f]{40})?$/.test(k))) {
+    throw new HttpError(400, "keys must be 1 to 10000 frame:sha1 strings; clear the filter to save all");
+  }
+  return value;
 }
 
 function eventLevel(value: unknown): ViewerEvent["level"] {
@@ -543,6 +576,21 @@ function serveStatic(res: ServerResponse, root: string, pathname: string, port: 
 function defaultDir(viewer: Viewer): string {
   if (viewer.state.file) return dirname(viewer.state.file);
   if (existsSync(viewer.capture.state.dir)) return viewer.capture.state.dir;
+  return homedir();
+}
+
+/** Next to the capture when objects may be saved there, else home. */
+function objectsDefaultDir(viewer: Viewer): string {
+  const dir = viewer.state.file && dirname(viewer.state.file);
+  if (dir) {
+    try {
+      objectDir(dir, viewer.extensions.codeFolders());
+      accessSync(dir, constants.W_OK);
+      return dir;
+    } catch {
+      // A hidden, code or read-only folder
+    }
+  }
   return homedir();
 }
 

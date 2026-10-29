@@ -47,6 +47,9 @@ The viewer itself works like Wireshark:
 - **TLS decryption** with a key log file (`SSLKEYLOGFILE`), and **Export Specified Packets**
   (displayed, marked, selected or a range) to a new pcapng/pcap; in pcapng the marks and their
   notes go along as packet comments, which Wireshark shows.
+- **Export Objects** as in Wireshark's File menu: list the files carried in HTTP, email (IMF),
+  SMB, TFTP, DICOM and FTP traffic, go to their packets, and save them, each save into a new
+  folder; the agent hears where, so you can ask it about them.
 - **Packet comments** as in Wireshark's Edit › Packet Comments: add, edit and delete them, for
   you and the agent alike; the packet list marks commented packets, and pcapng exports (Save As)
   write the comments as edited.
@@ -384,13 +387,15 @@ the questions you asked it.
   change the filter, marks, time references, packet comments, selection and columns, open Wireshark, and write new
   `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced unless the
   agent exported it itself in the same session.
-- `export_objects` saves files from the traffic, whose names and contents a sender chose, only
-  into a new folder it creates (`http-objects`, `http-objects-2`, …) in a directory the agent
-  names, under names of its own (`f12-report.pdf`). No other user may be able to change that
-  folder or any folder above it: `/tmp` works, and so do your own folders unless one of them is
-  writable by others; network and FUSE filesystems are refused. It is never a hidden folder
-  such as `~/.config`, nor one Wireshark or WireBuddy loads code or configuration from. It
-  never replaces or follows an existing file.
+- File › Export Objects and `export_objects` save files from the traffic, whose names and
+  contents a sender chose, only into a new folder they create (`http-objects`, `http-objects-2`,
+  …) in a directory you or the agent name, under names of their own (`f12-report.pdf`). No other
+  user may be able to change that folder or any folder above it: `/tmp` works, and so do your
+  own folders unless one of them is writable by others; network and FUSE filesystems are
+  refused. It is never a hidden folder such as `~/.config`, nor one Wireshark or WireBuddy loads
+  code or configuration from. It never replaces or follows an existing file. The dialog shows
+  names, hosts and types from the capture as plain text, and the agent hears only the folder a
+  save went to.
 - Text from a capture can't pose as WireBuddy's own messages to the agent: every event is one
   line, the real events block carries a random tag the agent learns at startup, and followed
   stream payload lines start with `| `.

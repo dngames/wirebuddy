@@ -8,6 +8,7 @@ import { commands, item, type CommandId } from "./commands.ts";
 import { fieldCopyItems, fieldFilterItems } from "./details.ts";
 import { commentItems } from "./dialogs/comment.ts";
 import { followItems } from "./dialogs/follow.ts";
+import { objectItems } from "./dialogs/objects.ts";
 import { conversationFilters } from "./frame.ts";
 import { closeMenus, menuOpen, menuOwner, SEP, showMenu, toggleMenuAt, type MenuItem } from "./menu.ts";
 import { packetCopyItems } from "./packetlist.ts";
@@ -95,7 +96,17 @@ const MENUS: TopMenu[] = [
   {
     title: "File",
     key: "F",
-    items: () => [item("open"), { label: "Open Recent", sub: recentItems() }, SEP, item("close"), SEP, item("saveAs"), SEP, item("exportSpecified")],
+    items: () => [
+      item("open"),
+      { label: "Open Recent", sub: recentItems() },
+      SEP,
+      item("close"),
+      SEP,
+      item("saveAs"),
+      SEP,
+      item("exportSpecified"),
+      { label: "Export Objects", sub: objectItems(), disabled: !commands.exportSpecified.enabled() },
+    ],
   },
   {
     title: "Edit",

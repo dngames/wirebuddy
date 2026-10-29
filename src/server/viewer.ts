@@ -2336,19 +2336,34 @@ export class Viewer extends EventEmitter {
     }));
   }
 
-  /** Saves the objects of `kind` (those in `frames`, else all) into a new folder in `dir`, made once there is one to save. */
+  /**
+   * Saves the objects of `kind` into a new folder in `dir`, made once there is
+   * one to save: those `pick.keys` ("frame:sha1") name, else those in
+   * `pick.frames`, else all.
+   */
   async saveObjects(
     kind: ObjectKind,
-    frames: number[] | undefined,
+    pick: { frames?: number[]; keys?: string[] },
     dir: string,
+    by: "user" | "agent",
   ): Promise<{ folder: string | null; saved: (CapturedObject & { name: string })[]; skipped: { object: CapturedObject; reason: string }[] }> {
     const codeFolders = this.extensions.codeFolders();
     const real = objectDir(dir, codeFolders);
     // Download tokens belong to the sharkd that listed the objects
     const engine = this.engine;
     const all = await this.capturedObjects(kind, engine);
-    const want = frames && new Set(frames);
-    const chosen = want ? all.filter((o) => want.has(o.frame)) : all;
+    const key = (o: CapturedObject): string => `${o.frame}:${o.sha1}`;
+    let chosen: CapturedObject[];
+    if (pick.keys) {
+      const listed = new Set(all.map(key));
+      // A key that names nothing came from another capture or dissection
+      if (pick.keys.some((k) => !listed.has(k))) throw new StaleGenerationError("the capture changed; list the objects again");
+      const want = new Set(pick.keys);
+      chosen = all.filter((o) => want.has(key(o)));
+    } else {
+      const want = pick.frames && new Set(pick.frames);
+      chosen = want ? all.filter((o) => want.has(o.frame)) : all;
+    }
     if (!all.length) throw new Error(`the capture has no ${kind} objects`);
     if (!chosen.length) throw new Error(`none of the ${kind} objects is in the given frames`);
     let folder: string | null = null;
@@ -2357,6 +2372,11 @@ export class Viewer extends EventEmitter {
     let total = 0;
     try {
       for (const o of chosen) {
+        // Without one, a token a reload moved would save another object unnoticed
+        if (!o.sha1) {
+          skipped.push({ object: o, reason: "sharkd gave no checksum to check it by" });
+          continue;
+        }
         if (o.size > MAX_OBJECT_SAVE) {
           skipped.push({ object: o, reason: `larger than ${MAX_OBJECT_SAVE / 2 ** 20} MiB` });
           continue;
@@ -2368,7 +2388,7 @@ export class Viewer extends EventEmitter {
         const r = await engine.call<{ data?: string }>("download", { token: o.token });
         const data = Buffer.from(r.data ?? "", "base64");
         // Tokens are positions in sharkd's list: a reload may have moved them
-        if (r.data === undefined || (o.sha1 && createHash("sha1").update(data).digest("hex") !== o.sha1)) {
+        if (r.data === undefined || createHash("sha1").update(data).digest("hex") !== o.sha1) {
           throw new Error("the capture changed while saving; list the objects again");
         }
         total += data.length;
@@ -2381,7 +2401,7 @@ export class Viewer extends EventEmitter {
       const done = saved.length ? ` (${saved.length} saved to ${folder}: ${names})` : "";
       throw new Error(`${(err as Error).message}${done}`);
     }
-    if (saved.length) this.notice(`Saved ${saved.length} ${kind.toUpperCase()} object${saved.length === 1 ? "" : "s"} to ${folder}`);
+    if (saved.length && by === "agent") this.notice(`Saved ${saved.length} ${kind.toUpperCase()} object${saved.length === 1 ? "" : "s"} to ${folder}`);
     return { folder, saved, skipped };
   }
 
