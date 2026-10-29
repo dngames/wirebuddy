@@ -112,7 +112,11 @@ function init(): void {
   });
 
   // Bugs in the page reach the agent too
-  window.addEventListener("error", (e) => reportProblem(`Page error: ${e.message}`, { at: `${e.filename}:${e.lineno}:${e.colno}` }));
+  window.addEventListener("error", (e) => {
+    // Chrome's note that a resize waits for the next frame, not a bug
+    if (/^ResizeObserver loop/.test(e.message)) return;
+    reportProblem(`Page error: ${e.message}`, { at: `${e.filename}:${e.lineno}:${e.colno}` });
+  });
   window.addEventListener("unhandledrejection", (e) => reportProblem(`Page error: ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
 
   document.addEventListener("keydown", onGlobalKey);

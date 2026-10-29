@@ -380,6 +380,15 @@ try {
   };
   const detailsRow = (text) => `[...document.querySelectorAll('.dt-row')].find((r) => r.querySelector('.dt-label')?.textContent === ${JSON.stringify(text)})`;
 
+  await check("browser: page errors reach the agent, Chrome's ResizeObserver loop note doesn't", async () => {
+    for (const message of ["ResizeObserver loop completed with undelivered notifications.", "a test bug"]) await evaluate(`window.dispatchEvent(new ErrorEvent("error", { message: ${JSON.stringify(message)} }))`);
+    let seen = "";
+    await until("the page error", async () => /Page error: a test bug/.test((seen += await viewState())));
+    await sleep(300);
+    seen += await viewState();
+    assert.doesNotMatch(seen, /ResizeObserver/);
+  });
+
   await check("browser: packet comments from the keyboard, the Edit menu, the packet list and the details; the row shows them", async () => {
     await click(...center(await box(row(6))));
     await until("frame 6 selected", async () => (await state()).selected === 6);
