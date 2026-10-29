@@ -128,21 +128,27 @@ async function openBrowser(url, name) {
       await mouse("mouseReleased", x, y, { button: "left", clickCount: 1 });
     },
     wheel: (x, y, deltaY) => mouse("mouseWheel", x, y, { deltaX: 0, deltaY }),
-    /** Go to Packet (Ctrl+G) `n`; the newest toast after it. */
+    /** Go to Packet (Ctrl+G) `n`; its toast, or what the page shows instead. */
     async goTo(n) {
       await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
-      // A busy page may open the dialog late: asked again
-      for (let tries = 0; !(await evaluate("!!document.querySelector('.goto-in')")); tries++) {
-        if (tries === 3) throw new Error("Go to Packet did not open");
-        await key("g", "KeyG", 71, 2);
-        for (let k = 0; k < 40 && !(await evaluate("!!document.querySelector('.goto-in')")); k++) await sleep(50);
-      }
-      await evaluate(`document.querySelector('.goto-in').value = '${n}'`);
-      await key("Enter", "Enter", 13);
-      let text = null;
+      const open = () => evaluate("!!document.querySelector('.goto-in')");
       // Its own toast, not another notice that came meanwhile
-      for (const end = Date.now() + 10_000; !text && Date.now() < end; await sleep(100)) text = await evaluate("[...document.querySelectorAll('.toast .toast-text')].map((t) => t.textContent).find((t) => t.startsWith('Packet ')) ?? null");
-      return text;
+      const own = "[...document.querySelectorAll('.toast .toast-text')].map((t) => t.textContent).find((t) => t.startsWith('Packet ')) ?? null";
+      // A busy page may miss the shortcut, or not know packet n yet (its refusal goes to the agent): asked again
+      for (let tries = 0; tries < 10; tries++) {
+        if (!(await open())) {
+          await key("g", "KeyG", 71, 2);
+          for (let k = 0; k < 40 && !(await open()); k++) await sleep(50);
+          if (!(await open())) continue;
+        }
+        await evaluate(`(() => { const i = document.querySelector('.goto-in'); i.value = '${n}'; i.focus(); })()`);
+        await key("Enter", "Enter", 13);
+        for (let k = 0; k < 30; k++, await sleep(100)) {
+          const text = await evaluate(own);
+          if (text) return text;
+        }
+      }
+      return `no toast; the dialog: ${await evaluate("document.querySelector('.dlg-goto')?.textContent ?? 'closed'")}`;
     },
     close: () => (ws.close(), chrome.kill()),
   };
