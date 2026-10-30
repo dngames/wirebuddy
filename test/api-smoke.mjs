@@ -1182,6 +1182,8 @@ try {
       const typo = await decodeAs({ action: "set", table: "tcp.port", value: 18830, protocol: "mtqq" });
       assert.equal(typo.status, 400);
       assert.match(typo.json.error, /^"mtqq" is not a protocol Wireshark knows; close matches: mqtt \(MQ Telemetry Transport Protocol\), .*mq \(WebSphere MQ\)/);
+      // A wrong first letter too
+      assert.match((await decodeAs({ action: "set", table: "tcp.port", value: 18830, protocol: "nqtt" })).json.error, /close matches: mqtt \(MQ Telemetry Transport Protocol\)/);
       // Replacing rtp undoes it: the capture is read again with it
       const ssdp = await decodeAs({ ...rtp, protocol: "ssdp" });
       assert.equal(ssdp.status, 400);

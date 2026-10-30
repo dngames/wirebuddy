@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 - Releases are published to npm from GitHub Actions, with provenance
+- Decode As suggests close matches for a protocol name misspelt in its first letter too
 
 ## [0.14.0] - 2026-10-30
 

@@ -2249,7 +2249,9 @@ export class Viewer extends EventEmitter {
         // Protocols (ftype 1) whose names start with `field`
         const protocols = async (field: string) => ((await this.engine.call<{ field?: { f: string; n?: string; t?: number }[] }>("complete", { field })).field ?? []).filter((x) => x.t === 1);
         if (!(await protocols(name)).some((x) => x.f === name)) {
-          const close = closeMatches(name, (await protocols(name[0])).filter((x) => !x.f.includes(".")));
+          // By every first character, so a typo there finds them too
+          const all = (await Promise.all([..."abcdefghijklmnopqrstuvwxyz0123456789"].map(protocols))).flat();
+          const close = closeMatches(name, all.filter((x) => !x.f.includes(".")));
           const hint = close.length ? `close matches: ${close.map((x) => `${x.f}${x.n ? ` (${printable(x.n)})` : ""}`).join(", ")}` : "protocol names are the display-filter names, as in the filter bar";
           throw new ReportedError(`"${name}" is not a protocol Wireshark knows; ${hint}`);
         }
