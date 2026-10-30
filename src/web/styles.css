@@ -378,6 +378,21 @@ input[type="checkbox"] {
   animation: pulse 1.4s ease-in-out infinite;
 }
 
+/* Now: held, then until its packets are found */
+.tb-icon.hold {
+  touch-action: none;
+}
+
+.tb-icon.holding {
+  background: var(--btn-pressed);
+  box-shadow: inset 0 0 0 2px var(--danger);
+}
+
+.tb-icon.holding .icon,
+.tb-icon.sending .icon {
+  animation: pulse 0.7s ease-in-out infinite;
+}
+
 .tb-icon .icon {
   width: 24px;
   height: 24px;
@@ -2364,7 +2379,9 @@ input[type="checkbox"] {
   .pl-row.flash,
   .toast,
   .sb-cap.running::before,
-  .tb-icon.live .icon {
+  .tb-icon.live .icon,
+  .tb-icon.holding .icon,
+  .tb-icon.sending .icon {
     animation: none;
   }
 }

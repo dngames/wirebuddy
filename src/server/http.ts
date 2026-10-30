@@ -147,6 +147,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       const view = viewKey(b.view);
       return viewer.askAgent(String(b.question ?? ""), view && { frame: b.frame ?? null, rows: rowRanges(b.rows), view });
     },
+    "/api/now": (_q, b) => viewer.markNow(Number(b.heldMs) || 0, b.at === undefined ? undefined : Number(b.at)),
   };
 
   let port = opts.port;
@@ -214,7 +215,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       const status = err instanceof HttpError ? err.status : 400;
       const path = parseUrl(req.url)?.pathname ?? "";
       // The agent hears about what failed for the user (the events routes are its own, a refused question isn't news)
-      if (status !== 401 && status !== 403 && !path.startsWith("/api/events") && path !== "/api/agent/ask" && !(err instanceof ReportedError)) {
+      if (status !== 401 && status !== 403 && !path.startsWith("/api/events") && path !== "/api/agent/ask" && path !== "/api/now" && !(err instanceof ReportedError)) {
         viewer.events.add("ERROR", `${ACTIONS[path] ?? `${req.method} ${path}`} failed: ${(err as Error).message}`);
       }
       send(res, status, { error: (err as Error).message });
@@ -339,6 +340,7 @@ const ACTIONS: Record<string, string> = {
   "/api/objects": "Listing export objects",
   "/api/objects/save": "Saving export objects",
   "/api/agent/ask": "Asking the agent",
+  "/api/now": "Marking Now",
   "/api/follow": "Following the stream",
   "/api/find": "Finding a packet",
   "/api/wireshark": "Opening Wireshark",

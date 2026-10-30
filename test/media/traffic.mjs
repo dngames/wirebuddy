@@ -348,7 +348,7 @@ export function header() {
 
 /** Packet `n` (0-based) at `pps` packets a second from `start` (epoch seconds). */
 export function packet(n, frame, { pps = 10000, start = 1700000000 } = {}) {
-  return epb(0, BigInt(start) * 1_000_000n + BigInt(Math.round((n * 1e6) / pps)), frame);
+  return epb(0, BigInt(Math.round(start * 1e6)) + BigInt(Math.round((n * 1e6) / pps)), frame);
 }
 
 /** Writes the first `count` packets of the traffic to `path` as pcapng, and with `keylog` its TLS 1.2 keys. */

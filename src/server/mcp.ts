@@ -34,6 +34,7 @@ You and the user look at the same view: the open capture, display filter, select
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
 - set_display_filter, goto_frame, mark_frames, time_references, packet_comments, set_columns and decode_as change what the user sees; the user gets a notice for each.
 - start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
+- During a live capture the user can press Now (a toolbar button, or N) when they notice something, without words: a tap asks what happened just before, holding it flags the span until they let go. It comes as a QUESTION event naming the packets, with a display filter for the time to look at in its details; the packets also get packet comments "WireBuddy Now…". Look at once, then show the answer in the user's view (goto_frame the packet that explains it, mark_frames what matters with a note) and tell them in the chat; the user saw something you can't, so ask them when what you find doesn't fit.
 - Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say which frames those are and how many newer packets the user's list shows provisionally.
 - When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly: if it is a protocol Wireshark knows on an unexpected port, decode_as fixes the view in one call (like Wireshark's Decode As); otherwise teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
 - To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
@@ -330,7 +331,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   // What happened in the viewer since the agent last looked
   const events = (): string => {
     const lines = eventLines(viewer.events.take());
-    return lines.length ? `\n\n[WireBuddy events ${tag} since your last call (problems the user ran into, what they did, questions they ask you):\n${lines.join("\n")}]` : "";
+    return lines.length ? `\n\n[WireBuddy events ${tag} since your last call (problems the user ran into, what they did, questions they ask you, Now when they notice something):\n${lines.join("\n")}]` : "";
   };
   // Results come from the packets read in full; the user's list may show newer ones
   const liveNote = (live: Live): string => {

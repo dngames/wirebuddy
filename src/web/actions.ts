@@ -3,10 +3,10 @@
 import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
-import { app, bus, hooks, knownFrames } from "./app.ts";
+import { app, bus, captureActive, hooks, knownFrames } from "./app.ts";
 import { confirmDialog } from "./dialog.ts";
 import { toast, toastError } from "./toast.ts";
-import { fmtInt, save } from "./util.ts";
+import { fmtInt, load, save } from "./util.ts";
 
 // ---------------------------------------------------------------- state sync
 
@@ -60,6 +60,8 @@ export function applyState(s: ViewState): void {
   const prevIdx = app.selIndex;
   const prevRows = app.selRows;
   app.state = s;
+  // Auto-scroll the agent turned off comes back with the next capture or another file, not at the stop: its packet stays in view
+  if (pausedByAgent && prev && (s.file !== prev.file || (captureActive(s) && !captureActive(prev)))) setAutoScroll(load<boolean>("autoscroll", true));
   app.marks = new Map(s.marks.map((m) => [m.frame, m]));
 
   let reveal: { index: number; flash: boolean } | null = null;
@@ -78,6 +80,8 @@ export function applyState(s: ViewState): void {
     app.selRows = s.selectedRows;
     selRefused = false;
     if (s.selectedIndex >= 0) reveal = { index: s.selectedIndex, flash: true };
+    // What the agent shows stays in view, as when the user scrolls up during a capture
+    if (s.selectedIndex >= 0 && app.autoScroll && s.capture.status === "running") setAutoScroll(false, true);
   } else if (pendingReveal !== null && s.selected === pendingReveal) {
     app.selFrame = s.selected;
     app.selIndex = s.selectedIndex;
@@ -628,9 +632,14 @@ export function setZoom(zoom: number): void {
   bus.emit("view");
 }
 
-export function setAutoScroll(on: boolean): void {
+/** Whether the agent turned auto-scroll off for the capture under way, not the user. */
+let pausedByAgent = false;
+
+/** `byAgent`: for the capture under way only, not kept as the user's choice. */
+export function setAutoScroll(on: boolean, byAgent = false): void {
+  pausedByAgent = byAgent && !on;
   if (app.autoScroll === on) return;
   app.autoScroll = on;
-  save("autoscroll", on);
+  if (!byAgent) save("autoscroll", on);
   bus.emit("autoscroll", on);
 }

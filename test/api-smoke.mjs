@@ -262,6 +262,12 @@ try {
     assert.ok(after.loadError);
   });
 
+  await check("Now needs a running capture the view follows", async () => {
+    const r = await api("/api/now", { heldMs: 0 });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.error, "Now works while the view follows a running capture");
+  });
+
   await check("custom columns", async () => {
     await api("/api/filter", { filter: "" });
     const r = await api("/api/columns", { columns: [{ field: "http.response.code", title: "" }] });

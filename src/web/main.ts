@@ -14,6 +14,7 @@ import { createFindBar } from "./findbar.ts";
 import { nodeAtOffset, srcIndex } from "./frame.ts";
 import { menuOpen } from "./menu.ts";
 import { createMenuBar, menuBarKey } from "./menubar.ts";
+import { releaseNow } from "./now.ts";
 import { createPacketList, focusPacketList } from "./packetlist.ts";
 import { initPanels } from "./panels.ts";
 import { createPanes } from "./panes.ts";
@@ -120,6 +121,12 @@ function init(): void {
   window.addEventListener("unhandledrejection", (e) => reportProblem(`Page error: ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
 
   document.addEventListener("keydown", onGlobalKey);
+  document.addEventListener("keyup", (e) => releaseNow(e.code));
+  // A key or pointer let go elsewhere still ends a Now
+  window.addEventListener("blur", () => releaseNow());
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) releaseNow();
+  });
   window.setInterval(() => bus.emit("tick"), 1000);
 
   if (!token) toast("error", `No session token in the page URL. Open ${APP_NAME} with the link the server printed.`);
