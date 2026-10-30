@@ -1245,8 +1245,9 @@ try {
       const r = await other.api("/api/wireshark", {});
       assert.equal(r.status, 200, JSON.stringify(r.json));
       assert.equal(r.json.note, "WireBuddy's Decode As entries don't go along (udp.port 50000 → rtp, udp.port 123 → dns); use Analyze › Decode As in Wireshark");
-      const passed = readFileSync(join(bin, "args"), "utf8") + readFileSync(join(bin, "env"), "utf8");
-      assert.doesNotMatch(passed, /^-d$|decode.as|udp\.port/im);
+      assert.doesNotMatch(readFileSync(join(bin, "args"), "utf8"), /^-d$|udp\.port/m);
+      // Variable names and entries only: a CI runner's values may name the branch
+      assert.doesNotMatch(readFileSync(join(bin, "env"), "utf8"), /^[^=]*decode_?as|udp\.port 50000/im);
     } finally {
       other.close();
       rmSync(bin, { recursive: true, force: true });
