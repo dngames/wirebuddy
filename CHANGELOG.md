@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Now: in a live capture, tap the flag (or N) to have the agent look at what just happened, or hold it to flag a span, marked with packet comments
+- A packet the agent shows during a live capture stays in view: auto-scroll pauses until the next capture
+
 ## [0.14.1] - 2026-10-30
 
 - Releases are published to npm from GitHub Actions, with provenance

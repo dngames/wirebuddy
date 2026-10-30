@@ -343,6 +343,16 @@ export class LiveTail {
     return Math.max(0, this.count - this.base);
   }
 
+  /** Capture time of an indexed frame in epoch seconds (NaN unknown); Superseded once closed. */
+  async timeOf(frame: number): Promise<number> {
+    if (this.closed) throw new Superseded();
+    let time = NaN;
+    await this.store.readFrames([frame], (_frame, t) => (time = t));
+    // A closed store reads nothing
+    if (this.closed) throw new Superseded();
+    return time;
+  }
+
   /** Why the tail can't go on, or null. */
   broken(): string | null {
     return this.store.sliceable();

@@ -270,12 +270,20 @@ choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packet
 goes to Claude with the packet numbers and wakes it if its watch is running (the dialog says
 whether it is); otherwise it comes with Claude's next step. Claude answers in the chat.
 
+When you notice something during a live capture (the app froze, a reply was slow, a light
+flickered), press **Now**: the flag in the toolbar, or N in the packet list. A tap asks what just
+happened; holding it flags everything until you let go. Claude gets the packets of that moment
+or span with no typing (at once if its watch is running), looks at them and shows what it found
+in your view. The flagged packet, or the span's first and last, also get packet comments
+("WireBuddy Now…"), which an export to pcapng keeps. Now works in captures that stay in one file.
+
 Example prompts:
 
 - "Open ~/captures/slow-login.pcapng and tell me why the login is slow."
 - "Explain the packet I have selected."
 - "Mark all DNS failures and filter to them."
 - "Capture on eth0 for a minute and tell me when you see TCP retransmissions."
+- "Capture on eth0 while I reproduce the freeze; I'll press Now when it happens."
 - "Save the files that were downloaded over HTTP and check them against these hashes."
 
 ### Example: a robot arm that stutters

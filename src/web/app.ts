@@ -23,6 +23,8 @@ export type AppEvents = {
   view: [];
   /** One-second heartbeat while a capture is running. */
   tick: [];
+  /** A Now was pressed, released or answered. */
+  now: [];
 };
 
 export const bus = new Emitter<AppEvents>();

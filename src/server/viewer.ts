@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { closeSync, createReadStream, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import type { Transform } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import { createGunzip, createZstdDecompress } from "node:zlib";
 import { COLUMN_FIELD, matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
@@ -21,6 +22,7 @@ import { entryText } from "../shared/decodeas.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   AskResult,
+  NowResult,
   ConvRow,
   CaptureState,
   CustomColumn,
@@ -147,6 +149,16 @@ const ITEM_LABEL_LENGTH = 240;
 const MAX_QUESTION = 2000;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
+/** Longest span a held Now flags. */
+const MAX_NOW_MS = 10 * 60 * 1000;
+/** After a Now, how long the live file may take to get a packet from after it (dumpcap writes within about half a second). */
+const NOW_FILE_MS = 2000;
+/** And the view to know the packets it flagged. */
+const NOW_VIEW_MS = 5000;
+/** How far back a tapped Now has the agent look. */
+const NOW_BACK_S = 10;
+/** A release time from the page further back than this is another machine's clock (requests may wait in the browser). */
+const NOW_CLOCK_MS = 5000;
 const MAX_CUSTOM_COLUMNS = 10;
 /** Longer custom column values (e.g. whole payloads) are cut to this. */
 const MAX_COLUMN_VALUE = 500;
@@ -294,6 +306,8 @@ export class Viewer extends EventEmitter {
   private commenting: Promise<unknown> = Promise.resolve();
   /** Changes when the edited comments go with their file: edits read before go too. */
   private commentsFile = 0;
+  /** When the last capture ended (0: none did). */
+  private captureStoppedAt = 0;
   /** sharkd's etts of comment nodes, for the ones made here; others until it showed some. */
   private readonly commentEtts = { node: -1, item: -2 };
   /** Frames of the file with comments, as the full read `loads` found them. */
@@ -418,6 +432,7 @@ export class Viewer extends EventEmitter {
       this.tailTimer ??= setInterval(() => void this.tailTick(), LIVE_RELOAD_MS);
     });
     this.capture.on("stopped", () => {
+      this.captureStoppedAt = Date.now();
       if (this.reloadTimer) clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
       if (!this.followingCapture()) return;
@@ -1839,7 +1854,7 @@ export class Viewer extends EventEmitter {
    * edit after the other, as long as the capture open now stays open;
    * returns the frames whose comments changed.
    */
-  private editComments(frames: Ranges, change: (now: string[]) => string[]): Promise<number[]> {
+  private editComments(frames: Ranges, change: (now: string[], frame: number) => string[]): Promise<number[]> {
     if (countRanges(frames) > MAX_COMMENTED) throw new Error(`comments of at most ${MAX_COMMENTED} packets can be changed at once`);
     const file = this.commentsFile;
     return this.commentQueue(file, async () => {
@@ -1850,7 +1865,7 @@ export class Viewer extends EventEmitter {
       const lists = new Map<number, EditedComments>();
       for (const f of valid) {
         const was = now.get(f) ?? { list: [], own: 0 };
-        const list = change(was.list);
+        const list = change(was.list, f);
         if (list.length === was.list.length && list.every((c, i) => c === was.list[i])) continue;
         // While the file's own comments lead, exports keep them and add the rest
         const own = was.own >= 0 && was.list.slice(0, was.own).every((c, i) => c === list[i]) ? was.own : -1;
@@ -2023,6 +2038,138 @@ export class Viewer extends EventEmitter {
     const woken = this.events.watched();
     this.events.add("QUESTION", `The user asks you${subject}: ${text}`, count > 1 ? { frames: listed } : undefined);
     return { woken };
+  }
+
+  /**
+   * The user's Now in the live capture, sent on release (`at`, the page's
+   * clock): a tap (`heldMs` 0) flags the moment, a hold the span before it.
+   * Once the live file has a packet from after it (or NOW_FILE_MS passed)
+   * the packets are found by capture time, which comes from the same clock;
+   * once the view knows them (or NOW_VIEW_MS passed) they get packet
+   * comments, and an agent a QUESTION event. Not in a capture that goes on
+   * in new files, which drops edited comments; a hold may end after the
+   * capture did.
+   */
+  async markNow(heldMs: number, at?: number): Promise<NowResult> {
+    const now = Date.now();
+    // Unless the page's clock is another machine's
+    const endMs = at !== undefined && Number.isFinite(at) && at <= now && now - at < NOW_CLOCK_MS ? at : now;
+    const held = Math.min(Math.max(0, heldMs), MAX_NOW_MS) / 1000;
+    const pressedInCapture = this.capture.running || (this.captureStoppedAt > 0 && endMs - held * 1000 <= this.captureStoppedAt && now - this.captureStoppedAt < NOW_CLOCK_MS);
+    if (!this.followingCapture() || !pressedInCapture) throw new Error("Now works while the view follows a running capture");
+    if (this.capture.state.ring) throw new Error("Now works in a capture that stays in one file");
+    const end = endMs / 1000;
+    const file = this.commentsFile;
+    const path = this.state.file!;
+    let times: LiveTimes | null = null;
+    let frames: number[] = [];
+    let spanned = 0;
+    // Again when the live tail closed meanwhile (the final read landed): then from the packets read in full
+    for (let tries = 0; tries < 3; tries++) {
+      times = await this.liveTimes(end, file);
+      if (!times?.complete) break;
+      try {
+        const last = await framesBefore(times, end, true);
+        const first = held ? (await framesBefore(times, end - held, false)) + 1 : last;
+        spanned = Math.max(0, last - first + 1);
+        frames = !last ? [] : !held || first > last ? [last] : first === last ? [first] : [first, last];
+        break;
+      } catch (err) {
+        if (!(err instanceof Superseded)) throw err;
+      }
+    }
+    const secs = `${held.toFixed(1)} s`;
+    const texts = new Map<number, string>();
+    if (!held) frames.forEach((f) => texts.set(f, "WireBuddy Now"));
+    else if (!spanned) frames.forEach((f) => texts.set(f, `WireBuddy Now: held ${secs} after this packet, none came meanwhile`));
+    else if (frames.length === 1) texts.set(frames[0], `WireBuddy Now: held ${secs}, the only packet then`);
+    else frames.forEach((f, i) => texts.set(f, i ? "WireBuddy Now: held until here" : `WireBuddy Now: held ${secs} from here`));
+    let commented: number[] = [];
+    if (frames.length) {
+      await this.whenState(() => this.known() >= frames[frames.length - 1] || this.commentsFile !== file, NOW_VIEW_MS);
+      if (this.commentsFile === file) commented = await this.editComments(toRanges(frames), (now, f) => [...now, texts.get(f)!]).catch(() => []);
+    }
+    // The user opened another file meanwhile: these numbers aren't its packets
+    const left = !times || this.commentsFile !== file;
+    if (left) frames = [];
+    const about = left
+      ? `the view left ${basename(path)}`
+      : !times!.complete
+        ? "its packets aren't read yet"
+        : !frames.length
+          ? "no packet yet"
+          : frames.length > 1
+            ? `packets ${frames[0]}–${frames[1]}`
+            : `packet ${frames[0]}`;
+    const agent = this.state.agent.attached;
+    const woken = agent && this.events.watched();
+    if (agent) {
+      const remark = !commented.length
+        ? ""
+        : commented.length > 1
+          ? ", the first and last with packet comments"
+          : `, ${frames.length > 1 ? `frame ${commented[0]} ` : ""}with the packet comment "${texts.get(commented[0])}"`;
+      const where = left
+        ? `The view left ${basename(path)} meanwhile; the filter in the details finds the moment in it.`
+        : !times!.complete
+          ? "The view hadn't read the packets of that moment yet; the filter in the details finds them once it has."
+          : !frames.length
+            ? "No packet was captured before it."
+            : !held
+              ? `Frame ${frames[0]} is the newest packet then${remark}.`
+              : !spanned
+                ? `No packet came meanwhile; frame ${frames[0]} is the last one before${remark}.`
+                : `${spanned === 1 ? `Frame ${frames[0]} came` : `Frames ${frames[0]} to ${frames[1]} came`} meanwhile${remark}.`;
+      const from = held ? end - held : end - NOW_BACK_S;
+      this.events.add("QUESTION", `The user ${held ? `held Now for ${secs}` : "pressed Now"} in the live capture, without words: what happened ${held ? "then" : "just before"}? ${where}`, {
+        filter: `frame.time_epoch >= ${(Math.floor(from * 1000) / 1000).toFixed(3)} && frame.time_epoch <= ${(Math.ceil(end * 1000) / 1000).toFixed(3)}`,
+      });
+    }
+    return { frames, about, commented: commented.length, held: held > 0, agent, woken };
+  }
+
+  /**
+   * Capture times of the live file's packets once it has one from after `t`
+   * (or NOW_FILE_MS passed, or the capture's final read landed); null once
+   * another file is open than the one whose comments were `file`.
+   */
+  private async liveTimes(t: number, file: number): Promise<LiveTimes | null> {
+    const deadline = Date.now() + NOW_FILE_MS;
+    for (;;) {
+      // Taken first: the packets read in full are all there then
+      const ended = !this.capture.running && !this.finalRead;
+      if (this.commentsFile !== file) return null;
+      const tail = this.tail?.file === this.state.file ? this.tail : null;
+      if (tail) await tail.update();
+      // Not sliceable: only the packets read in full
+      const engine = this.engine;
+      const times = tail
+        ? { count: tail.count, timeOf: (f: number) => tail.timeOf(f) }
+        : {
+            count: this.state.totalFrames,
+            timeOf: async (f: number) => Number((await engine.call<PacketRow[]>("frames", { ...page(f - 1, 1), column0: "frame.time_epoch:0" }))[0]?.c[0] ?? NaN),
+          };
+      const after = times.count > 0 && (await times.timeOf(times.count).catch(() => NaN)) > t;
+      if (after || ended || Date.now() >= deadline) return this.commentsFile === file ? { ...times, complete: after || ended || !!tail } : null;
+      await sleep(100);
+    }
+  }
+
+  /** Resolves once `ok()` holds after a change of state, or after `ms`. */
+  private whenState(ok: () => boolean, ms: number): Promise<void> {
+    if (ok()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const check = (): void => {
+        if (ok()) done();
+      };
+      const done = (): void => {
+        clearTimeout(timer);
+        this.off("state", check);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.on("state", check);
+    });
   }
 
   /**
@@ -3007,6 +3154,22 @@ function denseItems(items: (number | string)[], buckets: number): number[] {
     }
   }
   return values;
+}
+
+/** Frame count and capture times of a capture's packets; `complete`: every packet up to the time asked for is there. */
+type LiveTimes = { count: number; timeOf: (frame: number) => Promise<number>; complete: boolean };
+
+/** How many of the frames lie before `t` (at it too with `orAt`): a live file's times ascend, unknown ones count as before. */
+async function framesBefore({ count, timeOf }: LiveTimes, t: number, orAt: boolean): Promise<number> {
+  let lo = 0;
+  let hi = count;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const time = await timeOf(mid);
+    if (orAt ? !(time > t) : !(time >= t)) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
 }
 
 /** sharkd rejects skip: 0, so leave it out. */

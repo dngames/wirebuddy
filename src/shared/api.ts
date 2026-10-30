@@ -91,6 +91,7 @@
  * | POST   | /api/events                   | { level, text, details? } (from the page) | { ok: true }      |
  * | POST   | /api/events/take              |                                      | { events }             |
  * | POST   | /api/agent/ask                | { question, frame?, rows?, view? } (409 if view is stale) | AskResult |
+ * | POST   | /api/now                      | { heldMs (0: a tap), at } on release | NowResult              |
  * | GET    | /api/capture/interfaces       |                                      | CaptureInterface[]     |
  * | GET    | /api/capture/check            | ?iface=&filter=                      | FilterCheck            |
  * | GET    | /api/capture/activity         |                                      | InterfaceActivity      |
@@ -643,7 +644,7 @@ export interface ViewerEvent {
   seq: number;
   /** ISO time. */
   time: string;
-  /** INFO: what the user did; WARNING and ERROR: problems; QUESTION: the user asks the agent. */
+  /** INFO: what the user did; WARNING and ERROR: problems; QUESTION: the user asks the agent, in words or with Now. */
   level: "INFO" | "WARNING" | "ERROR" | "QUESTION";
   text: string;
   details?: Record<string, unknown>;
@@ -663,6 +664,22 @@ export interface FindResult {
 
 /** A question for the agent: `woken` when its `--watch` was waiting, else it sees the question with its next tool call. */
 export interface AskResult {
+  woken: boolean;
+}
+
+/**
+ * The user's Now in a live capture: `frames` the packet it flagged (a tap),
+ * or the first and last one of the span (a hold; one when they are the same,
+ * the last one before it when none came meanwhile), [] when there is none
+ * in the view; `about` says which in words; `commented` how many have a
+ * packet comment now. `agent`: an agent got it, `woken` at once.
+ */
+export interface NowResult {
+  frames: number[];
+  about: string;
+  commented: number;
+  held: boolean;
+  agent: boolean;
   woken: boolean;
 }
 

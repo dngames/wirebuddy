@@ -3,7 +3,8 @@
 // panel's canvas, and offers show as status-bar chips. Then the packet menu: asking the agent about
 // a packet, the export dialog writing marks as packet comments, time references set there and in
 // the Edit menu, and Decode As set there (its packet line on reassembled TCP too) and removed in the
-// status bar. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs.
+// status bar. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs, and
+// Now in one: N tapped and the toolbar button held.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -693,6 +694,101 @@ try {
     } finally {
       await call("stop_capture");
       await closeObjects();
+    }
+  });
+
+  await check("browser: Now in a live capture: N tapped and the button held flag packets with comments and wake the agent, also when the capture stops during the hold; not in captures in new files", async () => {
+    const button = `document.querySelector('button[aria-label="Now"]')`;
+    const command = /`"([^"]+)" "([^"]+)" --watch "([^"]+)"`/.exec(client.getInstructions() ?? "");
+    assert.ok(command, "the instructions name the watch command");
+    /** A --watch like the agent's; it exits with the next event. */
+    const watch = async () => {
+      const proc = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "ignore"] });
+      const w = { proc, heard: "", exited: new Promise((resolve) => proc.on("exit", resolve)) };
+      proc.stdout.on("data", (d) => (w.heard += d));
+      await until("the watch", async () => (await state()).agent.watching);
+      // The page gets state at most every 100 ms
+      await sleep(400);
+      return w;
+    };
+    const woke = async (w) => {
+      assert.equal(await Promise.race([w.exited, sleep(15_000).then(() => "timeout")]), 0);
+      return w.heard;
+    };
+    const comments = async () => (await call("get_view_state")).text;
+    let w = null;
+    try {
+      // The capture before has stopped
+      await until("Now off without a running capture", () => evaluate(`${button}.disabled`));
+      await call("start_capture", { interface: "lo", filter: "burst 0 rate 200 realtime" });
+      await until("Now", () => evaluate(`!${button}.disabled`));
+      await until("some packets", async () => (await state()).totalFrames > 100);
+
+      w = await watch();
+      await evaluate("document.querySelector('.pl-scroll').focus()");
+      await cdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "n", code: "KeyN", windowsVirtualKeyCode: 78 });
+      await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "n", code: "KeyN", windowsVirtualKeyCode: 78 });
+      const tap = await woke(w);
+      const [, tapped] = /QUESTION The user pressed Now in the live capture, without words: what happened just before\? Frame (\d+) is the newest packet then, with the packet comment "WireBuddy Now"\./.exec(tap) ?? [];
+      assert.ok(tapped, tap);
+      const [, filter] = /"filter":"(frame\.time_epoch >= \d+\.\d{3} && frame\.time_epoch <= \d+\.\d{3})"/.exec(tap) ?? [];
+      assert.ok(filter, tap);
+      await until("the tap's toast", async () => new RegExp(`Now: packet ${tapped}, sent to Agent`).test(await toasts()));
+      assert.match(await comments(), new RegExp(`^  ${tapped}: "WireBuddy Now"$`, "m"));
+      // The filter finds the packet, once the agent's tools read it
+      await until("the filter to find it", async () => /^1 frames match/.test((await call("query_packets", { filter: `(${filter}) && frame.number == ${tapped}` })).text));
+      // The agent shows it: the list stops following this capture, the setting stays
+      const autoScroll = `document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').getAttribute('aria-pressed') === 'true'`;
+      const saved = "localStorage.getItem(Object.keys(localStorage).find((k) => k.endsWith('autoscroll')) ?? '')";
+      const savedBefore = await evaluate(saved);
+      assert.equal(await evaluate(autoScroll), true);
+      await call("goto_frame", { frame: Number(tapped) });
+      await until("auto-scroll paused", async () => !(await evaluate(autoScroll)));
+      assert.equal(await evaluate(saved), savedBefore);
+
+      // Held about 1.5 s, let go off the button
+      w = await watch();
+      const [x, y] = center(await box(button));
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await until("the button held", () => evaluate(`${button}.classList.contains('holding')`));
+      await sleep(1500);
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: x + 200, y: y + 200, button: "left", buttons: 1 });
+      await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: x + 200, y: y + 200, button: "left", clickCount: 1 });
+      const hold = await woke(w);
+      const [, a, b] = /QUESTION The user held Now for 1\.\d s in the live capture, without words: what happened then\? Frames (\d+) to (\d+) came meanwhile, the first and last with packet comments\./.exec(hold) ?? [];
+      assert.ok(a, hold);
+      // 200 packets a second
+      assert.ok(b - a > 200 && b - a < 400, `${a} to ${b}`);
+      await until("the hold's toast", async () => new RegExp(`Now \\(1\\.\\d s\\): packets ${a}–${b}, sent to Agent`).test(await toasts()));
+      const listed = await comments();
+      assert.match(listed, new RegExp(`^  ${a}: "WireBuddy Now: held 1\\.\\d s from here"$`, "m"));
+      assert.match(listed, new RegExp(`^  ${b}: "WireBuddy Now: held until here"$`, "m"));
+      assert.equal(await evaluate(`${button}.classList.contains('holding') || ${button}.classList.contains('sending')`), false);
+
+      // The capture stops during the hold: the release still counts
+      w = await watch();
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      await until("the button held", () => evaluate(`${button}.classList.contains('holding')`));
+      await sleep(500);
+      await call("stop_capture");
+      await until("the capture stopped", async () => (await state()).capture.status === "idle");
+      await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      assert.match(await woke(w), /QUESTION The user held Now for \d+\.\d s in the live capture, without words: what happened then\? Frames \d+ to \d+ came meanwhile, the first and last with packet comments\./);
+      assert.equal(await evaluate(autoScroll), false, "the stop keeps the agent's packet in view");
+
+      // New files would drop the comments
+      await call("start_capture", { interface: "lo", filter: "burst 0 rate 200 realtime", new_file_after_packets: 1000000 });
+      await until("auto-scroll back with the next capture", () => evaluate(autoScroll));
+      await until("some packets", async () => (await state()).totalFrames > 100);
+      assert.equal(await evaluate(`${button}.disabled`), true);
+      const refused = await fetch(new URL("/api/now", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "Content-Type": "application/json" }, body: JSON.stringify({ heldMs: 0 }) });
+      assert.equal(refused.status, 400);
+      assert.match((await refused.json()).error, /Now works in a capture that stays in one file/);
+    } finally {
+      w?.proc.kill();
+      await call("stop_capture");
     }
   });
 } finally {

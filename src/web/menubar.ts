@@ -140,7 +140,7 @@ const MENUS: TopMenu[] = [
       { label: "Marked Packets", sub: markItems(), disabled: !app.marks.size },
     ],
   },
-  { title: "Capture", key: "C", items: () => items("captureOptions", "startCapture", "stopCapture", "restartCapture", SEP, "refreshInterfaces") },
+  { title: "Capture", key: "C", items: () => items("captureOptions", "startCapture", "stopCapture", "restartCapture", SEP, "now", SEP, "refreshInterfaces") },
   { title: "Analyze", key: "A", items: analyzeItems },
   { title: "Statistics", key: "S", items: () => items("protocolHierarchy", "conversations", "endpoints", SEP, "ioGraphs") },
   { title: "Tools", key: "T", items: () => items("openInWireshark", "tlsKeys") },

@@ -13,6 +13,9 @@ const ICONS = {
     '<path d="M1.5 13.5C5.5 12 8.7 8 9.6 1.8c2.3 3.4 3.9 7.4 4.6 11.7z" fill="#2f7ad6"/>' +
     '<path d="M.8 14.6c1.2-.7 2.4-.7 3.6 0s2.4.7 3.6 0 2.4-.7 3.6 0 2.4.7 3.6 0" fill="none" stroke="#2f7ad6" stroke-width="1.1"/>',
   stop: '<rect x="3" y="3" width="10" height="10" rx="1.2" fill="#d9302c"/>',
+  now:
+    '<path d="M3.5 14.5V1.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+    '<path d="M4 2h8.8l-2.3 3 2.3 3H4z" fill="#e8590c" stroke="#b5450a" stroke-width="1" stroke-linejoin="round"/>',
   options:
     `<path d="M2 4h12M2 8h12M2 12h12" ${S}/>` +
     '<circle cx="5" cy="4" r="1.7" fill="var(--btn-bg, #fff)" stroke="currentColor" stroke-width="1.3"/>' +

@@ -1,7 +1,8 @@
 // A stand-in for dumpcap that "captures" test/media/traffic.mjs on lo: it lists lo, accepts
 // any capture filter, and writes a pcapng the way dumpcap does, at a steady rate, and the TLS
 // key log of the traffic next to it (<file>.keys). The capture filter "burst <n> rate <pps>" sets
-// the packets written at once, then per second; -b packets:<n> starts a new file every n packets.
+// the packets written at once, then per second, "realtime" in it stamps them with the clock from
+// the start rather than from 2023; -b packets:<n> starts a new file every n packets.
 // Usage: put an executable named dumpcap first on PATH that runs node test/fake-dumpcap.mjs "$@".
 import { appendFileSync, closeSync, openSync, writeSync } from "node:fs";
 import { header, packet, traffic } from "./media/traffic.mjs";
@@ -27,6 +28,7 @@ if (args.includes("-D")) {
   const duration = Number(stops.find(([k]) => k === "duration")?.[1] ?? Infinity) * 1000;
   const limit = Number(stops.find(([k]) => k === "packets")?.[1] ?? Infinity);
   const pps = Number(rate);
+  const start = /\brealtime\b/.test(opt("-f") ?? "") ? { start: Date.now() / 1000 } : {};
   const perFile = Number(args.flatMap((a, i) => (args[i - 1] === "-b" ? [a.split(":")] : [])).find(([k]) => k === "packets")?.[1] ?? Infinity);
   let files = 0;
   /** Opens the next file: with -b, named as dumpcap names a ring buffer's. */
@@ -50,7 +52,7 @@ if (args.includes("-D")) {
         parts = [];
         fd = next();
       }
-      parts.push(packet(n, gen.next().value, { pps: Math.max(pps, 1) }));
+      parts.push(packet(n, gen.next().value, { pps: Math.max(pps, 1), ...start }));
     }
     if (parts.length) writeSync(fd, Buffer.concat(parts));
     process.stderr.write(`\rPackets: ${n} `);

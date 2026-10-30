@@ -17,6 +17,7 @@ import { openFileDialog } from "./dialogs/openfile.ts";
 import { openPhsDialog } from "./dialogs/phs.ts";
 import { openTlsDialog } from "./dialogs/tls.ts";
 import { focusFilter } from "./filterbar.ts";
+import { nowAvailable, pressNow, tapNow } from "./now.ts";
 import { findAgain, openFindBar } from "./findbar.ts";
 import { canGoBack, canGoForward, goHistory } from "./history.ts";
 import type { MenuItem } from "./menu.ts";
@@ -39,6 +40,8 @@ export interface Command {
   owns?: () => boolean;
   enabled?: () => boolean;
   checked?: () => boolean;
+  /** Its key and button act on press and release (run: a click, as from a menu). */
+  hold?: boolean;
   run: () => void;
 }
 
@@ -163,6 +166,7 @@ export const commands = {
   startCapture: { label: "Start", tip: "Start capturing packets", shortcut: "Ctrl+E", anywhere: true, enabled: () => !captureActive(), run: () => hooks.startCapture() },
   stopCapture: { label: "Stop", tip: "Stop capturing packets", shortcut: "Ctrl+E", anywhere: true, enabled: capturing, run: () => void act.stopCapture() },
   restartCapture: { label: "Restart", tip: "Restart current capture", shortcut: "Ctrl+R", enabled: capturing, run: () => void restartCaptureClicked() },
+  now: { label: "Now", tip: "Flag this moment of the live capture for the agent; hold to flag a span (not in captures that go on in new files)", shortcut: "N", enabled: nowAvailable, hold: true, run: tapNow },
   // Only while interfaces are shown, so F5 reloads the page otherwise
   refreshInterfaces: {
     label: "Refresh Interfaces",
@@ -262,7 +266,10 @@ export function handleCommandKey(e: KeyboardEvent): boolean {
     // Ctrl+E and Ctrl+R mean different commands depending on the capture state
     if (!isEnabled(c) || !bindings(c).some((b) => matches(e, b))) continue;
     e.preventDefault();
-    c.run();
+    // The keyup releases it; repeats while held are the same press
+    if (c.hold) {
+      if (!e.repeat) pressNow(e.code);
+    } else c.run();
     return true;
   }
   return false;
