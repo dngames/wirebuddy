@@ -6,8 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-30
+
 - Decode As: decode a port as a protocol Wireshark knows, from a packet's context menu or the agent's `decode_as` tool
-- The newest packets of a big live capture also use TLS keys set while they load
+- TLS keys set while a big live capture's newest packets load now decrypt those packets too
+- An open Expert Information dialog refreshes when extensions are reloaded
 
 ## [0.13.0] - 2026-10-29
 
@@ -71,7 +74,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/dngames/wirebuddy/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/dngames/wirebuddy/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/dngames/wirebuddy/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/dngames/wirebuddy/compare/v0.10.1...v0.11.0
