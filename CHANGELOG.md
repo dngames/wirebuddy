@@ -6,10 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-30
+
 - Releases are published to npm from GitHub Actions, with provenance
 - Decode As suggests close matches for a protocol name misspelt in its first letter too
-- A packet list column given as a field (`_ws.col.info`) is refused with a hint instead of crashing sharkd
-- Dialogs move back into view when the window gets narrower
+- A packet list column given as a field (`_ws.col.info`) is refused instead of coming back empty or crashing sharkd
+- Dialogs move back into view when the window gets smaller
 
 ## [0.14.0] - 2026-10-30
 
@@ -79,7 +81,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/dngames/wirebuddy/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/dngames/wirebuddy/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/dngames/wirebuddy/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/dngames/wirebuddy/compare/v0.11.0...v0.12.0
