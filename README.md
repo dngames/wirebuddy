@@ -30,7 +30,9 @@ decode or a packet list can't show, the agent extends the viewer itself.
   what's in the capture (images, video, point clouds, a field over time).
 - **Wireshark's own decoding.** Everything is dissected by Wireshark's engine (`sharkd`), with
   your plugins and preferences (and a profile you choose), so results match Wireshark; **Open in
-  Wireshark** jumps to the real GUI at the same file, filter and packet.
+  Wireshark** jumps to the real GUI at the same file, filter and packet. When a protocol Wireshark
+  knows runs on a port it doesn't expect, **Decode As** (a right-click, or one call from the agent)
+  decodes it without a dissector.
 - **Live captures the agent can run.** The agent starts and stops captures with `dumpcap` and
   reads them as they grow; so can you, with a Capture Options dialog like Wireshark's.
 
@@ -75,7 +77,7 @@ WireBuddy is for working on a capture together with the agent:
 | | tshark-based MCP servers | WireBuddy |
 |---|---|---|
 | What you see | the agent's answer, in Wireshark MCP with frame references and `tshark` commands to re-check it | the packets, with the agent's filters, marks and selected packet in your view |
-| Protocols Wireshark doesn't decode | stay "Data" unless you install a dissector yourself (Wireshark MCP offers Decode As for protocols Wireshark has) | Lua dissectors the agent writes, tests and loads into the view |
+| Protocols Wireshark doesn't decode | stay "Data" unless you install a dissector yourself (Wireshark MCP offers Decode As for protocols Wireshark has) | Decode As for protocols Wireshark has (a right-click or one agent call); Lua dissectors the agent writes, tests and loads for the rest |
 | Beyond packet rows | text and JSON for the agent | panels the agent writes: plots, images, video, point clouds |
 | Ready-made analyses | many, from statistics to threat intelligence | Wireshark's statistics and expert info |
 | Where it runs | anywhere `tshark` runs, headless too | Linux with a browser, Wireshark 4.6 and Node.js 22 (macOS and Windows untested; extensions and panels need Linux) |
@@ -148,10 +150,23 @@ inside TLS become visible, and "Open in Wireshark" passes the key log on. A key 
 Wireshark's own preferences is picked up automatically. The agent can see whether decryption is
 on, but only you choose the file. Treat the key log like a password.
 
+## Decode As
+
+A protocol Wireshark knows, on a port it doesn't expect (RTP on UDP port 50000, MQTT on TCP port
+18830), shows up as "Data" or as the wrong protocol. Right-click one of its packets and choose
+**Decode As › UDP Port 50000…**, then the protocol by its display-filter name (`rtp`, `mqtt`,
+`dns`); `data` shows the raw bytes. The status bar lists the entries and removes them, and the
+agent's `decode_as` tool does the same in one call.
+
+Entries apply to every capture you open until WireBuddy exits and win over your profile's Decode As
+for the same port; WireBuddy never writes your Wireshark profile. Decode As needs Linux, like
+extensions.
+
 ## Extensions
 
 Wireshark decodes thousands of protocols, but not your company's sensor stream or a game's
-network protocol: those show up as "Data". Ask the agent to decode them. It finds the undecoded
+network protocol: those show up as "Data" (a protocol Wireshark knows on another port needs no
+extension: see [Decode As](#decode-as)). Ask the agent to decode them. It finds the undecoded
 traffic (`capture_summary` lists it), works out the format from the bytes or from a spec you give
 it, and writes a Lua dissector into WireBuddy's extension folder:
 
@@ -210,7 +225,8 @@ WireBuddy decodes with `sharkd`, which loads the same plugins and settings as Wi
   and the personal one (`~/.local/lib/wireshark/plugins/4.6/epan`).
 - **Lua plugins** from the global folder, `~/.local/lib/wireshark/plugins` and
   `~/.config/wireshark/plugins`.
-- **Preferences, Decode As, enabled/disabled protocols, coloring rules** from `~/.config/wireshark`.
+- **Preferences, Decode As, enabled/disabled protocols, coloring rules** from `~/.config/wireshark`;
+  WireBuddy's own [Decode As](#decode-as) entries apply on top and win for the same port.
 - **Profiles**: `--profile <name>` starts `sharkd` (and "Open in Wireshark") with that
   configuration profile.
 
@@ -322,7 +338,7 @@ solution; `solution/ctseries` is the panel.
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, edited packet comments, capture status, open and offered panels |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, edited packet comments, Decode As entries, capture status, open and offered panels |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -339,6 +355,7 @@ solution; `solution/ctseries` is the panel.
 | `time_references` | Set or unset time references (`*REF*`), which the Time column counts from, or clear them |
 | `packet_comments` | Add, replace or delete packet comments in the user's view (kept by exports to pcapng) |
 | `set_columns` | Show fields as extra columns in the user's packet list |
+| `decode_as` | Decode a port (or RTP payload type) as a protocol Wireshark knows, like Wireshark's Decode As; clear one or all |
 | `list_interfaces` | Capture interfaces with their current traffic (read-only) |
 | `start_capture` | Start a live capture with the Capture Options settings; the view follows it |
 | `stop_capture` | Stop the running capture |
@@ -385,9 +402,9 @@ the questions you asked it.
   included) or a body that isn't JSON are refused. The page has a Content Security Policy.
 - The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
   into WireBuddy's capture folder. They can open any capture file you can read, read packets,
-  change the filter, marks, time references, packet comments, selection and columns, open Wireshark, and write new
-  `.pcap`/`.pcapng` exports where you can write; an existing file is never replaced unless the
-  agent exported it itself in the same session.
+  change the filter, marks, time references, packet comments, selection, columns and Decode As
+  entries, open Wireshark, and write new `.pcap`/`.pcapng` exports where you can write; an
+  existing file is never replaced unless the agent exported it itself in the same session.
 - File › Export Objects and `export_objects` save files from the traffic, whose names and
   contents a sender chose, only into a new folder they create (`http-objects`, `http-objects-2`,
   …) in a directory you or the agent name, under names of their own (`f12-report.pdf`). No other
@@ -452,6 +469,11 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   the file: edits reach them once exported and that file opened.
 - In the Wireshark window that "Open in Wireshark" starts, the interface list stays empty until
   Capture → Refresh Interfaces (F5): Wireshark skips the scan when it starts with a file.
+- A Decode As entry is one TCP, UDP or TLS port or one RTP payload type, at most 50 of them, and
+  setting one needs an open capture. A few protocols Wireshark only reaches through another one
+  (SSDP, for one) can't be targets; `data`, not Wireshark's "(none)", stops a decode. An entry wins
+  over an extension on the same port, and one for an extension's protocol does nothing while that
+  extension is off. "Open in Wireshark" opens the capture without WireBuddy's Decode As entries.
 
 ## Contributing
 

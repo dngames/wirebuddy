@@ -19,12 +19,14 @@ export function udp(sport, dport, payload) {
   return Buffer.concat([h, payload]);
 }
 
-export function tcp(sport, dport, payload) {
+export function tcp(sport, dport, payload, { seq = 0, ack = 0, flags = 0x18 } = {}) {
   const h = Buffer.alloc(20);
   h.writeUInt16BE(sport, 0);
   h.writeUInt16BE(dport, 2);
+  h.writeUInt32BE(seq, 4);
+  h.writeUInt32BE(ack, 8);
   h[12] = 0x50;
-  h[13] = 0x18;
+  h[13] = flags;
   h.writeUInt16BE(65535, 14);
   return Buffer.concat([h, payload]);
 }

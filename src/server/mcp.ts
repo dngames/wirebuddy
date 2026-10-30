@@ -3,12 +3,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
+import { countFilter, TABLES } from "./decodeas.ts";
 import { eventLines } from "./events.ts";
 import type { HttpServer } from "./http.ts";
 import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
-import type { CaptureState, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
+import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
+import { entryText } from "../shared/decodeas.ts";
 import { framesFilter, inRanges, type Ranges } from "../shared/ranges.ts";
 import { toRanges } from "./export.ts";
 import { VERSION } from "../shared/version.ts";
@@ -30,10 +32,10 @@ You and the user look at the same view: the open capture, display filter, select
 - export_packets writes the relevant packets to a new small capture file, e.g. a minimal repro for a bug report; in pcapng the packet comments go along as edited in the viewer, and your marks and their notes as packet comments too.
 - TLS payloads are only readable when the user has set a key log file in the UI; get_view_state tells you whether it is set.
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
-- set_display_filter, goto_frame, mark_frames, time_references, packet_comments and set_columns change what the user sees; the user gets a notice for each.
+- set_display_filter, goto_frame, mark_frames, time_references, packet_comments, set_columns and decode_as change what the user sees; the user gets a notice for each.
 - start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
 - Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say which frames those are and how many newer packets the user's list shows provisionally.
-- When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly, you can teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
+- When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly: if it is a protocol Wireshark knows on an unexpected port, decode_as fixes the view in one call (like Wireshark's Decode As); otherwise teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
 - To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
 }
 
@@ -205,7 +207,7 @@ function panelText(r: PanelReport, title: string, opened: boolean): string {
   return out.join("\n");
 }
 
-function testText(t: ExtensionTest): string {
+function testText(t: ExtensionTest, entries: DecodeAsEntry[]): string {
   const out = [`Extension "${t.name}": ${t.load}`];
   // Nothing loaded: nothing was tested either
   if (t.load !== "loaded" && !t.protocols.length && !t.hierarchy.length && !t.crashed) return [...out, "Fix it and test again before it goes into the user's view."].join("\n");
@@ -217,10 +219,12 @@ function testText(t: ExtensionTest): string {
   if (!t.protocols.length && t.hierarchy.length) {
     out.push("  It has no protocol of its own (like Decode As); with it the capture decodes as:");
     for (const line of t.hierarchy) out.push(`    ${line}`);
+    out.push("  A protocol Wireshark knows on another port needs no extension: decode_as.");
   }
   for (const p of t.protocols) out.push(`  ${p.name}: ${p.error ? `filter failed: ${p.error}` : `${p.frames} packets${p.first ? `, first ${p.first}` : ""}`}`);
   if (t.protocols.length && t.protocols.every((p) => !p.frames)) {
     out.push(t.luaErrorCount ? "  No packet shows it because its dissector failed: see the Lua errors below." : "  No packet matched: check the port or heuristic it registers on (query_packets filter \"data\" shows undecoded packets).");
+    if (entries.length) out.push(`  WireBuddy's Decode As entries apply here too (${entries.map(entryText).join(", ")}): one on this extension's port takes it over; decode_as action "clear" removes it.`);
   }
   if (t.sample) out.push("", `Frame ${t.sample.frame}, ${t.sample.protocol}:`, treeText(t.sample.tree, { protocols: [t.sample.protocol], maxLines: 40, showBytes: false }));
   if (t.luaErrorCount) {
@@ -229,6 +233,28 @@ function testText(t: ExtensionTest): string {
   } else out.push("", "No Lua errors.");
   out.push("", `The user's view is unchanged; extensions action "${t.enabled ? "reload" : "enable"}" applies it there.`);
   return out.join("\n");
+}
+
+/** The Decode As entries with who set each. */
+function entryList(entries: DecodeAsEntry[]): string {
+  return entries.map((e) => `${entryText(e)} (${e.by})`).join(", ");
+}
+
+/** What decode_as did (`table` and `value`: the entry it named), then the entries. */
+function decodeAsText(r: DecodeAsResult, table?: string, value?: number): string {
+  const what = (e: DecodeAsEntry): string => (e.table === "rtp.pt" ? "payload type" : "port");
+  const same = r.unchanged && r.entries.find((e) => e.table === table && e.value === value);
+  let text = "Removed all Decode As entries.";
+  if (r.set) {
+    const { entry, was, now, frames } = r.set;
+    const filter = countFilter(entry);
+    text = `${entry.table} ${entry.value} now decodes as ${now} (before: ${was || "no dissector, so heuristics or Data"}).`;
+    if (frames) text += ` ${frames} frames match "${filter}".`;
+    else if (frames === 0) text += ` No frame matches "${filter}": no packet uses that ${what(entry)}, or the ${now} dissector rejects them (query_packets filter "${TABLES[entry.table].field} == ${entry.value}" shows them).`;
+  } else if (r.removed) text = `Removed ${entryText(r.removed)}; Wireshark decides how that ${what(r.removed)} decodes again.`;
+  else if (same) text = `${same.table} ${same.value} already decodes as ${same.protocol}; nothing changed.`;
+  const entries = r.entries.length ? `Decode As entries (${r.entries.length}, until WireBuddy exits): ${entryList(r.entries)}` : "No Decode As entries.";
+  return `${text}\n${entries}`;
 }
 
 /** "4 s" for a duration in ms. */
@@ -342,7 +368,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "get_view_state",
     {
-      description: "What the user is looking at right now: open file, frame counts, display filter, selected frame (with its summary row), the packets the user selected with Ctrl/Shift+click (as a display filter for query_packets), marks, time references, packet comments edited in the viewer and live-capture status.",
+      description: "What the user is looking at right now: open file, frame counts, display filter, selected frame (with its summary row), the packets the user selected with Ctrl/Shift+click (as a display filter for query_packets), marks, time references, packet comments edited in the viewer, Decode As entries and live-capture status.",
       annotations: { readOnlyHint: true },
     },
     tool(async () => {
@@ -389,6 +415,9 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         }
       }
       lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
+      const da = s.decodeAs;
+      if (da.entries.length) lines.push(`Decode As (until WireBuddy exits, every capture; the user's Wireshark profile is unchanged): ${entryList(da.entries)}`);
+      else lines.push(da.unavailable ? `Decode As: unavailable (${da.unavailable})` : "Decode As: none");
       if (s.panels.length) lines.push(`Panels open: ${s.panels.map((p) => `${p.name} (${p.state}, opened by ${p.by}${p.errors ? `, ${p.errors} errors` : ""})`).join(", ")}`);
       // The status bar shows the first three
       if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.slice(0, 3).map((o) => `${o.name} ("${o.text}")`).join(", ")}${s.panelOffers.length > 3 ? ` (${s.panelOffers.length - 3} more not shown)` : ""}`);
@@ -414,7 +443,9 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ top }) => {
       const s = viewer.state;
       if (!s.file) throw new Error("no capture is open");
-      const out = [`${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s, ${s.fileSize} bytes`, "", "Protocol hierarchy:"];
+      const out = [`${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s, ${s.fileSize} bytes`];
+      if (s.decodeAs.entries.length) out.push(`Decode As entries in effect: ${entryList(s.decodeAs.entries)}`);
+      out.push("", "Protocol hierarchy:");
       const phs = await viewer.phs();
       out.push(...phsText(phs, s.totalFrames));
       for (const type of ["ipv4", "tcp", "udp"] as const) {
@@ -439,7 +470,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       }
       const undecoded = dataFrames(phs);
       if (undecoded) {
-        out.push("", `Undecoded payload ("data"): ${undecoded} frames. If you can work out the format, an extension can decode it (extensions action "guide"):`);
+        out.push("", `Undecoded payload ("data"): ${undecoded} frames. A protocol Wireshark knows on an unexpected port: decode_as decodes it in one call; an unknown format: an extension (extensions action "guide"):`);
         for (const type of ["udp", "tcp"] as const) {
           const convs = (await viewer.conversations(type, "data")).sort((a, b) => b.framesAB + b.framesBA - (a.framesAB + a.framesBA));
           for (const c of convs.slice(0, 5)) out.push(`  ${type.toUpperCase()} ${c.addrA}:${c.portA} <-> ${c.addrB}:${c.portB}: ${c.framesAB + c.framesBA} frames  filter: (${c.filter}) && data`);
@@ -712,6 +743,21 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   );
 
   server.registerTool(
+    "decode_as",
+    {
+      description:
+        "Wireshark's Decode As in the user's view: decode traffic on a port (or RTP payload type) as a protocol Wireshark knows, or an extension's, when it shows as \"Data\" or as the wrong protocol. Example: {action:\"set\", table:\"udp.port\", value:50000, protocol:\"rtp\"}. \"clear\" removes one entry (table and value) or all. Every packet is dissected again and the user gets a notice. Entries last until WireBuddy exits, for every capture opened, and never change the user's Wireshark profile; get_view_state lists them. protocol is a display-filter protocol name (rtp, mqtt, dns), or \"data\" to show the raw bytes (stops Wireshark's guessing on that port). tls.port decodes the decrypted payload of TLS on that TCP port.",
+      inputSchema: {
+        action: z.enum(["set", "clear"]),
+        table: z.enum(["tcp.port", "udp.port", "tls.port", "rtp.pt"]).optional(),
+        value: z.number().int().min(0).optional(),
+        protocol: z.string().max(48).optional(),
+      },
+    },
+    tool(async (args) => decodeAsText(await viewer.decodeAs(args, "agent"), args.table, args.value), true, "view"),
+  );
+
+  server.registerTool(
     "expert_info",
     {
       description: "Wireshark's Expert Information: dissector warnings and errors (retransmissions, malformed packets, resets, ...) grouped by severity and message, with example frames. The quickest way to find what's wrong.",
@@ -977,8 +1023,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       inputSchema: { frame: z.number().int().min(1).optional() },
     },
     tool(async ({ frame }) => {
-      await viewer.openInWireshark(frame ?? null);
-      return "Wireshark is starting";
+      const note = await viewer.openInWireshark(frame ?? null);
+      return `Wireshark is starting${note ? `. ${note}` : ""}`;
     }, true, "view"),
   );
 
@@ -1014,7 +1060,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         case "test": {
           const e = viewer.extensionList().extensions.find((x) => x.name === named());
           const parts: string[] = [];
-          if (!e?.panel || e.lua) parts.push(testText(await viewer.testExtension(named())));
+          if (!e?.panel || e.lua) parts.push(testText(await viewer.testExtension(named()), viewer.state.decodeAs.entries));
           if (e?.panel) parts.push(panelCheckText(named(), await checkPanel(viewer.extensions.panelFiles(named()))));
           return parts.join("\n\n");
         }

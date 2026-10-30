@@ -1029,6 +1029,41 @@ try {
     assert.equal(sharkdChildren(), before);
   });
 
+  for (const after of ["load", "status"]) await check(`TLS keys set while a slice is read (like Decode As), after its ${after} request: its rows read with them`, async () => {
+    const file = await cutAt(37_000);
+    const keyed = newSharkd(keylog);
+    assert.equal((await keyed.call("load", { file })).status, "OK");
+    // Three of these read differently with the keys
+    const exact = await rowsOf(keyed, 33_101, 33_200);
+    let tail;
+    let armed = true;
+    // The keys come right after sharkd was asked to read the slice, or to count its packets
+    const sharkd = () => {
+      const e = newSharkd();
+      const call = e.call.bind(e);
+      e.call = (method, params) => {
+        const r = call(method, params);
+        if (method === after && armed) {
+          armed = false;
+          tail.setPref("tls.keylog_file", keylog);
+        }
+        return r;
+      };
+      return e;
+    };
+    tail = new LiveTail({ file, dir: out, sharkd });
+    try {
+      await tail.update();
+      tail.rebase(33_100);
+      const rows = await tail.rows(0, 100, view);
+      assert.ok(!armed);
+      const differ = rows.filter((r, i) => !same(r, exact[i]));
+      assert.equal(differ.length, 0, `${differ.length} of 100 rows differ, e.g. ${differ[0]?.num}: ${differ[0]?.c[6]}`);
+    } finally {
+      tail.close();
+    }
+  });
+
   await check("rows asked for a list that changed since read no slice", async () => {
     const file = await cutAt(37_000);
     const before = sharkdChildren();

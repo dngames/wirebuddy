@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { writeAcmeCapture } from "./acme.mjs";
 import { epb, idb, shb, udpFrame } from "./capgen.mjs";
 import { Pcap } from "./media/pcap.mjs";
+import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -1139,6 +1140,136 @@ try {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // Decode As: protocols Wireshark knows on ports it doesn't expect
+  const oddPorts = join(home, "odd-ports.pcap");
+  writeOddPortsCapture(oddPorts);
+  const decodeAs = (body, call = api) => call("/api/decode-as", body);
+  /** Frames of the open capture `filter` matches. */
+  const matching = async (filter, call = api) => (await call(`/api/stats/phs?filter=${encodeURIComponent(filter)}`)).json[0]?.frames ?? 0;
+  const rtp = { action: "set", table: "udp.port", value: 50000, protocol: "rtp" };
+  await check("decode as: entries decode a port as a protocol Wireshark knows, read again at once; the agent hears of them", async () => {
+    const start = (await api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json;
+    try {
+      assert.equal((await api("/api/open", { path: oddPorts })).status, 200);
+      assert.equal(await matching("rtp"), 0);
+      const before = await state();
+      const r = await decodeAs(rtp);
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.deepEqual(r.json.set, { entry: { table: "udp.port", value: 50000, protocol: "rtp", by: "user" }, was: "", now: "RTP", frames: 5 });
+      const s = await state();
+      assert.ok(s.generation > before.generation && s.epoch > before.epoch, "read again");
+      assert.deepEqual(s.decodeAs, { entries: [{ table: "udp.port", value: 50000, protocol: "rtp", by: "user" }], unavailable: null });
+      assert.equal(await matching("rtp"), 5);
+      assert.equal((await decodeAs({ ...rtp, protocol: "RTP" })).json.unchanged, true);
+      assert.equal((await decodeAs({ action: "set", table: "udp.port", value: 123, protocol: "dns" })).json.set.was, "NTP");
+      assert.equal(await matching("dns && udp.port == 123"), 4);
+      assert.deepEqual((await decodeAs({ action: "clear", table: "udp.port", value: 50000 })).json.entries.map((e) => e.value), [123]);
+      assert.equal(await matching("rtp"), 0);
+      assert.deepEqual((await decodeAs({ action: "clear" })).json.entries, []);
+      assert.equal(await matching("ntp"), 4);
+      const texts = (await api(`/api/events?after=${start.last}`)).json.events.map((e) => `${e.level} ${e.text}`);
+      for (const t of ["The user set Decode As udp.port 50000 → rtp (5 frames match)", "The user removed Decode As udp.port 50000 → rtp", "The user removed all Decode As entries"]) assert.ok(texts.includes(`INFO ${t}`), texts.join("\n"));
+    } finally {
+      await decodeAs({ action: "clear" });
+    }
+  });
+  await check("decode as: a misspelt protocol, or one with no dissector of its name, changes nothing and is no problem for the agent", async () => {
+    const start = (await api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json;
+    try {
+      await api("/api/open", { path: oddPorts });
+      assert.equal((await decodeAs(rtp)).status, 200);
+      const typo = await decodeAs({ action: "set", table: "tcp.port", value: 18830, protocol: "mtqq" });
+      assert.equal(typo.status, 400);
+      assert.match(typo.json.error, /^"mtqq" is not a protocol Wireshark knows; close matches: mqtt \(MQ Telemetry Transport Protocol\), .*mq \(WebSphere MQ\)/);
+      // Replacing rtp undoes it: the capture is read again with it
+      const ssdp = await decodeAs({ ...rtp, protocol: "ssdp" });
+      assert.equal(ssdp.status, 400);
+      assert.match(ssdp.json.error, /^Wireshark knows "ssdp" but has no dissector by that name to attach to udp\.port/);
+      assert.deepEqual((await state()).decodeAs.entries.map((e) => e.protocol), ["rtp"]);
+      assert.equal(await matching("rtp"), 5);
+      assert.equal((await decodeAs({ ...rtp, value: 70000 })).status, 400);
+      assert.equal((await decodeAs({ action: "clear", table: "udp.port" })).status, 400);
+      await api("/api/close", {});
+      assert.match((await decodeAs({ ...rtp, value: 5004 })).json.error, /needs an open capture/);
+      const { events } = (await api(`/api/events?after=${start.last}`)).json;
+      assert.deepEqual(events.filter((e) => e.level === "ERROR").map((e) => e.text), []);
+    } finally {
+      await decodeAs({ action: "clear" });
+    }
+  });
+  await check("decode as: when the open capture can't be read again, the entries stay and the error says which read failed", async () => {
+    const gone = join(home, "gone.pcap");
+    copyFileSync(oddPorts, gone);
+    try {
+      await api("/api/open", { path: gone });
+      assert.equal((await decodeAs(rtp)).status, 200);
+      rmSync(gone);
+      const set = await decodeAs({ action: "set", table: "udp.port", value: 123, protocol: "dns" });
+      assert.match(set.json.error, /^reading the capture with udp\.port 123 → dns failed \(.+\); the entry was not kept/);
+      assert.match((await decodeAs({ action: "clear" })).json.error, /^reading the capture without the Decode As entries failed \(.+\); nothing changed/);
+      assert.deepEqual((await state()).decodeAs.entries.map((e) => e.protocol), ["rtp"]);
+    } finally {
+      await api("/api/open", { path: oddPorts });
+      await decodeAs({ action: "clear" });
+    }
+  });
+  await check("decode as: entries stay through another file, an extension reload and TLS keys", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-tls-test-"));
+    try {
+      await api("/api/open", { path: oddPorts });
+      await decodeAs(rtp);
+      await api("/api/open", { path: fixture });
+      await api("/api/open", { path: oddPorts });
+      assert.equal(await matching("rtp"), 5);
+      assert.equal((await api("/api/extensions/reload", {})).status, 200);
+      assert.equal(await matching("rtp"), 5);
+      writeFileSync(join(dir, "keys.log"), "");
+      assert.equal((await api("/api/tls", { keylog: join(dir, "keys.log") })).status, 200);
+      await api("/api/tls", { keylog: null });
+      assert.equal(await matching("rtp"), 5);
+    } finally {
+      await decodeAs({ action: "clear" });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  await check("decode as: Open in Wireshark goes without the entries and says so", async () => {
+    // A stand-in that writes down its arguments and environment
+    const bin = mkdtempSync(join(tmpdir(), "wirebuddy-fake-wireshark-"));
+    writeFileSync(join(bin, "wireshark"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${bin}/args"\nenv > "${bin}/env"\n`, { mode: 0o755 });
+    const other = await startServer({ PATH: `${bin}:${process.env.PATH}`, DISPLAY: ":wirebuddy-test" });
+    try {
+      await other.api("/api/open", { path: oddPorts });
+      await decodeAs(rtp, other.api);
+      await decodeAs({ action: "set", table: "udp.port", value: 123, protocol: "dns" }, other.api);
+      const r = await other.api("/api/wireshark", {});
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal(r.json.note, "WireBuddy's Decode As entries don't go along (udp.port 50000 → rtp, udp.port 123 → dns); use Analyze › Decode As in Wireshark");
+      const passed = readFileSync(join(bin, "args"), "utf8") + readFileSync(join(bin, "env"), "utf8");
+      assert.doesNotMatch(passed, /^-d$|decode.as|udp\.port/im);
+    } finally {
+      other.close();
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+  await check("decode as: an entry wins over the profile's for the same port, which is back once it is gone", async () => {
+    const config = mkdtempSync(join(tmpdir(), "wirebuddy-config-"));
+    mkdirSync(join(config, "wireshark/profiles/decodeas"), { recursive: true });
+    writeFileSync(join(config, "wireshark/profiles/decodeas/decode_as_entries"), "decode_as_entry: udp.port,50000,(none),DNS\n");
+    const other = await startServer({ XDG_CONFIG_HOME: config, WIREBUDDY_PROFILE: "decodeas" });
+    try {
+      await other.api("/api/open", { path: oddPorts });
+      assert.equal(await matching("dns && udp.port == 50000", other.api), 5);
+      assert.equal((await decodeAs(rtp, other.api)).json.set.was, "DNS");
+      assert.equal(await matching("rtp", other.api), 5);
+      await decodeAs({ action: "clear" }, other.api);
+      assert.equal(await matching("dns && udp.port == 50000", other.api), 5);
+    } finally {
+      other.close();
+      rmSync(config, { recursive: true, force: true });
+    }
+  });
+  await api("/api/open", { path: fixture });
 
   await check("I/O graph over a capture spanning 100 days stays exact", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-span-test-"));

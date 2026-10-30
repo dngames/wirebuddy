@@ -59,6 +59,7 @@
  * | GET    | /api/frame-at                 | ?t=<seconds since first frame>       | { frame: number \| null } |
  * | POST   | /api/columns                  | { columns: CustomColumn[] }          | FilterCheck            |
  * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
+ * | POST   | /api/decode-as                | DecodeAsChange                       | DecodeAsResult         |
  * | POST   | /api/export                   | ExportRequest                        | ExportResult           |
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
  * | POST   | /api/marks                    | { frames, note }                     | { ok: true }           |
@@ -73,7 +74,7 @@
  * | POST   | /api/comments/delete          | { frames? } or { frame, index, old } | CommentResult          |
  * | POST   | /api/comments/clear           |                                      | CommentResult          |
  * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
- * | POST   | /api/wireshark                | { frame? }                           | { ok: true }           |
+ * | POST   | /api/wireshark                | { frame? }                           | { ok: true, note: string \| null } |
  * | GET    | /api/extensions               |                                      | ExtensionList          |
  * | POST   | /api/extensions/enable        | { name, on }                         | ExtensionList          |
  * | POST   | /api/extensions/reload        |                                      | ExtensionList          |
@@ -202,6 +203,11 @@ export interface ViewState {
   /** Keylog file used to decrypt TLS (SSLKEYLOGFILE format), or null. */
   tlsKeylog: string | null;
   /**
+   * Decode As entries, in effect for every capture until WireBuddy exits;
+   * `unavailable`: why there can't be any, else null.
+   */
+  decodeAs: { entries: DecodeAsEntry[]; unavailable: string | null };
+  /**
    * Lua extensions: how many decode now, how many failed to load; `revision`
    * grows with every reload, after which packets dissect differently.
    */
@@ -215,8 +221,8 @@ export interface ViewState {
   panelOffers: PanelOffer[];
   /**
    * Changes whenever packets already read may read differently: another file
-   * or a rewritten one, a closed capture, re-read extensions or TLS keys. Not
-   * when a live capture only grows.
+   * or a rewritten one, a closed capture, re-read extensions, TLS keys or
+   * Decode As. Not when a live capture only grows.
    */
   epoch: number;
   /**
@@ -559,6 +565,32 @@ export interface CustomColumn {
   /** Field name, e.g. `http.response.code`. */
   field: string;
   title: string;
+}
+
+/** Where Decode As looks a packet up: its TCP or UDP port, the TCP port of its decrypted TLS, its RTP payload type. */
+export type DecodeAsTable = "tcp.port" | "udp.port" | "tls.port" | "rtp.pt";
+
+/** Like Wireshark's Decode As: packets with `value` in `table` dissect as `protocol`, a display-filter protocol name. */
+export interface DecodeAsEntry {
+  table: DecodeAsTable;
+  value: number;
+  protocol: string;
+  by: "user" | "agent";
+}
+
+/** Sets an entry (replacing the one for the same table and value), or clears one (table and value) or all. */
+export type DecodeAsChange = { action: "set"; table: DecodeAsTable; value: number; protocol: string } | { action: "clear"; table?: DecodeAsTable; value?: number };
+
+/**
+ * The entries after a change. `set`: the entry set, what decoded its value
+ * before and now (dissector names, "" for none) and the frames it decodes
+ * now (null when counting failed); `removed`: the entry cleared.
+ */
+export interface DecodeAsResult {
+  entries: DecodeAsEntry[];
+  unchanged?: true;
+  set?: { entry: DecodeAsEntry; was: string; now: string; frames: number | null };
+  removed?: DecodeAsEntry;
 }
 
 export interface ExpertItem {

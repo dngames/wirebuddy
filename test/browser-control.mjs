@@ -1,8 +1,9 @@
 // A panel in headless Chrome: wb.select is refused without a click in the panel and works after
 // one, wb.setFilter needs "control", wb.storage round-trips, panel action "snapshot" returns the
 // panel's canvas, and offers show as status-bar chips. Then the packet menu: asking the agent about
-// a packet, the export dialog writing marks as packet comments, and time references set there and
-// in the Edit menu. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs.
+// a packet, the export dialog writing marks as packet comments, time references set there and in
+// the Edit menu, and Decode As set there (its packet line on reassembled TCP too) and removed in the
+// status bar. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -13,6 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
+import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const chromeBin = process.env.CHROME ?? "/usr/bin/google-chrome";
@@ -483,6 +485,60 @@ try {
     await sleep(300);
     assert.ok((await state()).file, "the capture stays open");
   }).finally(closeComment);
+
+  await check("browser: Decode As in a packet's menu decodes its port; the status bar lists the entries and removes them", async () => {
+    const oddPorts = join(home, "odd-ports.pcap");
+    writeOddPortsCapture(oddPorts);
+    const protocol = (frame) => evaluate(`${row(frame)}?.querySelectorAll('.pl-cell')[4]?.textContent`);
+    const seg = "document.querySelector('.sb-da')";
+    try {
+      await call("open_capture", { path: oddPorts });
+      await until("frame 5 as UDP", async () => (await protocol(5)) === "UDP");
+      await fromMenu(5, "Decode As");
+      await pick("UDP Port 50000");
+      await until("the dialog", () => evaluate("document.activeElement?.classList.contains('da-in') === true"));
+      assert.equal(await evaluate("document.querySelector('.da-packet').textContent"), "This packet: UDP 30000 → 50000, decoded as Data now.");
+      await cdp("Input.insertText", { text: "rtp" });
+      await click(...center(await box("document.querySelector('.dlg-decodeas button.primary')")));
+      await until("frame 5 as RTP", async () => (await protocol(5)) === "RTP");
+      assert.match(await toasts(), /UDP port 50000 now decodes as RTP \(5 packets\)/);
+      assert.equal(await evaluate(`${seg}.hidden ? "" : ${seg}.textContent`), "Decode As: 1");
+      await click(...center(await box(seg)));
+      await pick("Remove udp.port 50000 → rtp");
+      await until("frame 5 as UDP again", async () => (await protocol(5)) === "UDP");
+      await until("the segment to go", () => evaluate(`${seg}.hidden`));
+    } finally {
+      if (await evaluate("!!document.querySelector('.dlg-decodeas')")) await key("Escape", "Escape", 27);
+      await call("decode_as", { action: "clear" });
+      await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
+    }
+  });
+
+  await check("browser: Decode As names the protocol of a reassembled TCP message, and says a packet has no payload only when it has none", async () => {
+    const scroller = "document.querySelector('.pl-scroll')";
+    const packetLine = async (frame) => {
+      await fromMenu(frame, "Decode As");
+      await pick("TCP Port 18080");
+      await until("the dialog", () => evaluate("!!document.querySelector('.da-packet')"));
+      const text = await evaluate("document.querySelector('.da-packet').textContent");
+      await key("Escape", "Escape", 27);
+      await until("the dialog to close", () => evaluate("!document.querySelector('.dlg-decodeas')"));
+      return text;
+    };
+    try {
+      await until("http.pcapng's rows", async () => (await evaluate(`${row(5)}?.querySelectorAll('.pl-cell')[4]?.textContent`)) === "TCP");
+      // Frame 5 is an ACK, 6 the first of the 4 segments of an HTTP response that 12 ends
+      assert.equal(await packetLine(5), "This packet: TCP 18080 → 43748, has no payload of its own.");
+      assert.equal(await packetLine(6), "This packet: TCP 18080 → 43748.");
+      // Below the list's first screen
+      await evaluate(`${scroller}.scrollTop = document.querySelector('.pl-row').offsetHeight * 9`);
+      await until("the list to show frame 12 at the top", () => evaluate(`!${row(1)} && !!${row(12)}`));
+      assert.equal(await packetLine(12), "This packet: TCP 18080 → 43748, decoded as Hypertext Transfer Protocol now.");
+    } finally {
+      if (await evaluate("!!document.querySelector('.dlg-decodeas')")) await key("Escape", "Escape", 27);
+      await evaluate(`${scroller}.scrollTop = 0`);
+    }
+  });
 
   const rows = () => evaluate("document.querySelectorAll('.dlg-objects tbody tr').length");
   const type = (field, text) => evaluate(`(() => { const i = document.querySelector('.dlg-objects ${field}'); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input')); })()`);

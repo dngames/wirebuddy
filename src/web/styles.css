@@ -2871,6 +2871,22 @@ button.sb-led:hover {
   font-size: 12px;
 }
 
+/* Decode As: the packet the dialog was opened on */
+.da-packet {
+  padding: 6px 10px;
+  border-radius: 3px;
+  background: var(--chrome-hi);
+  border: 1px solid var(--border-soft);
+}
+
+.da-in {
+  flex: 1;
+}
+
+.sb-da {
+  color: var(--text);
+}
+
 /* ------------------------------------------------------------ extensions */
 
 .ext-intro {

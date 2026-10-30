@@ -96,10 +96,10 @@ function init(): void {
     setDetailsFrame(fd);
   });
 
-  // Reloaded extensions dissect the shown packet differently; edited comments change its details
+  // Reloaded extensions or Decode As dissect the shown packet differently; edited comments change its details
   let extKey = "";
   bus.on("state", (s) => {
-    const key = `${s.instance}|${s.extensions.revision}|${s.commentRevision}`;
+    const key = `${s.instance}|${s.extensions.revision}|${s.commentRevision}|${s.epoch}`;
     if (extKey && key !== extKey) act.reloadFrame();
     extKey = key;
   });

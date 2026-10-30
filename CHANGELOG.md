@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Decode As: decode a port as a protocol Wireshark knows, from a packet's context menu or the agent's `decode_as` tool
+- The newest packets of a big live capture also use TLS keys set while they load
+
 ## [0.13.0] - 2026-10-29
 
 - File › Export Objects: list the files carried in the traffic and save them to a new folder

@@ -503,6 +503,24 @@ try {
     }
   });
 
+  await check("Decode As: provisional rows are read with it too", async () => {
+    assert.equal((await api("/api/filter", { filter: "udp.port == 53" })).ok, true);
+    await api("/api/decode-as", { action: "set", table: "udp.port", value: 53, protocol: "data" });
+    try {
+      let rows = [];
+      for (const end = Date.now() + 30_000; !rows.length && Date.now() < end; await sleep(300)) {
+        const s = await state();
+        if (!s.tail?.displayed) continue;
+        rows = (await wb.rows(s.displayedFrames, Math.min(500, s.tail.displayed))).rows.filter((r) => r.p);
+      }
+      assert.ok(rows.length, "provisional rows of DNS conversations");
+      assert.deepEqual(rows.filter((r) => r.c[4] !== "UDP").map((r) => `${r.num}: ${r.c[4]}`), []);
+    } finally {
+      await api("/api/decode-as", { action: "clear" });
+      await api("/api/filter", { filter: "" });
+    }
+  });
+
   await check("slices that can't be written: the exact rows still come, and newer packets wait for full reads after a few failures", async () => {
     const name = readdirSync(wb.captureDir).find((n) => n.startsWith(".wirebuddy-slices-"));
     sliceTag = name.split("-")[2];

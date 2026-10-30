@@ -6,6 +6,7 @@ import type { Transform } from "node:stream";
 import { createGunzip, createZstdDecompress } from "node:zlib";
 import { matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
+import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { Extensions } from "./extensions.ts";
@@ -16,12 +17,14 @@ import { Panels } from "./panels.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
 import { launchWireshark } from "./wireshark.ts";
+import { entryText } from "../shared/decodeas.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   AskResult,
   ConvRow,
   CaptureState,
   CustomColumn,
+  DecodeAsResult,
   EndpointRow,
   ExpertItem,
   ExtensionList,
@@ -175,6 +178,9 @@ const WARM_ROWS = 500;
 const FOLLOWED_MS = 3000;
 /** How often unmatched panel offers are checked again during a live capture. */
 const OFFER_LIVE_MS = 30_000;
+/** The prelude's preferences for the Decode As entries, and for how applying them went. */
+const DECODE_AS = "wirebuddy.decode_as";
+const DECODE_AS_STATUS = "wirebuddy.decode_as_status";
 
 /**
  * Everything the UI and the agent share: the open capture, display filter,
@@ -193,6 +199,8 @@ export class Viewer extends EventEmitter {
   private wiresharkAt = 0;
   /** Lua dissector extensions sharkd and Wireshark load. */
   readonly extensions: Extensions;
+  /** Preferences WireBuddy set for dissection (TLS key log, Decode As), for every sharkd; one turned off holds "". */
+  private readonly dissectPrefs = new Map<string, string>();
   /** Extensions' panels open in the UI. */
   readonly panels: Panels;
   /** The sharkd panels read the capture with. */
@@ -347,7 +355,7 @@ export class Viewer extends EventEmitter {
       },
       marked: () => this.panelSet("marked", [this.state.marks], () => FrameSet.fromSorted(this.state.marks.map((m) => m.frame).sort((a, b) => a - b))),
       timeRefs: () => this.state.timeRefs,
-      tlsKeylog: () => this.state.tlsKeylog,
+      prefs: () => this.dissectPrefs,
       fileId: () => ({ ino: this.loadedIno, head: this.loadedHead }),
     };
     this.panelData = new PanelData({ bin: this.sharkdBin, profile: opts.profile, env, generation, source, events: this.events });
@@ -389,6 +397,7 @@ export class Viewer extends EventEmitter {
       wiresharkAvailable: !!this.wiresharkBin,
       customColumns: [],
       tlsKeylog: null,
+      decodeAs: { entries: [], unavailable: this.extensions.unavailable },
       extensions: { active: 0, failing: 0, revision: 0 },
       panels: [],
       panelOffers: [],
@@ -520,9 +529,10 @@ export class Viewer extends EventEmitter {
    * (frame.ref_time: the time references `refs`); with `fallback`, a filter
    * that doesn't compile (its protocol is gone) is dropped and the result's
    * `filter` is "". `inPlace`: the engine read the only copy, so a kill
-   * (SIGKILL) is the memory running out, not an extension.
+   * (SIGKILL) is the memory running out, not an extension. Without
+   * `rollback`, a crash is rethrown at once, not blamed on the extensions.
    */
-  private async loadInto(engine: Sharkd, file: string, filter: string, refs: readonly number[], fallback = false, inPlace = false) {
+  private async loadInto(engine: Sharkd, file: string, filter: string, refs: readonly number[], fallback = false, inPlace = false, rollback = true) {
     const memory = (err: unknown): boolean => inPlace && err instanceof SharkdExit && err.signal === "SIGKILL";
     const once = (dropFilter: boolean) =>
       this.crashRetries(async () => {
@@ -542,7 +552,7 @@ export class Viewer extends EventEmitter {
     try {
       return await once(fallback);
     } catch (err) {
-      if (!(err instanceof SharkdExit) || !this.extensions.any() || memory(err)) throw err;
+      if (!(err instanceof SharkdExit) || !rollback || !this.extensions.any() || memory(err)) throw err;
       // Without the extensions' last change, then without any; if it still dies, they weren't the cause
       const before = this.extensions.saved();
       const steps: [RollBack, () => boolean, string][] = [
@@ -594,10 +604,10 @@ export class Viewer extends EventEmitter {
 
   /**
    * Shows what a full read found. `changed`: why packets read differently
-   * now (panels start over); `redissected`: TLS keys or extensions changed,
-   * so the tail checks its filter again (`held`: why it can't now, if
-   * typed again); `untrusted`: the tail doesn't line up with the read and
-   * goes.
+   * now (panels start over); `redissected`: TLS keys, Decode As or
+   * extensions changed, so the tail checks its filter again (`held`: why it
+   * can't now, if typed again); `untrusted`: the tail doesn't line up with
+   * the read and goes.
    */
   private applyLoad(
     file: string,
@@ -718,11 +728,12 @@ export class Viewer extends EventEmitter {
   /**
    * `dropped`: the display filter didn't apply any more (only with
    * `fallback`); `rolledBack`: extensions crashed sharkd. `redissect`: TLS
-   * keys or extensions changed. `final`: the read after the capture stopped.
-   * While full reads wait for memory, the read replaces the active engine's
-   * copy if there is no room for a second one.
+   * keys, Decode As or extensions changed. `final`: the read after the
+   * capture stopped. `rollback`: see loadInto. While full reads wait for
+   * memory, the read replaces the active engine's copy if there is no room
+   * for a second one.
    */
-  private async reloadNow(force: boolean, fallback = false, redissect = false, final = false): Promise<{ dropped: boolean; rolledBack: RollBack }> {
+  private async reloadNow(force: boolean, fallback = false, redissect = false, final = false, rollback = true): Promise<{ dropped: boolean; rolledBack: RollBack }> {
     const file = this.state.file;
     if (!file) return { dropped: false, rolledBack: false };
     const size = safeSize(file);
@@ -743,7 +754,7 @@ export class Viewer extends EventEmitter {
     const started = Date.now();
     let result: Awaited<ReturnType<Viewer["loadInto"]>>;
     try {
-      result = await this.loadInto(this.engines[target], file, this.state.filter, this.state.timeRefs, fallback, inPlace);
+      result = await this.loadInto(this.engines[target], file, this.state.filter, this.state.timeRefs, fallback, inPlace, rollback);
     } catch (err) {
       this.readStartedAt = 0;
       if (final) this.finalRead = false;
@@ -1113,7 +1124,7 @@ export class Viewer extends EventEmitter {
   private tailEngine(): Sharkd {
     const engine = new Sharkd(this.sharkdBin, this.profile, () => this.extensions.env(), () => this.extensions.generation);
     engine.onFailure = (message) => this.tailProblem(message);
-    if (this.state.tlsKeylog) engine.setPref("tls.keylog_file", this.state.tlsKeylog).catch(() => {});
+    for (const [name, value] of this.dissectPrefs) engine.setPref(name, value).catch(() => {});
     return engine;
   }
 
@@ -2195,18 +2206,89 @@ export class Viewer extends EventEmitter {
     }
     // With the reloads: a sharkd restarting meanwhile would miss the key
     await this.exclusive(async () => {
-      this.panelData.hold(true);
-      try {
-        await Promise.all(this.engines.map((e) => e.setPref("tls.keylog_file", path ?? "")));
-        this.tail?.setTlsKeylog(path);
-        this.panelData.setTlsKeylog(path);
-        this.set({ tlsKeylog: path });
-        await this.reloadNow(true, false, true);
-      } finally {
-        this.set({ epoch: this.newEpoch("tls") });
-        this.panelData.hold(false);
-      }
+      this.set({ tlsKeylog: path });
+      await this.redissectNow("tls.keylog_file", path ?? "", "tls");
     });
+  }
+
+  /**
+   * Sets a dissection preference in every sharkd, also the ones started
+   * later, and reads the open capture again with it; `why` tells panels why
+   * they start over. `rollback`: see loadInto.
+   */
+  private async redissectNow(name: string, value: string, why: string, rollback = true): Promise<void> {
+    this.panelData.hold(true);
+    this.dissectPrefs.set(name, value);
+    try {
+      await Promise.all(this.engines.map((e) => e.setPref(name, value)));
+      this.tail?.setPref(name, value);
+      this.panelData.setPref(name, value);
+      await this.reloadNow(true, false, true, false, rollback);
+    } finally {
+      this.set({ epoch: this.newEpoch(why) });
+      this.panelData.hold(false);
+      // A panel's offer may need a protocol only this brings
+      void this.checkOffers(true);
+    }
+  }
+
+  /**
+   * Changes the Decode As entries, which apply to every capture until
+   * WireBuddy exits, and reads the open capture again with them. An entry is
+   * kept only once it applied to the open capture; whatever fails leaves the
+   * entries and the view as they were.
+   */
+  decodeAs(raw: unknown, by: "user" | "agent"): Promise<DecodeAsResult> {
+    return this.exclusive(async () => {
+      const { entries, unavailable } = this.state.decodeAs;
+      if (unavailable) throw new ReportedError(`Decode As is unavailable: ${unavailable}`);
+      const change = parseChange(raw);
+      if (change.action === "set") {
+        if (!this.state.file) throw new ReportedError("Decode As needs an open capture to check the entry on; open one (or start a capture) first");
+        const name = change.protocol;
+        // Protocols (ftype 1) whose names start with `field`
+        const protocols = async (field: string) => ((await this.engine.call<{ field?: { f: string; n?: string; t?: number }[] }>("complete", { field })).field ?? []).filter((x) => x.t === 1);
+        if (!(await protocols(name)).some((x) => x.f === name)) {
+          const close = closeMatches(name, (await protocols(name[0])).filter((x) => !x.f.includes(".")));
+          const hint = close.length ? `close matches: ${close.map((x) => `${x.f}${x.n ? ` (${printable(x.n)})` : ""}`).join(", ")}` : "protocol names are the display-filter names, as in the filter bar";
+          throw new ReportedError(`"${name}" is not a protocol Wireshark knows; ${hint}`);
+        }
+      }
+      const next = applyChange(entries, change, by);
+      if (serialize(next) === serialize(entries)) return { entries, unchanged: true };
+      const entry = change.action === "set" ? next.find((e) => e.table === change.table && e.value === change.value) : undefined;
+      const removed = change.action === "clear" ? entries.find((e) => e.table === change.table && e.value === change.value) : undefined;
+      // Read again in any case (an entry replaced was undone already); its failure goes into the error
+      const restore = () => this.redissectNow(DECODE_AS, serialize(entries), "decode-as", false).then(() => "", (err: Error) => `; reading it as before failed too (${printable(err.message)})`);
+      try {
+        await this.redissectNow(DECODE_AS, serialize(next), "decode-as", false);
+      } catch (err) {
+        const again = await restore();
+        const what = entry ? `with ${entryText(entry)}` : `without ${removed ? entryText(removed) : "the Decode As entries"}`;
+        throw new Error(`reading the capture ${what} failed (${printable((err as Error).message)}); ${entry ? "the entry was not kept" : "nothing changed"}${again}`);
+      }
+      let set: DecodeAsResult["set"];
+      if (entry) {
+        const s = (await this.decodeAsStatus().catch(() => null))?.get(serialize([entry]));
+        if (s?.status !== "OK") {
+          const again = await restore();
+          if (s?.status === "no-protocol") throw new ReportedError(`Wireshark knows "${entry.protocol}" but has no dissector by that name to attach to ${entry.table} (it is only reached through another protocol); nothing changed${again}`);
+          const why = !s ? "no report from WireBuddy's prelude" : s.status === "no-table" ? `it has no table ${entry.table}` : s.message;
+          throw new ReportedError(`applying ${entryText(entry)} failed in Wireshark: ${why}; nothing changed${again}`);
+        }
+        set = { entry, was: s.was, now: s.now, frames: null };
+      }
+      this.set({ decodeAs: { ...this.state.decodeAs, entries: next } });
+      if (set) set.frames = await this.countMatching(countFilter(set.entry)).catch(() => null);
+      if (by === "agent") this.notice(set ? `Decode As: ${set.entry.table} ${set.entry.value} as ${set.now}` : removed ? `Removed Decode As ${entryText(removed)}` : "Removed all Decode As entries");
+      return { entries: next, ...(set ? { set } : {}), ...(removed ? { removed } : {}) };
+    });
+  }
+
+  /** How the active sharkd applied the Decode As entries, by entry. */
+  private async decodeAsStatus(): Promise<Map<string, EntryStatus>> {
+    const r = await this.engine.call<{ prefs?: Record<string, { s?: string }> }>("dumpconf", { pref: DECODE_AS_STATUS });
+    return parseStatus(r.prefs?.[DECODE_AS_STATUS]?.s ?? "");
   }
 
   /** Writes a subset of the open capture to a new file, like Wireshark's Export Specified Packets. */
@@ -2405,7 +2487,8 @@ export class Viewer extends EventEmitter {
     return { folder, saved, skipped };
   }
 
-  async openInWireshark(frame?: number | null): Promise<void> {
+  /** Opens the capture in Wireshark; returns what doesn't go along, or null. */
+  async openInWireshark(frame?: number | null): Promise<string | null> {
     this.requireFile();
     if (!this.wiresharkBin) throw new Error("wireshark was not found on PATH");
     // One window per click, not one per repeated request
@@ -2419,6 +2502,8 @@ export class Viewer extends EventEmitter {
     const target = frame ?? this.state.selected;
     if (target) args.push("-g", String(target));
     await launchWireshark(this.wiresharkBin, args, this.extensions.env());
+    const { entries } = this.state.decodeAs;
+    return entries.length ? `WireBuddy's Decode As entries don't go along (${entries.map(entryText).join(", ")}); use Analyze › Decode As in Wireshark` : null;
   }
 
   private remember(file: string): void {
@@ -2745,7 +2830,7 @@ export class Viewer extends EventEmitter {
       // What a failed extension registered before its error works all the same
       const protocols = loaded?.protocols ?? failed?.protocols ?? [];
       if ((!loaded && !failed?.protocols.length) || !file) return result;
-      if (this.state.tlsKeylog) await sharkd.setPref("tls.keylog_file", this.state.tlsKeylog);
+      for (const [name, value] of this.dissectPrefs) await sharkd.setPref(name, value);
       const load = await sharkd.call<{ status: string; err?: number }>("load", { file });
       if (load.status !== "OK" && load.err !== -12) throw new Error(`could not load ${file}: ${load.status}`);
       for (const proto of protocols) {

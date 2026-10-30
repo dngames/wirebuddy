@@ -234,7 +234,7 @@ export interface RowView {
   numbering: Numbering;
   /** Reads rows from a sharkd like the view's packet list does (its columns, custom ones too), counting time from the references `refs` names (the slice's numbers). */
   fetch: (engine: Sharkd, params: Record<string, unknown>, refs: RowRefs) => Promise<PacketRow[]>;
-  /** Changes whenever rows would read differently (columns, extensions, TLS keys). */
+  /** Changes whenever rows would read differently (columns, extensions, TLS keys, Decode As). */
   key: string;
 }
 
@@ -245,6 +245,8 @@ class Engine {
   file = "";
   /** The held slice's frames a filter matches, once asked for (sharkd keeps that filter's result too). */
   matches: { filter: string; local: Int32Array } | null = null;
+  /** Counts preference changes: a slice read meanwhile was read with the ones before. */
+  prefs = 0;
   private pending = 0;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -275,7 +277,7 @@ export interface TailOptions {
   file: string;
   /** Where the folder of slices goes: the capture's folder. */
   dir: string;
-  /** A sharkd set up like the view's (profile, extensions, TLS keys). */
+  /** A sharkd set up like the view's (profile, extensions, TLS keys, Decode As). */
   sharkd: () => Sharkd;
 }
 
@@ -839,13 +841,14 @@ export class LiveTail {
     return { found, to: again ? Math.min(to, again - 1) : to };
   }
 
-  /** Slices must be read with the TLS keys now in use. */
-  setTlsKeylog(path: string | null): void {
+  /** Slices must be read with the dissection preferences now in use (TLS keys, Decode As). */
+  setPref(name: string, value: string): void {
     for (const e of [this.rowsEngine, this.filterEngine]) {
       if (!e) continue;
       e.slice = null;
       e.matches = null;
-      e.sharkd.setPref("tls.keylog_file", path ?? "").catch(() => {});
+      e.prefs++;
+      e.sharkd.setPref(name, value).catch(() => {});
     }
   }
 
@@ -885,11 +888,15 @@ export class LiveTail {
     const path = join(this.dir(), `${++this.files}.pcapng`);
     try {
       await this.store.writeSlice(frames, path);
-      if (this.closed) throw new Superseded("the live view moved on");
-      const r = await engine.sharkd.call<{ status: string; err?: number }>("load", { file: path });
-      if (r.status !== "OK") throw new Error(`sharkd could not read a slice: ${r.status}`);
-      const status = await engine.sharkd.call<{ frames: number }>("status");
-      if (status.frames !== frames.length) throw new Error(`sharkd read ${status.frames} of a slice's ${frames.length} packets`);
+      // Again while preferences change during the read
+      for (let prefs = -1; prefs !== engine.prefs; ) {
+        if (this.closed) throw new Superseded("the live view moved on");
+        prefs = engine.prefs;
+        const r = await engine.sharkd.call<{ status: string; err?: number }>("load", { file: path });
+        if (r.status !== "OK") throw new Error(`sharkd could not read a slice: ${r.status}`);
+        const status = await engine.sharkd.call<{ frames: number }>("status");
+        if (status.frames !== frames.length) throw new Error(`sharkd read ${status.frames} of a slice's ${frames.length} packets`);
+      }
     } catch (err) {
       unlink(path).catch(() => {});
       throw err;

@@ -261,6 +261,23 @@ try {
     panelReq(dhost, `/_wb/api/${method}`, { method: "POST", body: JSON.stringify(body), headers: { origin: `http://${dhost}`, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-wb-doc": doc, ...headers } });
   const json = (r) => JSON.parse(r.body);
 
+  // First, so the panel engine starts after the entry is set
+  await check("panel data: Decode As reads for panels too, in an engine started after it and in a running one", async () => {
+    try {
+      assert.equal((await api("/api/open", { path: fixture })).status, 200);
+      // The fixture's HTTP runs on TCP port 18080
+      assert.equal((await api("/api/decode-as", { action: "set", table: "tcp.port", value: 18080, protocol: "data" })).status, 200);
+      const http = async () => decodePage((await call("packets", { filter: "http" })).raw).frames;
+      assert.deepEqual(await http(), []);
+      const reset = await readEvents(dhost, doc, (ev) => ev.some((e) => e.event === "reset"), () => api("/api/decode-as", { action: "clear" }));
+      assert.equal(reset.events.find((e) => e.event === "reset")?.data.why, "decode-as");
+      assert.equal((await http()).length, 4);
+    } finally {
+      await api("/api/decode-as", { action: "clear" });
+      await api("/api/close", {});
+    }
+  });
+
   await check("panel data: only from the panel's current page; nothing without a capture", async () => {
     assert.equal((await call("packets", {}, { origin: base })).status, 403);
     assert.equal((await call("packets", {}, { "sec-fetch-site": "cross-site" })).status, 403);

@@ -121,10 +121,10 @@ export function maxSeverity(fd: FrameDetail | null): ExpertSeverity | null {
   return best;
 }
 
-/** First value of each field name, taken from `fn == value` filters. */
-function firstValues(fd: FrameDetail, names: Set<string>): Map<string, string> {
+/** First value of each field name in `nodes`, taken from `fn == value` filters. */
+function firstValues(nodes: TreeNode[], names: Set<string>): Map<string, string> {
   const out = new Map<string, string>();
-  walk(fd.tree, (n) => {
+  walk(nodes, (n) => {
     if (n.fn && names.has(n.fn) && !out.has(n.fn) && n.f && n.f.length < 300) {
       const e = n.f.indexOf("==");
       if (e > 0) out.set(n.fn, n.f.slice(e + 2).trim());
@@ -136,7 +136,7 @@ function firstValues(fd: FrameDetail, names: Set<string>): Map<string, string> {
 /** Conversation filters (Ethernet, IPv4, IPv6, TCP, UDP) for a frame, like Wireshark's. */
 export function conversationFilters(fd: FrameDetail): { label: string; filter: string }[] {
   const v = firstValues(
-    fd,
+    fd.tree,
     new Set(["eth.src", "eth.dst", "ip.src", "ip.dst", "ipv6.src", "ipv6.dst", "tcp.srcport", "tcp.dstport", "udp.srcport", "udp.dstport"]),
   );
   const out: { label: string; filter: string }[] = [];
@@ -153,6 +153,24 @@ export function conversationFilters(fd: FrameDetail): { label: string; filter: s
     if (ports) out.push({ label: proto.toUpperCase(), filter: ip ? `(${ip}) && (${ports})` : ports });
   }
   return out;
+}
+
+/**
+ * The ports Decode As can take of a frame: those of its last top-level TCP
+ * or UDP layer (the inner one of tunneled traffic), with the protocol that
+ * decodes its payload now (null: none in this packet, as for a TCP segment
+ * reassembled in another) and whether it has payload at all.
+ */
+export function decodeAsPorts(fd: FrameDetail): { transport: "tcp" | "udp"; src: number; dst: number; now: string | null; payload: boolean } | null {
+  const at = fd.tree.findLastIndex((n) => n.fn === "tcp" || n.fn === "udp");
+  if (at < 0) return null;
+  const transport = fd.tree[at].fn as "tcp" | "udp";
+  const v = firstValues([fd.tree[at]], new Set([`${transport}.srcport`, `${transport}.dstport`, "tcp.len"]));
+  const [src, dst] = [v.get(`${transport}.srcport`), v.get(`${transport}.dstport`)].map(Number);
+  if (!Number.isInteger(src) || !Number.isInteger(dst)) return null;
+  // Past nodes that aren't protocols (reassembled TCP segments)
+  const next = fd.tree.slice(at + 1).find((n) => n.t === "proto");
+  return { transport, src, dst, now: next ? next.l.split(" (")[0] : null, payload: !!next || Number(v.get("tcp.len")) > 0 };
 }
 
 /** Deepest node whose byte range in source `src` covers `off`. */

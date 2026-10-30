@@ -1,5 +1,5 @@
 // Unit checks of the panel data's parts (frame sets, the layer finder, raw matches, the page format, sharkd's answer limit),
-// export runs, saved objects, the event log and the cleanup of slice folders.
+// export runs, saved objects, the event log, the cleanup of slice folders and Decode As entries.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -15,12 +15,13 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs", "decodeas"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
   await import(join(out, "units.mjs"));
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
+const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -440,6 +441,55 @@ try {
         rmSync(shared, { recursive: true, force: true });
       }
     } else console.log("skip the shared-folder check: /tmp isn't a sticky folder everyone can write");
+  });
+
+  await check("decode as: changes checked, entries replaced and capped, the prelude's report read back, close names, counting filters", () => {
+    const set = (table, value, protocol) => ({ action: "set", table, value, protocol });
+    for (const [raw, error] of [
+      [set("udp.port", 70000, "rtp"), /udp\.port takes one port, 0-65535/],
+      [set("rtp.pt", 128, "h264"), /rtp\.pt takes one payload type, 0-127/],
+      [set("udp.port", 1.5, "rtp"), /takes one port/],
+      [set("sctp.port", 1, "rtp"), /table is one of tcp\.port, udp\.port, tls\.port, rtp\.pt/],
+      [set("udp.port", 1, "rtp;dns"), /display-filter protocol name/],
+      [set("udp.port", 1, "a b"), /display-filter protocol name/],
+      [set("udp.port", 1, "_ws.malformed"), /display-filter protocol name/],
+      [{ action: "set", table: "udp.port", value: 1 }, /give table, value and protocol/],
+      [{ action: "clear", table: "udp.port" }, /give both table and value to remove one entry, or neither/],
+      [{ action: "drop" }, /action is "set" or "clear"/],
+    ]) {
+      assert.throws(() => parseChange(raw), error, JSON.stringify(raw));
+    }
+    assert.deepEqual(parseChange(set("udp.port", 50000, "RTP")), set("udp.port", 50000, "rtp"));
+    assert.deepEqual(parseChange({ action: "clear", table: null }), { action: "clear" });
+
+    const rtp = { table: "udp.port", value: 50000, protocol: "rtp", by: "user" };
+    const dns = { table: "udp.port", value: 123, protocol: "dns", by: "agent" };
+    const list = applyChange([rtp], set("udp.port", 123, "dns"), "agent");
+    assert.deepEqual(list, [rtp, dns]);
+    assert.deepEqual(applyChange(list, set("udp.port", 50000, "h264"), "agent"), [{ ...rtp, protocol: "h264", by: "agent" }, dns]);
+    assert.throws(() => applyChange(list, { action: "clear", table: "tcp.port", value: 50000 }), /no Decode As entry for tcp\.port 50000; entries: udp\.port 50000 → rtp, udp\.port 123 → dns/);
+    assert.deepEqual(applyChange(list, { action: "clear", table: "udp.port", value: 50000 }), [dns]);
+    assert.deepEqual(applyChange(list, { action: "clear" }), []);
+    const full = Array.from({ length: 50 }, (_, i) => ({ table: "tcp.port", value: i, protocol: "http", by: "user" }));
+    assert.throws(() => applyChange(full, set("tcp.port", 50, "http"), "user"), /at most 50 Decode As entries/);
+    assert.equal(applyChange(full, set("tcp.port", 49, "data"), "user").length, 50);
+    assert.ok(serialize(full).length < 4095, "within sharkd's cut");
+
+    assert.equal(serialize(list), "udp.port 50000 rtp;udp.port 123 dns");
+    const status = parseStatus(["udp.port 50000 rtp\tOK\t\tRTP", "udp.port 123 dns\tOK\tNTP x\tDNS", "udp.port 9 ssdp\tno-protocol", "udp.port 8 x\terror\tbad\u0085thing"].join("\n"));
+    assert.deepEqual(serialize(list).split(";").map((e) => status.get(e)), [{ status: "OK", was: "", now: "RTP" }, { status: "OK", was: "NTP?x", now: "DNS" }]);
+    assert.deepEqual(status.get("udp.port 9 ssdp"), { status: "no-protocol", message: "" });
+    assert.deepEqual(status.get("udp.port 8 x"), { status: "error", message: "bad?thing" });
+
+    const known = ["mq", "mqpcf", "mqtt", "mqttsn", "mtp2", "ntp"].map((f) => ({ f, n: f.toUpperCase() }));
+    assert.deepEqual(closeMatches("mtqq", known).map((c) => c.f), ["mqtt", "mtp2", "mq"]);
+    assert.deepEqual(closeMatches("zzzz", known), []);
+    // An extra letter at the end before the same distance elsewhere
+    assert.deepEqual(closeMatches("rtpp", ["rtcp", "rtmp", "rtp", "rtps", "rtsp"].map((f) => ({ f }))).map((c) => c.f), ["rtp", "rtcp", "rtmp", "rtps", "rtsp"]);
+
+    assert.equal(countFilter(rtp), "rtp && udp.port == 50000");
+    assert.equal(countFilter({ table: "rtp.pt", value: 96, protocol: "h264", by: "user" }), "h264 && rtp.p_type == 96");
+    assert.equal(countFilter({ table: "tls.port", value: 8443, protocol: "http", by: "user" }), "http && tcp.port == 8443");
   });
 
   await check("event log: questions wake a watcher but are no problems", async () => {

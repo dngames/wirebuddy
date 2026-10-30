@@ -1,6 +1,6 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
-import type { CaptureRequest, CustomColumn, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, hooks, knownFrames } from "./app.ts";
@@ -487,8 +487,9 @@ export async function closeFile(): Promise<void> {
 
 export async function openInWireshark(frame?: number | null): Promise<void> {
   try {
-    await post("api/wireshark", frame !== null && frame !== undefined ? { frame } : {});
+    const r = await post<{ note: string | null }>("api/wireshark", frame !== null && frame !== undefined ? { frame } : {});
     toast("info", frame ? `Opening packet ${frame} in Wireshark…` : "Opening in Wireshark…");
+    if (r.note) toast("info", r.note);
   } catch (e) {
     toastError(e, "Opening Wireshark failed");
   }
@@ -519,7 +520,7 @@ export async function stopCapture(): Promise<boolean> {
   }
 }
 
-// ------------------------------------------------------------ columns, tls
+// -------------------------------------------------- columns, tls, decode as
 
 /** Replaces the custom columns; false (after a toast) when the server rejects them. */
 export async function setCustomColumns(columns: CustomColumn[]): Promise<boolean> {
@@ -555,6 +556,17 @@ export async function setTlsKeylog(keylog: string | null): Promise<string | null
     // Decryption changes the dissection of the shown packet
     reloadFrame();
     return null;
+  } catch (e) {
+    return errorText(e);
+  }
+}
+
+/** Sets or clears Decode As entries; returns the result or an error message. */
+export async function changeDecodeAs(change: DecodeAsChange): Promise<DecodeAsResult | string> {
+  try {
+    const r = await post<DecodeAsResult>("api/decode-as", change);
+    if (app.conn !== "open") void refreshState();
+    return r;
   } catch (e) {
     return errorText(e);
   }

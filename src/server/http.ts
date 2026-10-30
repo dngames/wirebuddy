@@ -10,7 +10,8 @@ import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CommentResult, CustomColumn, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import { entryText } from "../shared/decodeas.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
@@ -113,9 +114,10 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
           : await viewer.deleteComments(b.frames !== undefined ? toRanges(numbers(b.frames)) : viewer.selectedOrCurrent(), "user"),
       ),
     "/api/comments/clear": async () => commentResult(await viewer.clearComments("user")),
-    "/api/wireshark": async (_q, b) => (await viewer.openInWireshark(b.frame ?? null), ok),
+    "/api/wireshark": async (_q, b) => ({ ok: true, note: await viewer.openInWireshark(b.frame ?? null) }),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
+    "/api/decode-as": (_q, b) => viewer.decodeAs(b, "user"),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
     "/api/objects/save": async (_q, b): Promise<ObjectSaveResult> => {
       const kind = objectKind(b.kind);
@@ -332,6 +334,7 @@ const ACTIONS: Record<string, string> = {
   "/api/comments/clear": "Deleting all packet comments",
   "/api/columns": "Changing the columns",
   "/api/tls": "Setting the TLS key log",
+  "/api/decode-as": "Changing Decode As",
   "/api/export": "Exporting packets",
   "/api/objects": "Listing export objects",
   "/api/objects/save": "Saving export objects",
@@ -403,6 +406,12 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
     }
     case "/api/tls":
       return { level: "INFO", text: b.keylog ? `The user set the TLS key log ${String(b.keylog)}` : "The user turned TLS decryption off" };
+    case "/api/decode-as": {
+      const r = result as DecodeAsResult;
+      if (r.unchanged) return null;
+      if (r.set) return { level: "INFO", text: `The user set Decode As ${entryText(r.set.entry)}${r.set.frames === null ? "" : ` (${r.set.frames} frames match)`}` };
+      return { level: "INFO", text: r.removed ? `The user removed Decode As ${entryText(r.removed)}` : "The user removed all Decode As entries" };
+    }
     case "/api/export": {
       const r = result as ExportResult;
       return { level: "INFO", text: `The user exported ${r.frames} packets to ${r.path}` };

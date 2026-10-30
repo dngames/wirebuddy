@@ -301,8 +301,8 @@ export function openExpertDialog(): void {
     syncLimit();
     if (!prev || (wasChecked && !limit.checked)) return;
     const newFile = st.file !== prev.file;
-    // Same file dissected again (TLS keys, live reload) changes the items too.
-    const redissected = st.tlsKeylog !== prev.tlsKeylog || st.totalFrames !== prev.totalFrames || st.fileSize !== prev.fileSize;
+    // Same file dissected again (TLS keys, Decode As, live reload) changes the items too.
+    const redissected = st.tlsKeylog !== prev.tlsKeylog || st.epoch !== prev.epoch || st.totalFrames !== prev.totalFrames || st.fileSize !== prev.fileSize;
     const filterChanged = limit.checked && st.filter !== requested;
     if (newFile || filterChanged) void load();
     else if (redissected) reloadSoon();

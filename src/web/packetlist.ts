@@ -16,6 +16,7 @@ import { agentName, app, bus, captureActive, hooks } from "./app.ts";
 import { promptDialog } from "./dialog.ts";
 import { openAskDialog } from "./dialogs/ask.ts";
 import { commentItems } from "./dialogs/comment.ts";
+import { decodeAsItem } from "./dialogs/decodeas.ts";
 import { openExportDialog } from "./dialogs/export.ts";
 import { followItems } from "./dialogs/follow.ts";
 import { conversationFilters } from "./frame.ts";
@@ -787,6 +788,7 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
     { label: "Prepare as Filter", sub: filterItems(false), disabled: !conv.length },
     SEP,
     { label: "Follow", disabled: !fd, sub: followItems(fd) },
+    decodeAsItem(fd),
     SEP,
     { label: "Copy", sub: packetCopyItems() },
     { label: n > 1 ? `Export ${n} Selected Packets…` : "Export Selected Packet…", action: () => openExportDialog("selected") },

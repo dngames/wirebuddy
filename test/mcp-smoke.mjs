@@ -12,6 +12,7 @@ import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
 import { writeAcmeCapture } from "./acme.mjs";
 import * as g from "./capgen.mjs";
+import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -66,6 +67,7 @@ try {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name);
   assert.ok(names.includes("start_capture") && names.includes("stop_capture"), "the agent starts and stops captures");
+  assert.ok(names.includes("decode_as"), "the agent decodes ports as protocols Wireshark knows");
   assert.ok(tools.find((t) => t.name === "panel").inputSchema.properties.action.enum.includes("snapshot"), "panel action snapshot");
   console.log(`tools: ${names.join(", ")}`);
 
@@ -265,7 +267,7 @@ try {
   // Time references: the user sees them with a notice; the agent's rows, fields and details count from them
   const notice = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice?.text;
   assert.ok(names.includes("time_references"));
-  assert.match(client.getInstructions() ?? "", /mark_frames, time_references, packet_comments and set_columns change what the user sees/);
+  assert.match(client.getInstructions() ?? "", /mark_frames, time_references, packet_comments, set_columns and decode_as change what the user sees/);
   await call("set_display_filter", { filter: "" });
   await call("time_references", { action: "set" }, (t, r) => assert.ok(r.isError && /give the frames to set/.test(t), t));
   await call("time_references", { action: "set", frames: [8, 4, 500] }, (t) => assert.match(t, /^Set time references on 2 frames; ignored 1 frame\(s\) beyond the 29 in the capture: 500; 2 time reference\(s\): 4, 8/));
@@ -369,6 +371,29 @@ try {
     assert.match(t, /new file needs/);
   });
 
+  // A protocol Wireshark knows on a port it doesn't expect: one decode_as call
+  const oddPorts = join(out, "odd-ports.pcap");
+  writeOddPortsCapture(oddPorts);
+  await call("open_capture", { path: oddPorts }, (t) => assert.match(t, /11 frames/));
+  await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" }, (t) => {
+    assert.match(t, /^udp\.port 50000 now decodes as RTP \(before: no dissector, so heuristics or Data\)\. 5 frames match "rtp && udp\.port == 50000"\.$/m);
+    assert.match(t, /^Decode As entries \(1, until WireBuddy exits\): udp\.port 50000 → rtp \(agent\)$/m);
+  });
+  assert.equal((await viewState()).agentNotice.text, "Decode As: udp.port 50000 as RTP");
+  await call("query_packets", { filter: "rtp" }, (t) => assert.match(t, /^5 frames match "rtp"; showing 1-5/));
+  await call("decode_as", { action: "set", table: "tcp.port", value: 18830, protocol: "mtqq" }, (t, r) => assert.ok(r.isError && /close matches: mqtt \(MQ Telemetry Transport Protocol\)/.test(t), t));
+  await call("decode_as", { action: "clear", table: "udp.port" }, (t, r) => assert.ok(r.isError && /give both table and value/.test(t), t));
+  await call("get_view_state", {}, (t) => assert.match(t, /^Decode As \(until WireBuddy exits, every capture; the user's Wireshark profile is unchanged\): udp\.port 50000 → rtp \(agent\)$/m));
+  await call("capture_summary", {}, (t) => assert.match(t, /^Decode As entries in effect: udp\.port 50000 → rtp \(agent\)$/m));
+  assert.equal((await post("/api/decode-as", { action: "set", table: "udp.port", value: 123, protocol: "dns" })).status, 200);
+  await call("decode_as", { action: "set", table: "udp.port", value: 123, protocol: "DNS" }, (t) => {
+    assert.match(t, /^udp\.port 123 already decodes as dns; nothing changed\.$/m);
+    assert.match(t, /INFO The user set Decode As udp\.port 123 → dns \(4 frames match\)/);
+  });
+  await call("decode_as", { action: "clear", table: "udp.port", value: 123 }, (t) => assert.match(t, /^Removed udp\.port 123 → dns; Wireshark decides how that port decodes again\.\n/));
+  await call("decode_as", { action: "clear" }, (t) => assert.match(t, /^Removed all Decode As entries\.\nNo Decode As entries\.$/m));
+  await call("get_view_state", {}, (t) => assert.match(t, /^Decode As: none$/m));
+
   // Teaching the viewer a protocol, the way the guide tells the agent to
   const acmeFile = join(out, "acme.pcap");
   writeAcmeCapture(acmeFile);
@@ -377,14 +402,17 @@ try {
   await call("packet_comments", { action: "add", frames: [3, 4, 5, 7], comment: "left behind" });
   await call("open_capture", { path: acmeFile }, (t) => assert.match(t, /20 frames.*; the comments edited in 4 packets and not exported were discarded$/m));
   await call("capture_summary", {}, (t) => {
-    assert.match(t, /Undecoded payload \("data"\): 20 frames/);
+    assert.match(t, /Undecoded payload \("data"\): 20 frames\. A protocol Wireshark knows on an unexpected port: decode_as decodes it in one call/);
     assert.match(t, /UDP 10\.0\.0\.1:40000 <-> 10\.0\.0\.2:50000: 20 frames/);
   });
   const guide = await call("extensions", { action: "guide" }, (t) => {
     assert.ok(t.includes(`Folder: ${extDir}/<name>/`), "the guide names the folder");
     assert.match(t, /Template, protocol on a fixed port:/);
+    // One Wireshark knows needs no template
+    assert.doesNotMatch(t, /Template, a known protocol on another port/);
+    assert.match(t, /needs no extension: the decode_as tool/);
   });
-  const template = (title) => new RegExp(`Template, ${title}:\\n([\\s\\S]*?)\\n(?:Template,|$)`).exec(guide ?? "")?.[1] ?? "";
+  const template = (title) => new RegExp(`Template, ${title}:\\n([\\s\\S]*?)\\n(?:Template,|Panels \\(|$)`).exec(guide ?? "")?.[1] ?? "";
   const addExtension = (name, lua) => {
     mkdirSync(join(extDir, name), { recursive: true });
     writeFileSync(join(extDir, name, "extension.json"), JSON.stringify({ label: name, version: "1", description: "test" }));
@@ -408,11 +436,19 @@ try {
     assert.match(t, /^  acme_gap: 19 packets, first 2$/m);
     assert.match(t, /Since previous ACME packet \(ms\): 99\.9/);
   });
-  addExtension("acme_rtp", template("a known protocol on another port"));
+  addExtension("acme_rtp", 'DissectorTable.get("udp.port"):add(50000, Dissector.get("rtp"))\n');
   await call("extensions", { action: "test", name: "acme_rtp" }, (t) => {
     // ACME bytes aren't RTP: the hierarchy shows what the extension made of them
     assert.match(t, /no protocol of its own \(like Decode As\); with it the capture decodes as:\n\s+frame > eth > ip > udp > \S+: 20 frames/);
+    assert.match(t, /^ {2}A protocol Wireshark knows on another port needs no extension: decode_as\.$/m);
   });
+  // The view's Decode As applies in the test too: it takes the extension's port over
+  await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" });
+  await call("extensions", { action: "test", name: "acme" }, (t) => {
+    assert.match(t, /^ {2}acme: 0 packets$/m);
+    assert.match(t, /WireBuddy's Decode As entries apply here too \(udp\.port 50000 → rtp\): one on this extension's port takes it over; decode_as action "clear" removes it\./);
+  });
+  await call("decode_as", { action: "clear" });
   rmSync(join(extDir, "acme_rtp"), { recursive: true });
   addExtension("acme_syntax", "local x = \n");
   await call("extensions", { action: "test", name: "acme_syntax" }, (t) => {

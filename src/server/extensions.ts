@@ -147,8 +147,52 @@ end
 -- reloads): per function its slow packets and strikes.
 local capture, slow, strikes, reported, reports, fresh = nil, {}, {}, {}, 0, true
 local reset = Proto("wirebuddy", "WireBuddy")
+-- Decode As entries and how each applied: sharkd only, so Wireshark never shows or saves them
+local gui = gui_enabled()
+if not gui then
+  reset.prefs.decode_as = Pref.string("Decode As", "", "Set by WireBuddy")
+  reset.prefs.decode_as_status = Pref.string("Decode As status", "", "Set by WireBuddy")
+end
+local applied, applied_as = {}, ""
+local function clean(x) return (tostring(x or ""):gsub("%c+", " ")) end
+-- A protocol's dissector by its name, or by its name for the table's layer (stun-udp)
+local function handle_for(name, tbl)
+  local layer = tbl:match("^([%w_]+)%.")
+  for _, n in ipairs({ name, layer and name .. "." .. layer, layer and name .. "-" .. layer, layer and name .. "_" .. layer }) do
+    local h = n and Dissector.get(n)
+    if h then return h end
+  end
+end
+-- Entries are only looked up, never run as code
+local function decode_as()
+  local want = reset.prefs.decode_as
+  if want == applied_as then return end
+  for i = #applied, 1, -1 do
+    local a = applied[i]
+    pcall(function() if a.was then a.dt:add(a.value, a.was) else a.dt:remove(a.value, a.handle) end end)
+  end
+  applied, applied_as = {}, want
+  local status = {}
+  for entry in want:gmatch("[^;]+") do
+    local tbl, value, name = entry:match("^(%S+) (%d+) (%S+)$")
+    local ok, res = pcall(function()
+      local dt = tbl and DissectorTable.get(tbl)
+      if not dt then return "no-table" end
+      local handle = handle_for(name, tbl)
+      if not handle then return "no-protocol" end
+      local v = tonumber(value)
+      local was = dt:get_dissector(v)
+      dt:add(v, handle)
+      applied[#applied + 1] = { dt = dt, value = v, was = was, handle = handle }
+      return "OK\\t" .. clean(was) .. "\\t" .. clean(handle)
+    end)
+    status[#status + 1] = entry .. "\\t" .. (ok and res or ("error\\t" .. clean(res)))
+  end
+  pcall(set_preference, "wirebuddy.decode_as_status", table.concat(status, "\\n"))
+end
 function reset.init()
   reported, reports, fresh = {}, 0, true
+  if not gui then decode_as() end
 end
 local function packet_of(a, b)
   for _, x in ipairs({ a, b }) do
@@ -366,9 +410,6 @@ function gap.dissector(tvb, pinfo, tree)
   if gaps[pinfo.number] then tree:add(gap, tvb(0, 0)):add(f_gap, gaps[pinfo.number]) end
 end
 register_postdissector(gap)
-`,
-  decodeAs: `-- A protocol Wireshark knows, on a port it doesn't expect (like Decode As)
-DissectorTable.get("udp.port"):add(50000, Dissector.get("rtp"))
 `,
 };
 
@@ -934,14 +975,13 @@ Rules and pitfalls:
   go to stderr.
 - Wireshark's Lua API: https://www.wireshark.org/docs/wsdg_html_chunked/wsluarm_modules.html
 
+Templates are for protocols Wireshark doesn't know; one it knows, on a port it doesn't expect, needs no extension: the decode_as tool.
 Template, protocol on a fixed port:
 ${TEMPLATES.port}
 Template, heuristic (recognized by content):
 ${TEMPLATES.heuristic}
 Template, post-dissector (computed field on packets decoded by others):
 ${TEMPLATES.postdissector}
-Template, a known protocol on another port:
-${TEMPLATES.decodeAs}
 Panels (a window of your own in the user's view: images, video, point clouds, charts): topic "panel".${why}`;
   }
 
@@ -982,8 +1022,8 @@ Rules:
 - No inline scripts, on*= attributes, eval or new Function (the page's policy blocks them).
 - Don't navigate or open windows: a panel that navigates is closed. One that stops responding
   for 20 s is stopped.
-- Call wb.ready() once the first view is drawn. On "reset" (another file, re-read extensions or
-  TLS keys) throw away what you read and read again.
+- Call wb.ready() once the first view is drawn. On "reset" (another file, re-read extensions, TLS
+  keys or Decode As) throw away what you read and read again.
 - Fetch data in main.js and transfer it to workers; workers can't call wb.
 
 API (global wb):

@@ -94,7 +94,7 @@ export interface PanelSource {
   view(): PanelView;
   /** Changes whenever packets already seen may read differently. */
   epoch(): number;
-  /** Why it changed last: file, closed, rewritten, extensions or tls. */
+  /** Why it changed last: file, closed, rewritten, extensions, tls or decode-as. */
   resetWhy(): string;
   file(): string | null;
   /** The view follows a capture that is running. */
@@ -107,7 +107,8 @@ export interface PanelSource {
   marked(): FrameSet;
   /** Time references, ascending: what frame.ref_time matches and time fields count from. */
   timeRefs(): readonly number[];
-  tlsKeylog(): string | null;
+  /** The dissection preferences WireBuddy set (TLS key log, Decode As), for every sharkd. */
+  prefs(): ReadonlyMap<string, string>;
   /** Inode and first bytes of the file as the view read it. */
   fileId(): { ino: number; head: Buffer };
 }
@@ -157,7 +158,6 @@ export class PanelData {
   private readonly open = new Set<string>();
   private crashes: number[] = [];
   private idleTimer: NodeJS.Timeout | null = null;
-  private keylogSet = false;
   /** Of the current load: filter checks and export object listings; frame sets by filter. */
   private readonly cache = new Map<string, unknown>();
   private readonly sets = new Map<string, unknown>();
@@ -260,14 +260,14 @@ export class PanelData {
     }
   }
 
-  /** The view is about to read with other extensions or TLS keys (true) or has (false): until then, requests wait. */
+  /** The view is about to read with other extensions, TLS keys or Decode As (true) or has (false): until then, requests wait. */
   hold(on: boolean): void {
     this.holding = on;
   }
 
-  setTlsKeylog(path: string | null): void {
-    this.keylogSet = true;
-    this.engine?.setPref("tls.keylog_file", path ?? "").catch(() => {});
+  /** A dissection preference the view now reads with; an engine started later gets it from prefs(). */
+  setPref(name: string, value: string): void {
+    this.engine?.setPref(name, value).catch(() => {});
   }
 
   close(): void {
@@ -409,8 +409,7 @@ export class PanelData {
       this.crashes = [...this.crashes.filter((t) => now - t < 60_000), now];
       if (this.crashes.length <= CRASHES_PER_MINUTE) events.add("WARNING", `Panel engine: ${printable(message)}`);
     };
-    const keylog = source.tlsKeylog();
-    if (keylog !== null || this.keylogSet) engine.setPref("tls.keylog_file", keylog ?? "").catch(() => {});
+    for (const [name, value] of source.prefs()) engine.setPref(name, value).catch(() => {});
     this.engine = engine;
     return engine;
   }
@@ -1323,7 +1322,7 @@ function sameFile(file: string, id: { ino: number; head: Buffer }): boolean {
 }
 
 function stale(epoch: number): ApiError {
-  return new ApiError(409, "stale", "the capture changed (another file, re-read extensions or TLS keys): start over", { epoch });
+  return new ApiError(409, "stale", "the capture changed (another file, re-read extensions, TLS keys or Decode As): start over", { epoch });
 }
 
 /** sharkd rejects skip: 0. */

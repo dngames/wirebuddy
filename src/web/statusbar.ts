@@ -1,15 +1,18 @@
-/** Status bar: expert LED, file, field info, panel offers, packet counts, provisional packets, marks, capture, connection. */
+/** Status bar: expert LED, file, field info, panel offers, TLS keys, Decode As, extensions, packet counts, provisional packets, marks, capture, connection. */
 
 import type { ExpertItem, ExpertSeverity, PanelOffer, ViewState } from "../shared/api.ts";
+import { entryText } from "../shared/decodeas.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
 import { agentName, app, bus, knownFrames } from "./app.ts";
 import { captureStatusText } from "./capture.ts";
+import { decodeAsMenu } from "./dialogs/decodeas.ts";
 import { maxItemSeverity, openExpertDialog } from "./dialogs/expert.ts";
 import { openExtensionsDialog } from "./dialogs/extensions.ts";
 import { openTlsDialog } from "./dialogs/tls.ts";
 import { maxSeverity, sevClass } from "./frame.ts";
 import { icon } from "./icons.ts";
+import { toggleMenuAt } from "./menu.ts";
 import { dismissOffer, openPanel } from "./panels.ts";
 import { baseName, fmtInt, fmtPct, fmtSize, h, setText, setTitle } from "./util.ts";
 import { reconnectNow } from "./ws.ts";
@@ -20,6 +23,7 @@ const MAX_OFFERS = 3;
 export function createStatusBar(): HTMLElement {
   const led = h("button", { class: "sb-led", attrs: { "aria-label": "Expert information" }, onclick: () => openExpertDialog() });
   const tlsSeg = h("button", { class: "sb-seg sb-tls", hidden: true, onclick: () => openTlsDialog() }, icon("lock"), "TLS keys");
+  const daSeg = h("button", { class: "sb-seg sb-tls sb-da", hidden: true, onclick: () => toggleMenuAt(daSeg, decodeAsMenu) });
   const extText = h("span");
   const extSeg = h("button", { class: "sb-seg sb-tls sb-ext", hidden: true, onclick: () => openExtensionsDialog() }, icon("puzzle"), extText);
   const fileSeg = h("span", { class: "sb-seg sb-file" });
@@ -56,7 +60,7 @@ export function createStatusBar(): HTMLElement {
       return;
     }
     // Only what changes dissection; filter and column changes don't.
-    const key = `${s.instance}|${s.file}|${s.fileSize}|${s.totalFrames}|${s.tlsKeylog ?? ""}|${s.extensions.revision}`;
+    const key = `${s.instance}|${s.file}|${s.fileSize}|${s.totalFrames}|${s.tlsKeylog ?? ""}|${s.extensions.revision}|${s.epoch}`;
     if (key === capKey) return;
     if (s.file !== capFile) capKnown = false;
     capKey = key;
@@ -85,6 +89,10 @@ export function createStatusBar(): HTMLElement {
     const tls = s?.tlsKeylog ?? null;
     tlsSeg.hidden = !tls;
     setTitle(tlsSeg, tls ? `Decrypting TLS with ${tls}` : "");
+    const da = s?.decodeAs.entries ?? [];
+    daSeg.hidden = !da.length;
+    setText(daSeg, `Decode As: ${da.length}`);
+    setTitle(daSeg, `Decode As, for every capture until ${APP_NAME} exits:\n${da.map((e) => `${entryText(e)} (by ${e.by === "user" ? "you" : agentName()})`).join("\n")}\nClick to remove entries.`);
     const ext = s?.extensions;
     extSeg.hidden = !ext || (!ext.active && !ext.failing);
     extSeg.classList.toggle("failing", !!ext?.failing);
@@ -203,5 +211,5 @@ export function createStatusBar(): HTMLElement {
     update();
   });
   update();
-  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), offersSeg, agentSeg, tlsSeg, extSeg, pktSeg, liveSeg, markSeg, capSeg, connSeg);
+  return h("div", { class: "statusbar", role: "status" }, led, fileSeg, errSeg, fieldSeg, h("span", { class: "sb-flex" }), offersSeg, agentSeg, tlsSeg, daSeg, extSeg, pktSeg, liveSeg, markSeg, capSeg, connSeg);
 }
