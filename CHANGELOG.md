@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Releases are published to npm from GitHub Actions, with provenance
+
 ## [0.14.0] - 2026-10-30
 
 - Decode As: decode a port as a protocol Wireshark knows, from a packet's context menu or the agent's `decode_as` tool

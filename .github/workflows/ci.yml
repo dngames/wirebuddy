@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The release runs these checks again on its tag
+  workflow_call:
   # The PPA's Wireshark moves on by itself: notice when it breaks something
   schedule:
     - cron: "17 5 * * 1"

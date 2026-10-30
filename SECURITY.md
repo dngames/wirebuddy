@@ -14,6 +14,9 @@ as soon as possible; please give us a reasonable time to fix it before disclosin
 
 Supported versions: the latest `main` and the latest release.
 
+Releases after 0.14.0 are published to npm by this repository's [release workflow](.github/workflows/release.yml)
+with provenance: each version's npm page links to the commit and the workflow run it was built from.
+
 ## Security model
 
 - **The session token is the only boundary.** It is random by default (at least 16 characters
