@@ -274,6 +274,9 @@ try {
     assert.equal(rows[0].c.length, s.columns.length);
     const bad = (await api("/api/columns", { columns: [{ field: "no.such.field", title: "" }] })).json;
     assert.equal(bad.ok, false);
+    const column = (await api("/api/columns", { columns: [{ field: "_ws.col.info", title: "" }] })).json;
+    assert.equal(column.ok, false);
+    assert.match(column.error, /"_ws\.col\.info" is a packet list column, not a field; custom columns take protocol fields such as http\.request\.uri/);
     assert.equal((await api("/api/columns", { columns: [] })).json.ok, true);
     assert.equal((await api("/api/state")).json.customColumns.length, 0);
   });

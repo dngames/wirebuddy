@@ -231,6 +231,25 @@ try {
     assert.deepEqual(await size(), before);
   });
 
+  await check("browser: a panel restored after the window narrowed comes back into view", async () => {
+    const pn = "document.querySelector('.dlg-panel')";
+    const button = (label) => `[...${pn}.querySelectorAll('.dlg-footer button')].find((b) => b.textContent === '${label}')`;
+    try {
+      await click(...center(await box(button("Maximize"))));
+      await until("the panel maximized", () => evaluate(`${pn}.classList.contains('pn-max')`));
+      await cdp("Emulation.setDeviceMetricsOverride", { width: 600, height: 500, deviceScaleFactor: 1, mobile: false });
+      await until("the narrower window", async () => (await evaluate("window.innerWidth")) === 600);
+      await click(...center(await box(button("Restore"))));
+      await until("the panel restored inside the window", async () => {
+        const r = await box(pn);
+        return !(await evaluate(`${pn}.classList.contains('pn-max')`)) && r.left >= 0 && r.right <= 600 && r.top >= 0 && r.bottom <= 500;
+      });
+    } finally {
+      await cdp("Emulation.clearDeviceMetricsOverride");
+      if (await evaluate(`${pn}?.classList.contains('pn-max')`)) await click(...center(await box(button("Restore"))));
+    }
+  });
+
   // A failed check must not leave its dialog over the next one
   const closeDialog = async () => {
     if (await evaluate("!!document.querySelector('.dlg-ask, .dlg-export')")) await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
@@ -511,6 +530,43 @@ try {
       if (await evaluate("!!document.querySelector('.dlg-decodeas')")) await key("Escape", "Escape", 27);
       await call("decode_as", { action: "clear" });
       await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
+    }
+  });
+
+  const innerWidth = () => evaluate("window.innerWidth");
+  // Counted after the dialogs' own listener, so a count means it ran
+  await evaluate("window.resizes = 0; addEventListener('resize', () => window.resizes++)");
+  /** Emulates a window of `width` x `height` (none: the real one) and waits for the page's resize event. */
+  const resizeTo = async (width, height) => {
+    const seen = await evaluate("window.resizes");
+    await (width ? cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }) : cdp("Emulation.clearDeviceMetricsOverride"));
+    await until("the resize", async () => (await evaluate("window.resizes")) > seen);
+  };
+
+  await check("browser: a dialog the narrowed window cuts off moves back into view; one dragged aside stays aside", async () => {
+    const dlg = "document.querySelector('.dlg-tls')";
+    try {
+      await fromMenuBar("Tools", "TLS Keys…");
+      await until("the dialog", () => evaluate(`!!${dlg}`));
+      const wide = await box(dlg);
+      await resizeTo(Math.round(wide.right) - 100, 600);
+      const r = await box(dlg);
+      assert.ok(r.left >= 0 && r.right <= (await innerWidth()) && r.top >= 0 && r.bottom <= 600, JSON.stringify(r));
+      const decrypt = await box(`[...${dlg}.querySelectorAll('button')].find((b) => b.textContent === 'Decrypt')`);
+      assert.ok(decrypt.right <= (await innerWidth()), JSON.stringify(decrypt));
+      // A wider window moves nothing
+      await resizeTo();
+      assert.equal((await box(dlg)).left, r.left);
+      // Dragged aside, as startDrag allows: it keeps its 40px strip
+      const full = await innerWidth();
+      await evaluate(`${dlg}.style.left = '${full - 40}px'`);
+      await resizeTo(full - 200, 600);
+      assert.equal(Math.round((await box(dlg)).left), full - 240);
+      await resizeTo();
+      assert.equal(Math.round((await box(dlg)).left), full - 240);
+    } finally {
+      await cdp("Emulation.clearDeviceMetricsOverride");
+      if (await evaluate(`!!${dlg}`)) await key("Escape", "Escape", 27);
     }
   });
 

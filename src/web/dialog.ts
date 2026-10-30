@@ -6,6 +6,9 @@ import { clamp, h, isTextInput } from "./util.ts";
 
 const open: Dialog[] = [];
 const Z_BASE = 900;
+/** What a dialog dragged aside keeps in the window: a strip of its side, or its title bar. */
+const KEEP_X = 40;
+const KEEP_Y = 30;
 
 /** Stacks dialogs by their order in `open`, staying below menus and toasts. */
 function restack(): void {
@@ -90,6 +93,7 @@ export class Dialog {
 
   show(focus?: HTMLElement | null): void {
     watchMainFocus();
+    watchResize();
     const active = document.activeElement;
     this.returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     document.body.appendChild(this.overlay);
@@ -129,6 +133,13 @@ export class Dialog {
     return !this.closed;
   }
 
+  /** Moves the window the least distance that shows all of it, as far as it fits. */
+  keepInView(): void {
+    const r = this.win.getBoundingClientRect();
+    if (r.left < 0 || r.right > window.innerWidth) this.win.style.left = `${clamp(r.left, 4, window.innerWidth - r.width - 4)}px`;
+    if (r.top < 0 || r.bottom > window.innerHeight) this.win.style.top = `${clamp(r.top, 4, window.innerHeight - r.height - 4)}px`;
+  }
+
   private startDrag(e: PointerEvent): void {
     if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
@@ -140,8 +151,8 @@ export class Dialog {
     const dx = e.clientX - r.left;
     const dy = e.clientY - r.top;
     const move = (ev: PointerEvent): void => {
-      this.win.style.left = `${clamp(ev.clientX - dx, 40 - r.width, window.innerWidth - 40)}px`;
-      this.win.style.top = `${clamp(ev.clientY - dy, 0, window.innerHeight - 30)}px`;
+      this.win.style.left = `${clamp(ev.clientX - dx, KEEP_X - r.width, window.innerWidth - KEEP_X)}px`;
+      this.win.style.top = `${clamp(ev.clientY - dy, 0, window.innerHeight - KEEP_Y)}px`;
     };
     const up = (): void => {
       document.body.classList.remove("dlg-moving");
@@ -166,6 +177,26 @@ function watchMainFocus(): void {
   document.addEventListener("focusin", (e) => {
     const t = e.target;
     if (t instanceof HTMLElement && !t.closest(".dlg, .menu")) mainFocus = t;
+  });
+}
+
+/** The window's size at the last resize. */
+let viewport: { w: number; h: number } | null = null;
+
+/** As the window shrinks, dialogs it showed whole stay whole, and ones dragged aside keep what dragging keeps. */
+function watchResize(): void {
+  if (viewport) return;
+  viewport = { w: window.innerWidth, h: window.innerHeight };
+  window.addEventListener("resize", () => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const was = viewport!;
+    for (const d of open) {
+      const r = d.win.getBoundingClientRect();
+      if (w < was.w && r.right > w) d.win.style.left = `${r.right <= was.w ? clamp(r.left, 4, w - r.width - 4) : clamp(r.left, KEEP_X - r.width, w - KEEP_X)}px`;
+      if (h < was.h && r.bottom > h) d.win.style.top = `${r.bottom <= was.h ? clamp(r.top, 4, h - r.height - 4) : clamp(r.top, 0, h - KEEP_Y)}px`;
+    }
+    viewport = { w, h };
   });
 }
 

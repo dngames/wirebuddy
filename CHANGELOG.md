@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 - Releases are published to npm from GitHub Actions, with provenance
 - Decode As suggests close matches for a protocol name misspelt in its first letter too
+- A packet list column given as a field (`_ws.col.info`) is refused with a hint instead of crashing sharkd
+- Dialogs move back into view when the window gets narrower
 
 ## [0.14.0] - 2026-10-30
 

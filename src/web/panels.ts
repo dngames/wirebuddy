@@ -151,6 +151,8 @@ function open(p: PanelState): void {
     w.maximized = !w.maximized;
     dialog.win.classList.toggle("pn-max", w.maximized);
     maxBtn.textContent = w.maximized ? "Restore" : "Maximize";
+    // The window may have shrunk while it was maximized
+    if (!w.maximized) dialog.keepInView();
   });
   dialog.button("Close", () => dialog.close(), { primary: true });
   dialog.onClose = () => {

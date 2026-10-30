@@ -138,6 +138,9 @@ try {
     assert.match(t, /^No\. \| http\.request\.uri \| http\.response\.code$/m);
     assert.match(t, /^25 \| \/nothere \| 404$/m);
   });
+  // sharkd reads these empty, and next to another column it can abort
+  await call("query_packets", { filter: "http", fields: ["frame.number", "_ws.col.info"] }, (t, r) => assert.ok(r.isError && /"_ws\.col\.info" is a packet list column, not a field; without fields, the rows hold the packet list's columns/.test(t), t));
+  await call("set_columns", { columns: [{ field: "_ws.col.protocol" }] }, (t, r) => assert.ok(r.isError && /"_ws\.col\.protocol" is a packet list column, not a field; custom columns take protocol fields such as http\.request\.uri/.test(t), t));
   await call("set_columns", { columns: [{ field: "http.response.code" }] }, (t) => assert.match(t, /\| Status Code$/));
   await call("get_view_state", {}, (t) => {
     assert.match(t, /Custom columns: Status Code \(http\.response\.code\)/);

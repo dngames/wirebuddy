@@ -427,6 +427,8 @@ try {
     const unknown = await bad({ filter: "wbpc.scan == 1" }, 400, "filter", /not a valid protocol/);
     assert.match(unknown.hint, /extensions action "reload"/);
     await bad({ fields: ["nosuch.field"] }, 400, "bad-args", /unknown field "nosuch.field"/);
+    await bad({ fields: ["frame.number", "_ws.col.info"] }, 400, "bad-args", /"_ws\.col\.info" is a packet list column, not a field/);
+    await bad({ bytes: "_ws.col.info" }, 400, "bad-args", /bytes: "_ws\.col\.info" is a packet list column, not a field/);
     await bad({ epoch: 12345 }, 409, "stale");
   });
 

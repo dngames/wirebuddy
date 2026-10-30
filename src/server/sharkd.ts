@@ -3,6 +3,8 @@ import { printable } from "./text.ts";
 
 /** sharkd silently drops request lines of 8 KiB or more. */
 export const MAX_REQUEST_BYTES = 8190;
+/** The packet list's columns as fields (_ws.col.info): sharkd reads them empty, and next to another column it can abort. */
+export const COLUMN_FIELD = /^_ws\.col(\.|$)/;
 /** A request this slow means sharkd is wedged; it is restarted. */
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Of a stderr line without an end (a plugin writing on and on), only this much is kept. */

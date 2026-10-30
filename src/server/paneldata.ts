@@ -21,7 +21,7 @@ import type { Ranges } from "../shared/ranges.ts";
 import type { EventLog } from "./events.ts";
 import { FrameStore } from "./framestore.ts";
 import { findLayer, parse, Parsed, type Layer } from "./layers.ts";
-import { matchingFrames, Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
+import { COLUMN_FIELD, matchingFrames, Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
 import { printable } from "./text.ts";
 import { framesWithRefs, refBefore, refsOf, refTimeError, refTimeFilter } from "./timerefs.ts";
 import { encodePage, type PageRow } from "./wbpk.ts";
@@ -1365,5 +1365,6 @@ function list(v: unknown, name: string, max: number): string[] {
 
 function fieldName(f: string, name: string): string {
   if (!FIELD_NAME.test(f)) throw new ApiError(400, "bad-args", `${name}: "${printable(f).slice(0, 60)}" is not a field name`);
+  if (COLUMN_FIELD.test(f)) throw new ApiError(400, "bad-args", `${name}: "${f}" is a packet list column, not a field`);
   return f;
 }

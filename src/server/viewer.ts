@@ -4,7 +4,7 @@ import { closeSync, createReadStream, openSync, readFileSync, readSync, statSync
 import { basename, dirname, resolve } from "node:path";
 import type { Transform } from "node:stream";
 import { createGunzip, createZstdDecompress } from "node:zlib";
-import { matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
+import { COLUMN_FIELD, matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
@@ -1370,7 +1370,7 @@ export class Viewer extends EventEmitter {
    */
   async extract(filter: string, fields: string[], offset: number, limit: number): Promise<{ total: number; rows: { num: number; values: string[] }[] }> {
     this.requireFile();
-    await this.checkFields(fields);
+    await this.checkFields(fields, "without fields, the rows hold the packet list's columns");
     const check = await this.checkFilter(filter);
     if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
     const refs = this.state.timeRefs;
@@ -1395,12 +1395,14 @@ export class Viewer extends EventEmitter {
     return (from, to) => refsOf(refs, frames.subarray(from, to));
   }
 
-  private async checkFields(fields: string[]): Promise<void> {
+  /** Throws for a field sharkd can't give values of; `instead` says what to do for a packet list column. */
+  private async checkFields(fields: string[], instead: string): Promise<void> {
     if (!fields.length) throw new Error("no fields given");
     for (const f of fields) {
       if (!FIELD_NAME.test(f)) throw new Error(`"${f}" is not a field name`);
       const r = await this.checkFilter(f);
       if (!r.ok) throw new Error(`unknown field "${f}": ${r.error}`);
+      if (COLUMN_FIELD.test(f)) throw new Error(`"${f}" is a packet list column, not a field; ${instead}`);
     }
   }
 
@@ -1409,7 +1411,7 @@ export class Viewer extends EventEmitter {
     return this.exclusive(async () => {
       if (columns.length > MAX_CUSTOM_COLUMNS) return { ok: false, error: `at most ${MAX_CUSTOM_COLUMNS} custom columns` };
       try {
-        if (columns.length) await this.checkFields(columns.map((c) => c.field));
+        if (columns.length) await this.checkFields(columns.map((c) => c.field), "custom columns take protocol fields such as http.request.uri");
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
