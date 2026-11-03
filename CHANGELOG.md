@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-03
+
 - Now: in a live capture, tap the flag (or N) to have the agent look at what just happened, or hold it to flag a span, marked with packet comments
 - A packet the agent shows during a live capture stays in view: auto-scroll pauses until the next capture
 
@@ -84,7 +86,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/dngames/wirebuddy/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/dngames/wirebuddy/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/dngames/wirebuddy/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/dngames/wirebuddy/compare/v0.12.0...v0.13.0
