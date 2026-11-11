@@ -23,14 +23,17 @@ with provenance: each version's npm page links to the commit and the workflow ru
   when you set one). Anyone or anything holding the viewer URL with its token can do everything
   the UI can, starting a capture included. That covers an AI agent that also has a shell or
   controls the browser pane: give WireBuddy only to agents you trust.
-- The server binds to `127.0.0.1` only. API requests need the token in an `X-WireBuddy-Token`
-  header, compared in constant time; the WebSocket takes it in its URL.
+- The server binds to the loopback addresses only: `127.0.0.1`, and the same port on `::1` where
+  the machine has it, so that no other program can answer there for the `localhost` names
+  browsers also resolve to it (the panels' hosts among them). API requests need the token in an
+  `X-WireBuddy-Token` header, compared in constant time; the WebSocket takes it in its URL.
 - Requests with a foreign `Host` header (DNS rebinding), any `Origin` but the server's own
   (`null` included) or a non-JSON body are rejected. The UI is served with a Content Security
   Policy, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 - The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
   into WireBuddy's capture folder. They can open any capture file the user can read, read
-  packets, change the filter, selection, marks and columns, open Wireshark, and write new
+  packets, change the filter, selection, marks, time references, packet comments, columns and
+  Decode As entries, open, reload and close panels, open Wireshark, and write new
   `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
   file, except one the agent exported itself in the same session and WireBuddy's own record of
   switched-off extensions.

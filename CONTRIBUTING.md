@@ -11,7 +11,7 @@ test also uses `ping`, `curl` and `python3`.
 
 ```bash
 npm install
-npm run build        # bundles src/server → dist/server and src/web → dist/web
+npm run build        # bundles src/server → dist/server, src/web → dist/web and src/panel → dist/panel
 npm start            # prints the UI URL
 ```
 
@@ -24,6 +24,8 @@ There is no watch mode yet: rerun `npm run build` and restart the server after a
 | `src/shared/api.ts` | The HTTP/WebSocket contract between server and UI — start here |
 | `src/server/` | Node server: `sharkd` client, `dumpcap` capture control, view state, HTTP/WS, MCP tools, the event log for the agent and `--watch` |
 | `src/web/` | The browser UI: vanilla TypeScript and DOM, no framework, no runtime dependencies; `commands.ts` holds the menu bar, toolbar and shortcut commands |
+| `src/panel/` | The bridge script and base style every extension panel loads (`wb`), built to `dist/panel` |
+| `examples/` | Example extensions with panels, and the investigations the README walks through |
 | `test/` | Smoke tests that drive the real server, plus the fixture capture |
 | `scripts/media/` | Records the README demo and screenshot |
 | `.github/` | CI workflow, issue and pull request templates |
@@ -34,12 +36,15 @@ There is no watch mode yet: rerun `npm run build` and restart the server after a
 npm run typecheck
 npm run build
 npm test             # unit checks, then the HTTP API, MCP tools and panels against test/fixtures/http.pcapng
+npm run test:browser # the page, panels and the examples in headless Chrome (if anything in src/web, src/panel or examples changed)
 npm run test:live    # live capture on the loopback interface (needs dumpcap permission)
 ```
 
 The tests run their servers with an empty home folder, so your Wireshark settings don't change
-the results. Without `dumpcap` permission `npm test` skips its capture checks. CI runs the same
-steps.
+the results. Without `dumpcap` permission `npm test` skips its capture checks, and without
+Chrome or Chromium (`CHROME=<path>` names one) the browser checks are skipped. CI runs these
+steps with both, and `npm run test:examples` and `npm run test:package` too; there a missing
+Chrome fails.
 
 ## Guidelines
 

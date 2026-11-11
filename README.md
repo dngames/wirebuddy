@@ -126,7 +126,7 @@ Options (`--help` shows the same):
 
 | Option | Environment | |
 |---|---|---|
-| `--port <n>` | `WIREBUDDY_PORT` | HTTP port on 127.0.0.1; default 8765, falls back to a free one |
+| `--port <n>` | `WIREBUDDY_PORT` | HTTP port on 127.0.0.1 (and `::1`); default 8765, falls back to a free one |
 | `--token <t>` | `WIREBUDDY_TOKEN` | session token, at least 16 characters; default random. Prefer the variable: other local users can see command lines in `ps` |
 | `--capture-dir <dir>` | `WIREBUDDY_CAPTURE_DIR` | where live captures go; default `~/.local/share/wirebuddy/captures` |
 | `--profile <name>` | `WIREBUDDY_PROFILE` | Wireshark configuration profile for dissection and Open in Wireshark |
@@ -404,15 +404,17 @@ the questions you asked it.
   token can do everything you can in the UI, starting a capture included. That covers an AI agent
   that also has a shell or controls the browser pane: give WireBuddy only to agents you trust,
   and don't share the URL.
-- The server listens on `127.0.0.1` only. API calls need the random per-session token in an
-  `X-WireBuddy-Token` header (the WebSocket takes it in its URL); it is compared in constant time.
+- The server listens on the loopback addresses only (`127.0.0.1`, and the same port on `::1`
+  where there is one). API calls need the random per-session token in an `X-WireBuddy-Token`
+  header (the WebSocket takes it in its URL); it is compared in constant time.
 - Requests with a foreign `Host` (DNS rebinding), any `Origin` but the server's own (`null`
   included) or a body that isn't JSON are refused. The page has a Content Security Policy.
 - The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
   into WireBuddy's capture folder. They can open any capture file you can read, read packets,
   change the filter, marks, time references, packet comments, selection, columns and Decode As
-  entries, open Wireshark, and write new `.pcap`/`.pcapng` exports where you can write; an
-  existing file is never replaced unless the agent exported it itself in the same session.
+  entries, open and close panels, open Wireshark, and write new `.pcap`/`.pcapng` exports where
+  you can write; an existing file is never replaced unless the agent exported it itself in the
+  same session.
 - File › Export Objects and `export_objects` save files from the traffic, whose names and
   contents a sender chose, only into a new folder they create (`http-objects`, `http-objects-2`,
   …) in a directory you or the agent name, under names of their own (`f12-report.pdf`). No other

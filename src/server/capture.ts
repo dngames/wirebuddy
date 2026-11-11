@@ -34,10 +34,14 @@ function interfaceSignature(): string {
   }
 }
 
+/** Files of a capture the state lists. */
+const MAX_FILES_LISTED = 100;
+
 function positiveInt(value: unknown, name: string): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   const n = Number(value);
-  if (!Number.isInteger(n) || n <= 0) throw new Error(`${name} must be a positive integer`);
+  // dumpcap takes 32-bit numbers
+  if (!Number.isInteger(n) || n <= 0 || n > 0x7fffffff) throw new Error(`${name} must be a positive integer`);
   return n;
 }
 
@@ -75,6 +79,7 @@ export class Capture extends EventEmitter {
       promiscuous: true,
       currentFile: null,
       files: [],
+      filesWritten: 0,
       dir,
       startedAt: null,
       packets: 0,
@@ -157,6 +162,7 @@ export class Capture extends EventEmitter {
       status: "starting",
       currentFile: null,
       files: [],
+      filesWritten: 0,
       startedAt: Date.now(),
       packets: 0,
       error: null,
@@ -173,7 +179,8 @@ export class Capture extends EventEmitter {
       const file = /File: (.+)$/.exec(line.trim());
       if (file && file[1] !== this.state.currentFile) {
         const status = this.stopRequested ? "stopping" : "running";
-        this.update({ status, currentFile: file[1], files: [...this.state.files, file[1]] });
+        // The state goes to every page with each change: a capture in new files for days lists its newest
+        this.update({ status, currentFile: file[1], files: [...this.state.files, file[1]].slice(-MAX_FILES_LISTED), filesWritten: this.state.filesWritten + 1 });
         this.emit("file", file[1]);
         // A SIGINT sent before dumpcap was capturing can get lost
         if (this.stopRequested) proc.kill("SIGINT");

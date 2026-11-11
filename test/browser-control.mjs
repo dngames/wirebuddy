@@ -15,14 +15,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
+import { chromeOrSkip } from "./chrome.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const chromeBin = process.env.CHROME ?? "/usr/bin/google-chrome";
-if (!existsSync(chromeBin)) {
-  console.log(`skip: no Chrome at ${chromeBin} (set CHROME)`);
-  process.exit(0);
-}
+const chromeBin = chromeOrSkip();
+if (!chromeBin) process.exit(0);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
@@ -131,7 +129,8 @@ try {
 
   assert.match((await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") })).text, /29 frames/);
   await cdp("Page.navigate", { url: ui.href });
-  await until("the viewer", async () => !/No WireBuddy viewer is open/.test((await call("get_view_state")).text));
+  // The page's own word for it: tool results remind of a missing viewer only now and then
+  await until("the viewer", () => evaluate("!!document.querySelector('.sb-conn.open')"), 30_000);
   const opened = await call("panel", { action: "open", name: "clicker", wait_ms: 10_000 });
   const statusText = async () => (await state()).panels.find((p) => p.name === "clicker")?.statusText;
 

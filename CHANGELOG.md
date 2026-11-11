@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [0.14.1] - 2026-10-30
 
-- Releases are published to npm from GitHub Actions, with provenance
+- A release workflow publishes to npm from GitHub Actions, with provenance, from the next release on
 - Decode As suggests close matches for a protocol name misspelt in its first letter too
 - A packet list column given as a field (`_ws.col.info`) is refused instead of coming back empty or crashing sharkd
 - Dialogs move back into view when the window gets smaller
