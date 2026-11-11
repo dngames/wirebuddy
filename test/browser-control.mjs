@@ -9,7 +9,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -593,6 +593,262 @@ try {
     } finally {
       if (await evaluate("!!document.querySelector('.dlg-decodeas')")) await key("Escape", "Escape", 27);
       await evaluate(`${scroller}.scrollTop = 0`);
+    }
+  });
+
+  const post = async (path, body = {}) => {
+    const r = await fetch(new URL(path, ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: JSON.stringify(body) });
+    return { status: r.status, json: await r.json().catch(() => null) };
+  };
+  const get = async (path) => (await fetch(new URL(path, ui.origin), { headers: { "X-WireBuddy-Token": token } })).json();
+  const dblclick = async (x, y) => {
+    await click(x, y);
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 2 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 2 });
+  };
+  const inDialog = (cls) => evaluate(`!!document.activeElement?.closest('.${cls}')`);
+  /** The page's requests are logged in window.__reqs; answers to those whose URL matches a key of `delays` come after that many ms. */
+  const spyFetch = (delays = {}) =>
+    evaluate(`(() => {
+      const f = window.fetch;
+      (window.__spied ??= []).push(f);
+      window.__reqs = [];
+      window.__replied = [];
+      window.fetch = async (url, init) => {
+        const u = String(url);
+        window.__reqs.push({ u, body: init?.body ?? null });
+        const ms = Object.entries(${JSON.stringify(delays)}).find(([k]) => new RegExp(k).test(u))?.[1];
+        const r = await f(url, init);
+        if (ms) await new Promise((done) => setTimeout(done, ms));
+        window.__replied.push(u);
+        return r;
+      };
+    })()`);
+  const unspyFetch = () => evaluate("window.__spied?.length && (window.fetch = window.__spied.pop())");
+  const requests = (part) => evaluate(`JSON.stringify(window.__reqs.filter((r) => r.u.includes(${JSON.stringify(part)})))`).then(JSON.parse);
+  const closeButton = (cls) => evaluate(`[...document.querySelectorAll('.${cls} .dlg-footer button')].find((b) => b.textContent === 'Close')?.click()`);
+
+  await check("browser: with Go to Packet open, Tab and Shift+Tab stay in the dialog and focus sent behind it comes back", async () => {
+    // As rawKeyDown and keyUp, which is what moves the focus
+    const tab = async (modifiers = 0) => {
+      await cdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, modifiers });
+      await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, modifiers });
+    };
+    try {
+      // A menu left open by an earlier check would take the keys
+      if (await evaluate("!!document.querySelector('.menu-item')")) await key("Escape", "Escape", 27);
+      await evaluate("document.querySelector('.pl-scroll').focus()");
+      await key("g", "KeyG", 71, 2);
+      await until("the dialog", () => inDialog("dlg-goto"));
+      for (let n = 1; n <= 9; n++) {
+        await tab();
+        assert.equal(await inDialog("dlg-goto"), true, `Tab ${n} left the dialog`);
+      }
+      for (let n = 1; n <= 9; n++) {
+        await tab(8);
+        assert.equal(await inDialog("dlg-goto"), true, `Shift+Tab ${n} left the dialog`);
+      }
+      await evaluate("document.querySelector('.fb-input').focus()");
+      assert.equal(await inDialog("dlg-goto"), true, "the focus stayed behind the dialog");
+    } finally {
+      if (await evaluate("!!document.querySelector('.dlg-goto')")) await key("Escape", "Escape", 27);
+      await until("the dialog to close", () => evaluate("!document.querySelector('.dlg-goto')"));
+    }
+  });
+
+  await check("browser: a click on a URL in the details opens nothing and a double-click opens it; a frame number link jumps on one click", async () => {
+    const frameWithUrl = async () => {
+      const hasUrl = (nodes) => (nodes ?? []).some((n) => (n.t === "url" && /^https?:/.test(n.url ?? "")) || hasUrl(n.n));
+      for (let frame = 1; frame <= 29; frame++) if (hasUrl((await get(`/api/frame?num=${frame}`)).tree)) return frame;
+      return 0;
+    };
+    const findLink = async (selector) => {
+      await evaluate("document.querySelector('.vl.dt').scrollTop = 0");
+      await until(selector, async () => {
+        if (await box(selector)) return true;
+        await evaluate("document.querySelector('.vl.dt').scrollTop += 100");
+        return false;
+      });
+      await evaluate(`${selector}.scrollIntoView({ block: 'center' })`);
+      await sleep(200);
+      return center(await box(selector));
+    };
+    await evaluate("window.__open = window.open; window.__opened = []; window.open = (url) => (window.__opened.push(url), null)");
+    try {
+      const frame = await frameWithUrl();
+      assert.ok(frame, "the fixture has a frame with a URL field");
+      await post("/api/select", { frame });
+      await until("its details", () => evaluate(`document.querySelector('.dt-label')?.textContent.startsWith('Frame ${frame}:') === true`));
+      await evaluate("document.querySelector('.vl.dt').focus()");
+      // Ctrl+Right expands everything
+      await key("ArrowRight", "ArrowRight", 39, 2);
+      const url = "document.querySelector('.dt-link[title^=\"Double-click to open\"]')";
+      await click(...(await findLink(url)));
+      await sleep(300);
+      assert.deepEqual(await evaluate("window.__opened"), []);
+      await dblclick(...center(await box(url)));
+      await until("the URL to open", () => evaluate("window.__opened.length === 1"));
+      assert.match(await evaluate("window.__opened[0]"), /^https?:\/\//);
+      // E.g. "Response in frame: N"
+      const link = "document.querySelector('.dt-link[title^=\"Go to packet\"]')";
+      const [x, y] = await findLink(link);
+      const to = Number(await evaluate(`${link}.title.replace(/\\D+/g, '')`));
+      await click(x, y);
+      await until(`frame ${to} selected`, async () => (await state()).selected === to);
+    } finally {
+      await evaluate("window.open = window.__open");
+    }
+  });
+
+  await check("browser: the export dialog says no such directory without asking to replace, asks only for a file that exists, names the packet it opened for, and says when the packet list changed", async () => {
+    const exists = join(home, "exists.pcapng");
+    writeFileSync(exists, "x");
+    const setPath = (p) => evaluate(`(() => { const i = document.querySelector('.ex-path'); i.value = ${JSON.stringify(p)}; i.dispatchEvent(new Event('input')); })()`);
+    const exportIt = async () => click(...center(await box("document.querySelector('.dlg-export button.primary')")));
+    const err = () => evaluate("(() => { const e = document.querySelector('.dlg-export .of-err'); return e && !e.hidden ? e.textContent : ''; })()");
+    const open = async () => {
+      await post("/api/select", { frame: 4 });
+      await until("frame 4 selected", async () => (await state()).selected === 4);
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      await fromMenu(4, "Export Selected Packet");
+      await until("the export dialog", () => evaluate("!!document.querySelector('.dlg-export')"));
+    };
+    try {
+      await open();
+      await setPath(join(home, "nonexistent", "x.pcapng"));
+      await exportIt();
+      await until("the error", async () => !!(await err()));
+      assert.match(await err(), /no such directory/);
+      assert.equal(await evaluate("!!document.querySelector('.confirm-text')"), false, "asked to replace a file that isn't there");
+      await setPath(exists);
+      await exportIt();
+      await until("the replace question", () => evaluate("document.querySelector('.confirm-text')?.textContent === 'exists.pcapng already exists. Replace it?'"));
+      await key("Escape", "Escape", 27);
+      await until("the question to close", () => evaluate("!document.querySelector('.confirm-text')"));
+      // Another packet is selected meanwhile: the dialog exports the one it showed
+      await post("/api/select", { frame: 9 });
+      await until("frame 9 selected", async () => (await state()).selected === 9);
+      await setPath(join(home, "sel.pcapng"));
+      await spyFetch();
+      await exportIt();
+      await until("the export request", async () => (await requests("api/export")).length > 0);
+      const sent = JSON.parse((await requests("api/export"))[0].body);
+      assert.equal(sent.which, "selected");
+      assert.equal(sent.about.frame, 4);
+      assert.equal(sent.about.view.filter, "");
+      await unspyFetch();
+      // A successful export closes the dialog
+      await sleep(500);
+      if (!(await evaluate("!!document.querySelector('.dlg-export')"))) await open();
+      await post("/api/filter", { filter: "tcp" });
+      await until("the filter", async () => (await state()).filter === "tcp");
+      await setPath(join(home, "sel2.pcapng"));
+      await exportIt();
+      await until("the packet list's change", async () => /The packet list changed since this opened/.test(await err())).catch(async (e) => {
+        throw new Error(`${e.message}; error: ${await err()}; toasts: ${await toasts()}`);
+      });
+    } finally {
+      if (await evaluate("!!document.querySelector('.confirm-text')")) await key("Escape", "Escape", 27);
+      await closeDialog();
+      await post("/api/filter", { filter: "" });
+      await until("no filter", async () => (await state()).filter === "");
+    }
+  });
+
+  await check("browser: text typed after Enter keeps its own state when the earlier filter apply comes back", async () => {
+    const typeFilter = (text) => evaluate(`(() => { const i = document.querySelector('.fb-input'); i.focus(); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input')); })()`);
+    const classes = () => evaluate("document.querySelector('.fb-box').className");
+    try {
+      await spyFetch({ "api/filter$": 1500 });
+      await typeFilter("tcp");
+      await key("Enter", "Enter", 13);
+      await until("the apply to be asked", async () => (await requests("api/filter")).some((r) => r.body?.includes("tcp")));
+      await typeFilter("tcp.prt ==");
+      await until("the apply to come back", () => evaluate("window.__replied.some((u) => /api\\/filter$/.test(u))"));
+      await sleep(300);
+      assert.match(await classes(), /st-error/);
+      assert.doesNotMatch(await classes(), /busy/);
+    } finally {
+      await unspyFetch();
+      await typeFilter("");
+      await key("Enter", "Enter", 13);
+      await until("no filter", async () => (await state()).filter === "" && !/busy/.test(await classes()));
+    }
+  });
+
+  await check("browser: an I/O graph click selects a packet of its interval with a time reference set, asking with until=", async () => {
+    try {
+      assert.equal((await post("/api/timerefs", { frames: [2], on: true })).status, 200);
+      await fromMenuBar("Statistics", "I/O Graphs");
+      await until("the graph", () => evaluate("!!document.querySelector('.io-svg path.io-line, .io-svg circle')"), 15_000);
+      const svg = await box("document.querySelector('.io-svg')");
+      await spyFetch();
+      let found = 0;
+      // From the right, where the bars lie after the reference
+      for (let x = svg.x + svg.width - 20; x > svg.x + 66 && !found; x -= 6) {
+        const before = (await state()).selected;
+        await click(x, svg.y + svg.height / 2);
+        await sleep(350);
+        const selected = (await state()).selected;
+        if (selected !== before && selected > 2) found = selected;
+      }
+      const asked = await requests("api/frame-at");
+      assert.ok(asked.length > 0 && asked.every((r) => /[?&]until=/.test(r.u)), `frame-at requests: ${asked.map((r) => r.u).join(" ")}`);
+      assert.ok(found, "no click selected a packet after the reference");
+    } finally {
+      await unspyFetch();
+      await closeButton("dlg-io");
+      await post("/api/timerefs/clear");
+      await until("no time references", async () => (await state()).timeRefs.length === 0);
+    }
+  });
+
+  await check("browser: Follow Stream after another capture opened says the capture closed, selects nothing on a click and leaves the display filter on Back", async () => {
+    const other = join(home, "other.pcapng");
+    copyFileSync(join(root, "test/fixtures/http.pcapng"), other);
+    const footerButton = (label) => `[...document.querySelectorAll('.dlg-follow .dlg-footer button')].find((b) => b.textContent === '${label}')`;
+    try {
+      await post("/api/select", { frame: 4 });
+      await until("frame 4's details", () => evaluate("document.querySelectorAll('.dt-row').length > 3"));
+      await sleep(400);
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      await fromMenu(4, "Follow");
+      await pick("TCP Stream");
+      await until("the stream", () => evaluate("!!document.querySelector('.dlg-follow .fl-text span[data-frame]')"), 15_000);
+      assert.match((await state()).filter, /tcp\.stream/);
+      assert.match((await call("open_capture", { path: other })).text, /29 frames/);
+      await until("the title", () => evaluate("document.querySelector('.dlg-follow .dlg-title-text').textContent.endsWith('[capture closed]')"));
+      const before = await state();
+      const span = await box("document.querySelector('.dlg-follow .fl-text span[data-frame]')");
+      await click(span.x + 5, span.y + 5);
+      await sleep(400);
+      assert.equal((await state()).selected, before.selected);
+      await evaluate(`${footerButton("Back")}.click()`);
+      await until("the window to close", () => evaluate("!document.querySelector('.dlg-follow')"));
+      await sleep(400);
+      assert.equal((await state()).filter, before.filter);
+    } finally {
+      if (await evaluate("!!document.querySelector('.dlg-follow')")) await evaluate(`${footerButton("Back")}?.click()`);
+      await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
+      await post("/api/filter", { filter: "" });
+      await until("no filter", async () => (await state()).filter === "");
+    }
+  });
+
+  await check("browser: Conversations with a tab clicked again while it computes sends one request for it", async () => {
+    const tabButton = (label) => `[...document.querySelectorAll('.dlg-stats .tab')].find((t) => t.textContent.startsWith(${JSON.stringify(label)}))`;
+    try {
+      await spyFetch({ "api/stats/conv": 1000 });
+      await fromMenuBar("Statistics", "Conversations");
+      await until("the dialog", () => evaluate("!!document.querySelector('.dlg-stats .tabs')"));
+      await click(...center(await box(tabButton("TCP"))));
+      await click(...center(await box(tabButton("UDP"))));
+      await click(...center(await box(tabButton("TCP"))));
+      await until("the TCP table", () => evaluate(`/ · \\d+/.test(${tabButton("TCP")}.textContent) && !!document.querySelector('.dlg-stats .stat-table')`), 15_000);
+      assert.equal((await requests("type=tcp")).length, 1);
+    } finally {
+      await unspyFetch();
+      await closeButton("dlg-stats");
     }
   });
 
