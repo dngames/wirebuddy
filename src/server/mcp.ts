@@ -1062,7 +1062,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
           const e = viewer.extensionList().extensions.find((x) => x.name === named());
           const parts: string[] = [];
           if (!e?.panel || e.lua) parts.push(testText(await viewer.testExtension(named()), viewer.state.decodeAs.entries));
-          if (e?.panel) parts.push(panelCheckText(named(), await checkPanel(viewer.extensions.panelFiles(named()))));
+          // One switched off is tested all the same, its panel too
+          if (e?.panel) parts.push(panelCheckText(named(), await checkPanel(viewer.extensions.panelFiles(named(), true))) + (e.enabled ? "" : '\nThe extension is switched off: extensions action "enable" first.'));
           return parts.join("\n\n");
         }
         case "reload":

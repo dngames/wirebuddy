@@ -26,6 +26,8 @@ const MAX_LOGS = 200;
 /** Events one panel may send the agent per minute. */
 const MAX_EVENTS_PER_MINUTE = 20;
 const MAX_REQUEST = 64 * 1024;
+/** Reports one panel may send per second: twice what its bridge sends, as its seconds and these needn't line up. */
+const MAX_REPORTS_PER_SECOND = 100;
 /** Data requests of one panel at a time, and what it may get per minute. */
 const MAX_IN_FLIGHT = 4;
 const MAX_BYTES_PER_MINUTE = 512 * 1024 * 1024;
@@ -90,9 +92,11 @@ interface Instance {
   /** Bytes sent per answer, for the per-minute quota. */
   transfers: { at: number; bytes: number }[];
   frameCalls: number[];
-  /** Times of its changes to the view and of its storage writes, for their limits. */
+  /** Times of its changes to the view, of its storage writes and of its reports, for their limits; when a report was last refused. */
   acts: { select: number[]; setFilter: number[] };
   storageWrites: number[];
+  reports: number[];
+  reportsRefused: number;
   /** Snapshots asked of its page, by request id. */
   snapshots: Map<string, (s: Snapshot) => void>;
 }
@@ -202,6 +206,8 @@ export class Panels extends EventEmitter {
       frameCalls: [],
       acts: { select: [], setFilter: [] },
       storageWrites: [],
+      reports: [],
+      reportsRefused: 0,
       snapshots: new Map(),
     };
     this.open.set(name, inst);
@@ -455,9 +461,25 @@ export class Panels extends EventEmitter {
 
   /**
    * Serves a request for a panel's host; false when `host` isn't one (the
-   * caller serves WireBuddy itself then).
+   * caller serves WireBuddy itself then). Whatever fails in a panel's request
+   * is answered here, as the panel's own.
    */
   async handle(req: IncomingMessage, res: ServerResponse, host: string): Promise<boolean> {
+    try {
+      return await this.serve(req, res, host);
+    } catch {
+      // A request cut off half way has nobody left to answer
+      if (res.headersSent || req.destroyed) res.destroy();
+      else {
+        const inst = this.byLabel.get(PANEL_HOST.exec(host.toLowerCase())?.[1] ?? "");
+        res.writeHead(400, { "content-type": "text/plain; charset=utf-8", ...this.headers(inst) });
+        res.end("bad request");
+      }
+      return true;
+    }
+  }
+
+  private async serve(req: IncomingMessage, res: ServerResponse, host: string): Promise<boolean> {
     const m = PANEL_HOST.exec(host.toLowerCase());
     if (!m) return false;
     const inst = Number(m[2]) === this.port ? this.byLabel.get(m[1]) : undefined;
@@ -471,8 +493,14 @@ export class Panels extends EventEmitter {
     const dest = req.headers["sec-fetch-dest"];
     // Only a browser's own requests; never service workers
     if (!fetchSite || req.headers["service-worker"]) return send(403, "forbidden");
-    const url = new URL(req.url ?? "/", `http://${host}`);
-    const path = decodeURIComponent(url.pathname);
+    let url: URL;
+    let path: string;
+    try {
+      url = new URL(req.url ?? "/", `http://${host}`);
+      path = decodeURIComponent(url.pathname);
+    } catch {
+      return send(400, "bad request");
+    }
     const origin = `http://p${inst.label}.localhost:${this.port}`;
     if (req.method === "GET" && path === "/") {
       if (dest !== "iframe") return send(403, "only as a frame of WireBuddy");
@@ -485,18 +513,27 @@ export class Panels extends EventEmitter {
       if (req.method !== "POST" || req.headers.origin !== origin || fetchSite !== "same-origin") return send(403, "forbidden");
       if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) return send(415, "JSON only");
       if (req.headers["x-wb-doc"] !== inst.docNonce) return this.apiError(res, inst, new ApiError(409, "replaced", "a newer page of this panel is open"));
-      if (path === "/_wb/api/storage") return this.storage(req, res, inst);
       return this.api(req, res, inst, path.slice("/_wb/api/".length));
     }
     if (req.method === "GET" && path === "/_wb/events") {
       if (fetchSite !== "same-origin" || dest === "document" || dest === "iframe") return send(403, "forbidden");
-      if (url.searchParams.get("doc") !== inst.docNonce) return send(409, "replaced");
+      // No page of it was served yet: nobody has a nonce to listen with
+      if (!inst.docNonce || url.searchParams.get("doc") !== inst.docNonce) return send(409, "replaced");
       return this.eventStream(res, inst);
     }
     if (req.method === "POST" && path === "/_wb/report") {
       if (req.headers.origin !== origin || fetchSite !== "same-origin") return send(403, "forbidden");
       if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) return send(415, "JSON only");
       if (req.headers["x-wb-doc"] !== inst.docNonce) return send(409, "replaced");
+      const now = Date.now();
+      inst.reports = inst.reports.filter((t) => now - t < 1000);
+      if (inst.reports.length >= MAX_REPORTS_PER_SECOND) {
+        // Told once per burst: the refusals must not use up what the panel may tell the agent
+        if (now - inst.reportsRefused >= 1000) this.tell(inst, "WARNING", `sends more than ${MAX_REPORTS_PER_SECOND} reports a second (status, title, console lines, errors): the rest are dropped`);
+        inst.reportsRefused = now;
+        return send(429, "too many reports");
+      }
+      inst.reports.push(now);
       // A snapshot asked for is larger than any other report
       const body = await readBody(req, inst.snapshots.size ? Math.ceil(MAX_SNAPSHOT / 3) * 4 + MAX_REPORT : MAX_REPORT);
       if (body === null) return send(413, "too large");
@@ -514,11 +551,12 @@ export class Panels extends EventEmitter {
     return file ? send(200, file.bytes, file.type) : send(404, "not found");
   }
 
-  /** A data request of a panel's page, within its quotas. */
+  /** A data or storage request of a panel's page, MAX_IN_FLIGHT of them at a time. */
   private async api(req: IncomingMessage, res: ServerResponse, inst: Instance, method: string): Promise<true> {
     inst.inFlight++;
     try {
-      return await this.apiQuota(req, res, inst, method);
+      if (inst.inFlight > MAX_IN_FLIGHT) return this.apiError(res, inst, new ApiError(429, "busy", `at most ${MAX_IN_FLIGHT} requests at a time`, { retryMs: 200 }));
+      return method === "storage" ? await this.storage(req, res, inst) : await this.apiQuota(req, res, inst, method);
     } finally {
       inst.inFlight--;
     }
@@ -528,7 +566,6 @@ export class Panels extends EventEmitter {
     const now = Date.now();
     inst.transfers = inst.transfers.filter((t) => now - t.at < 60_000);
     const used = inst.transfers.reduce((a, t) => a + t.bytes, 0);
-    if (inst.inFlight > MAX_IN_FLIGHT) return this.apiError(res, inst, new ApiError(429, "busy", `at most ${MAX_IN_FLIGHT} requests at a time`, { retryMs: 200 }));
     if (used >= MAX_BYTES_PER_MINUTE) return this.apiError(res, inst, new ApiError(429, "busy", "512 MiB a minute at most", { retryMs: 60_000 - (now - inst.transfers[0].at) }));
     if (this.sending >= MAX_SENDING) return this.apiError(res, inst, new ApiError(429, "busy", "WireBuddy is sending a lot already", { retryMs: 500 }));
     if (method === "frame") {

@@ -77,13 +77,17 @@ const LUA_HINT = 'is the extension\'s Lua loaded? extensions action "reload"';
 /** The turn label of offer checks; panel labels are base32. */
 const OFFERS = "_offers";
 
-/** A failed panel request: HTTP status, a code the bridge acts on, and help for the agent. */
+/**
+ * A failed panel request: HTTP status, a code the bridge acts on, and help for
+ * the agent. `unsupported`: what of the request this capture can't give
+ * ("match"), nothing the panel got wrong.
+ */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
-    readonly extra: { hint?: string; retryMs?: number; epoch?: number } = {},
+    readonly extra: { hint?: string; retryMs?: number; epoch?: number; unsupported?: string } = {},
   ) {
     super(message);
   }
@@ -173,6 +177,8 @@ export class PanelData {
   private holding = false;
   /** Offer checks running: they take turns like a panel. */
   private offerChecks = 0;
+  /** Preferences sharkd refused, as told. */
+  private readonly refused = new Set<string>();
   /** Frames whose sharkd answer is too long to read, per file and epoch; then bytes are asked for one frame at a time. */
   private oversized = { key: "", frames: new Set<number>(), single: false };
 
@@ -267,7 +273,18 @@ export class PanelData {
 
   /** A dissection preference the view now reads with; an engine started later gets it from prefs(). */
   setPref(name: string, value: string): void {
-    this.engine?.setPref(name, value).catch(() => {});
+    if (this.engine) this.pref(this.engine, name, value);
+  }
+
+  /** Sets a preference in `engine`. One that sharkd refuses is told once; an engine stopped meanwhile sets it again when it starts. */
+  private pref(engine: Sharkd, name: string, value: string): void {
+    engine.setPref(name, value).catch((err: Error) => {
+      const text = `Panel engine: sharkd refused the preference ${name}, so panels read the capture without it: ${printable(err.message)}`;
+      // Refused in sharkd's answer or its status; any other failure is of a sharkd that stopped
+      if (!(err instanceof SharkdError || err.message.startsWith(`${name}: `)) || this.refused.has(text)) return;
+      this.refused.add(text);
+      this.opts.events.add("WARNING", text);
+    });
   }
 
   close(): void {
@@ -409,7 +426,7 @@ export class PanelData {
       this.crashes = [...this.crashes.filter((t) => now - t < 60_000), now];
       if (this.crashes.length <= CRASHES_PER_MINUTE) events.add("WARNING", `Panel engine: ${printable(message)}`);
     };
-    for (const [name, value] of source.prefs()) engine.setPref(name, value).catch(() => {});
+    for (const [name, value] of source.prefs()) this.pref(engine, name, value);
     this.engine = engine;
     return engine;
   }
@@ -607,8 +624,8 @@ export class PanelData {
       fieldBytes && !match ? null : this.frameStore(epoch),
       fields.length || filter || fieldBytes ? this.load(label, epoch) : null,
     ]);
-    if (match && !store) throw new ApiError(400, "bad-args", this.noStore());
-    if (match && store?.unknownLinks()) throw new ApiError(400, "bad-args", "match reads the packets' headers itself, and this capture has a link type it doesn't know. Use a display filter instead");
+    if (match && !store) throw new ApiError(400, "bad-args", this.noStore(), { unsupported: "match" });
+    if (match && store?.unknownLinks()) throw new ApiError(400, "bad-args", "match reads the packets' headers itself, and this capture has a link type it doesn't know. Use a display filter instead", { unsupported: "match" });
     const raw = store !== null && !fieldBytes;
     if (raw) this.tailers.add(label);
     const cap = fields.length ? MAX_LIMIT.fields : fieldBytes || (layer !== "none" && !raw) ? MAX_LIMIT.bytes : MAX_LIMIT.plain;

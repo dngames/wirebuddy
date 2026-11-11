@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { chmodSync, mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join } from "node:path";
 import { inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
@@ -166,7 +165,6 @@ export async function exportFrames(opts: {
   const { editcap, mergecap, input, output, format, ranges } = opts;
   const comments = format === "pcapng" ? (opts.comments ?? new Map<number, FrameComments>()) : new Map<number, FrameComments>();
   const cleared = format === "pcapng" ? (opts.cleared ?? 0) : 0;
-  const partial = `${output}.partial-${randomBytes(6).toString("hex")}`;
   const sel = (r: [number, number]) => (r[0] === r[1] ? String(r[0]) : `${r[0]}-${r[1]}`);
   const commented = [...comments]
     .map(([f, c]): [number, number] => [f, c.texts.reduce((n, text) => n + Buffer.byteLength(`${f}:${text}`) + 4, c.own ? 0 : Buffer.byteLength(`${f}:`) + 4)])
@@ -191,36 +189,33 @@ export async function exportFrames(opts: {
       }
     }
   };
+  // A folder only the user can open, next to the export (where there is room for it, rather than a small tmpfs):
+  // nothing of the export is readable by others, or under a name they could guess, while it is written
+  const dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
+  const result = join(dir, `export.${format}`);
   try {
-    if (runs.length === 1) await write(runs[0], partial, format);
+    if (runs.length === 1) await write(runs[0], result, format);
     else {
-      // Next to the export, where there is room for it, rather than a small tmpfs
-      const dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
-      try {
-        const parts: string[] = [];
-        for (const part of runs) {
-          const file = join(dir, `part${String(parts.length).padStart(5, "0")}.pcapng`);
-          await write(part, file, "pcapng");
-          parts.push(file);
-        }
-        // Parts are in frame order; -a concatenates instead of merging by time
-        if (format === "pcap") await run(mergecap, ["-a", "-F", "pcap", "-w", partial, ...parts]);
-        else {
-          const merged = join(dir, "merged.pcapng");
-          await run(mergecap, ["-a", "-F", "pcapng", "-w", merged, ...parts]);
-          // mergecap names the parts in a capture comment
-          await run(editcap, ["-F", "pcapng", "--discard-capture-comment", merged, partial]);
-        }
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
+      const parts: string[] = [];
+      for (const part of runs) {
+        const file = join(dir, `part${String(parts.length).padStart(5, "0")}.pcapng`);
+        await write(part, file, "pcapng");
+        parts.push(file);
+      }
+      // Parts are in frame order; -a concatenates instead of merging by time
+      if (format === "pcap") await run(mergecap, ["-a", "-F", "pcap", "-w", result, ...parts]);
+      else {
+        const merged = join(dir, "merged.pcapng");
+        await run(mergecap, ["-a", "-F", "pcapng", "-w", merged, ...parts]);
+        // mergecap names the parts in a capture comment
+        await run(editcap, ["-F", "pcapng", "--discard-capture-comment", merged, result]);
       }
     }
     // As private as the captures it comes from
-    chmodSync(partial, 0o600);
-    renameSync(partial, output);
-  } catch (err) {
-    rmSync(partial, { force: true });
-    throw err;
+    chmodSync(result, 0o600);
+    renameSync(result, output);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
   return statSync(output).size;
 }

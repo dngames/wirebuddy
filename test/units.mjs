@@ -5,7 +5,7 @@ import { build } from "esbuild";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
@@ -15,13 +15,14 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs", "decodeas"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs", "decodeas", "panelcheck"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
   await import(join(out, "units.mjs"));
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
+const { checkPanel } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -348,6 +349,30 @@ try {
     assert.deepEqual(packetComments(output), want);
   });
 
+  await check("export: written in a folder only the user can open next to the target, also over several passes and runs; the result is the user's alone", async () => {
+    const fixture = join(root, "test/fixtures/http.pcapng");
+    const big = join(out, "big.pcapng");
+    if (!existsSync(big)) execFileSync("mergecap", ["-a", "-F", "pcapng", "-w", big, ...Array(42).fill(fixture)]);
+    const dir = mkdtempSync(join(out, "target-"));
+    const seen = join(out, "seen.txt");
+    // Each editcap and mergecap run notes what stands in the target folder, and how open it is
+    const noting = (name) => {
+      const tool = join(out, `noting-${name}`);
+      writeFileSync(tool, `#!/bin/sh\nstat -c '%a %n' "${dir}"/* "${dir}"/.[!.]* >> "${seen}" 2>/dev/null\nexec ${name} "$@"\n`, { mode: 0o755 });
+      return tool;
+    };
+    const tools = { editcap: noting("editcap"), mergecap: noting("mergecap") };
+    // One run with a second pass for frame 2's second comment, then two runs joined
+    await exportFrames({ ...tools, input: fixture, output: join(dir, "out.pcapng"), format: "pcapng", ranges: [[1, 29]], comments: new Map([[2, { texts: ["a", "b"] }]]) });
+    assert.deepEqual(packetComments(join(dir, "out.pcapng"))[1], ["a", "b"]);
+    await exportFrames({ ...tools, input: big, output: join(dir, "runs.pcap"), format: "pcap", ranges: Array.from({ length: 600 }, (_, i) => [i * 2 + 1, i * 2 + 1]) });
+    const lines = readFileSync(seen, "utf8").trim().split("\n");
+    assert.ok(lines.length >= 6, lines.join("\n"));
+    for (const line of lines) assert.match(line, /^(700 .*\/\.wirebuddy-export-\w+|600 .*\/out\.pcapng)$/);
+    assert.deepEqual(readdirSync(dir).sort(), ["out.pcapng", "runs.pcap"]);
+    assert.deepEqual(["out.pcapng", "runs.pcap"].map((f) => statSync(join(dir, f)).mode & 0o777), [0o600, 0o600]);
+  });
+
   await check("saved objects: safe names, a new private folder, never over a file", () => {
     assert.equal(objectFileName(12, "big.txt"), "f12-big.txt");
     assert.equal(objectFileName(3, "../../.bashrc"), "f3-.bashrc");
@@ -441,6 +466,144 @@ try {
         rmSync(shared, { recursive: true, force: true });
       }
     } else console.log("skip the shared-folder check: /tmp isn't a sticky folder everyone can write");
+  });
+
+  await check("extensions: one switched off keeps its panel files for a test; its record is replaced whole or not at all; none is looked into off Linux", () => {
+    const data = mkdtempSync(join(out, "data-"));
+    const saved = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = data;
+    try {
+      const ext = new Extensions();
+      mkdirSync(join(ext.dir, "demo/panel"), { recursive: true, mode: 0o755 });
+      writeFileSync(join(ext.dir, "demo/extension.json"), JSON.stringify({ label: "Demo", panel: true }), { mode: 0o644 });
+      writeFileSync(join(ext.dir, "demo/demo.lua"), "-- nothing\n", { mode: 0o644 });
+      writeFileSync(join(ext.dir, "demo/panel/main.js"), "wb.ready();\n", { mode: 0o644 });
+      const demo = () => ext.list().find((e) => e.name === "demo");
+      assert.deepEqual([demo().enabled, [...ext.panelFiles("demo").files.keys()]], [true, ["main.js"]]);
+      // Switched off: no panel to open, but its files to check
+      ext.setEnabled("demo", false, "why");
+      assert.deepEqual([demo().enabled, demo().status, demo().error], [false, "off", "why"]);
+      assert.throws(() => ext.panelFiles("demo"), /switched off/);
+      assert.deepEqual([...ext.panelFiles("demo", true).files.keys()], ["main.js"]);
+      const state = join(data, "wirebuddy/extensions-state.json");
+      assert.deepEqual(JSON.parse(readFileSync(state, "utf8")), { off: { demo: "why" } });
+      assert.equal(new Extensions().list().find((e) => e.name === "demo").enabled, false);
+      // A record that can't be replaced: nothing is switched, in memory or on disk
+      renameSync(state, `${state}.kept`);
+      mkdirSync(state);
+      assert.throws(() => ext.setEnabled("demo", true));
+      assert.equal(demo().enabled, false);
+      rmSync(state, { recursive: true });
+      renameSync(`${state}.kept`, state);
+      ext.setEnabled("demo", true);
+      assert.equal(demo().enabled, true);
+      assert.deepEqual(JSON.parse(readFileSync(state, "utf8")), { off: {} });
+      assert.deepEqual(readdirSync(join(data, "wirebuddy")).sort(), ["extensions", "extensions-state.json"]);
+      // Who can change a folder is only checked on Linux: elsewhere there are no extensions, and no panels
+      const platform = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+      try {
+        assert.deepEqual(ext.list(), []);
+        assert.match(ext.listing().ignored.join("\n"), /only supported on Linux/);
+        assert.throws(() => ext.panelFiles("demo"), /no extension "demo"/);
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
+      assert.equal(ext.list().length, 1);
+    } finally {
+      if (saved === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = saved;
+    }
+  });
+
+  await check("extensions: what the user's private group may write is the user's alone only when getfacl, or without it ls, shows no ACL that lets others in", () => {
+    let own = false;
+    try {
+      const [name, , , members] = execFileSync("getent", ["group", String(process.getgid())], { encoding: "utf8" }).trim().split(":");
+      own = name === userInfo().username && !members;
+    } catch {
+      // no getent
+    }
+    if (!own) return console.log("skip the ACL checks: the user's group is not a private one");
+    const data = mkdtempSync(join(out, "acl-"));
+    const saved = { data: process.env.XDG_DATA_HOME, path: process.env.PATH };
+    process.env.XDG_DATA_HOME = data;
+    try {
+      const ext = new Extensions();
+      // An extension whose Lua file its group may write, and its status
+      const status = (name, acl = () => {}) => {
+        mkdirSync(join(ext.dir, name), { recursive: true, mode: 0o755 });
+        writeFileSync(join(ext.dir, name, "extension.json"), "{}", { mode: 0o644 });
+        const lua = join(ext.dir, name, "x.lua");
+        writeFileSync(lua, "-- nothing\n");
+        chmodSync(lua, 0o664);
+        acl(lua);
+        const e = ext.list().find((x) => x.name === name);
+        return e.status === "untrusted" ? e.error.replace(/^.*x\.lua /, "") : e.status;
+      };
+      const bin = (name, tools) => {
+        mkdirSync(join(data, name));
+        for (const [tool, script] of Object.entries(tools)) writeFileSync(join(data, name, tool), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+        return join(data, name);
+      };
+      const plain = "echo user::rw-; echo group::rw-; echo other::r--";
+      // getfacl answers: named users and groups with w count, also below a mask that takes it away
+      process.env.PATH = `${bin("none", { getfacl: plain })}:${saved.path}`;
+      assert.equal(status("none"), "new");
+      process.env.PATH = `${bin("named", { getfacl: `${plain}; echo user:bob:rw-; echo mask::rw-` })}:${saved.path}`;
+      assert.equal(status("named"), "can be written by others; WireBuddy doesn't load it");
+      process.env.PATH = `${bin("reader", { getfacl: `${plain}; echo group:staff:r--; echo mask::rw-` })}:${saved.path}`;
+      assert.equal(status("reader"), "new");
+      // getfacl fails: nothing is known, so nothing is loaded
+      process.env.PATH = `${bin("fails", { getfacl: "exit 1" })}:${saved.path}`;
+      assert.equal(status("fails"), "can be written by others; WireBuddy doesn't load it");
+      // No getfacl: GNU ls still tells a file with an ACL from one without
+      const real = (tool) => saved.path.split(":").map((d) => join(d, tool)).find((f) => existsSync(f));
+      const without = bin("without", {});
+      symlinkSync(real("ls"), join(without, "ls"));
+      process.env.PATH = without;
+      if (!execFileSync("ls", ["--version"], { encoding: "utf8" }).includes("GNU coreutils")) return console.log("skip the checks without getfacl: ls is not GNU's");
+      assert.equal(status("plain"), "new");
+      const setAcl = (file) => {
+        process.env.PATH = saved.path;
+        try {
+          if (real("setfacl")) execFileSync("setfacl", ["-m", "u:65534:rw", file]);
+          else {
+            const blob = "import os, struct, sys; e = [(1, 6, 0xffffffff), (2, 6, 65534), (4, 6, 0xffffffff), (16, 6, 0xffffffff), (32, 4, 0xffffffff)]; os.setxattr(sys.argv[1], 'system.posix_acl_access', struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *x) for x in e))";
+            execFileSync("python3", ["-c", blob, file], { stdio: "ignore" });
+          }
+        } finally {
+          process.env.PATH = without;
+        }
+      };
+      let made = true;
+      const marked = status("marked", (file) => {
+        try {
+          setAcl(file);
+        } catch {
+          made = false;
+        }
+      });
+      if (made) assert.equal(marked, "can be written by others; WireBuddy doesn't load it");
+      else console.log("skip the check of an ACL without getfacl: neither setfacl nor python3 could set one here");
+    } finally {
+      process.env.PATH = saved.path;
+      if (saved.data === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = saved.data;
+    }
+  });
+
+  await check("panel checks: only what doesn't parse keeps a panel from opening; text its policy would refuse when run is a warning", async () => {
+    const js = (text) => ({ bytes: Buffer.from(text), type: "text/javascript" });
+    const panel = (files) => ({ folder: "/x/demo", body: "", files: new Map(Object.entries(files).map(([rel, text]) => [rel, js(text)])) });
+    // In a comment, in a string and in a fallback that never runs
+    const vendor = '// never eval (x) this\nconst s = "import a from \'https://x\'";\nconst g = (() => { try { return new Function("return this")(); } catch { return globalThis; } })();\n';
+    const fine = await checkPanel(panel({ "main.js": "wb.ready();\n", "lib/vendor.js": vendor }));
+    assert.deepEqual(fine.errors, []);
+    assert.deepEqual(fine.warnings.map((w) => w.replace(/: .*$/, "")), ["/x/demo/panel/lib/vendor.js:2", "/x/demo/panel/lib/vendor.js:1"]);
+    for (const w of fine.warnings) assert.match(w, /the panel's content security policy refuses them when they run/);
+    const broken = await checkPanel(panel({ "main.js": "const x = 1;\nconst y = ;\n" }));
+    assert.match(broken.errors.join("\n"), /^\/x\/demo\/panel\/main\.js:2: SyntaxError/);
   });
 
   await check("decode as: changes checked, entries replaced and capped, the prelude's report read back, close names, counting filters", () => {

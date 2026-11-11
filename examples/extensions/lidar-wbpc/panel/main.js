@@ -356,9 +356,8 @@ function start() {
       } else showScan(Math.max(index, 0));
     },
     error(e) {
-      if (g !== generation) return;
-      if (e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery, handlers);
-      else console.warn(`Reading the scans failed: ${e.message}`);
+      // A file match can't read: by a display filter; of any other end the agent hears from WireBuddy
+      if (g === generation && e.unsupported === "match") sub = wb.subscribe(slowQuery, handlers);
     },
   };
   sub = wb.subscribe(query, handlers);

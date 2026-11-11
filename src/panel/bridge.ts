@@ -297,13 +297,17 @@ const FILTER_WAIT_MS = 5 * 60_000;
 
   // --- the capture's data
 
-  /** A failed wb call; `code` tells why (bad-args, filter, no-capture, stale, gone, too-large, busy, too-slow, internal). */
+  /**
+   * A failed wb call; `code` tells why (bad-args, filter, no-capture, stale, gone, too-large, busy, too-slow, internal).
+   * `retryMs`: it will pass, ask again then; `unsupported`: what this capture can't give ("match"), no mistake of the panel's.
+   */
   class WbError extends Error {
     constructor(
       message: string,
       readonly code: string,
       readonly hint?: string,
       readonly retryMs?: number,
+      readonly unsupported?: string,
     ) {
       super(message);
       this.name = "WbError";
@@ -335,7 +339,7 @@ const FILTER_WAIT_MS = 5 * 60_000;
         body: JSON.stringify({ ...body, epoch }),
       });
       if (r.ok) return r;
-      let e: { error?: string; code?: string; hint?: string; retryMs?: number } = {};
+      let e: { error?: string; code?: string; hint?: string; retryMs?: number; unsupported?: string } = {};
       try {
         e = await r.json();
       } catch {
@@ -346,7 +350,7 @@ const FILTER_WAIT_MS = 5 * 60_000;
         await sleep(Math.min(Math.max(e.retryMs ?? 200, 50), 60_000));
         continue;
       }
-      throw new WbError(e.error ?? `HTTP ${r.status}`, e.code ?? "internal", e.hint, e.retryMs);
+      throw new WbError(e.error ?? `HTTP ${r.status}`, e.code ?? "internal", e.hint, e.retryMs, e.unsupported);
     }
   }
 
@@ -526,6 +530,8 @@ const FILTER_WAIT_MS = 5 * 60_000;
     void (async () => {
       let after = start();
       let epoch = view.epoch;
+      // When the first of the failures in a row was
+      let failing = 0;
       while (!closed) {
         if (restart || view.epoch !== epoch) {
           restart = false;
@@ -538,6 +544,7 @@ const FILTER_WAIT_MS = 5 * 60_000;
         let page: Page;
         try {
           page = await packets({ ...q, after }, epoch);
+          failing = 0;
         } catch (e) {
           if (closed) return;
           // Another file, or none yet: wait for its view
@@ -549,8 +556,19 @@ const FILTER_WAIT_MS = 5 * 60_000;
             await wait(0);
             continue;
           }
-          // A panel that handles errors itself decides what to say
-          if (e instanceof WbError && !h.error) console.warn(`wb.subscribe failed: ${e.message}${e.hint ? ` (${e.hint})` : ""}`);
+          // What WireBuddy says will pass (its engine restarted) is asked again, for as long as a busy WireBuddy is
+          if (e instanceof WbError && e.retryMs !== undefined) {
+            if (!failing) {
+              failing = Date.now();
+              console.warn(`wb.subscribe: ${e.message}; asking again`);
+            }
+            if (Date.now() - failing < BUSY_GIVE_UP_MS) {
+              await sleep(Math.min(Math.max(e.retryMs, 50), 60_000));
+              continue;
+            }
+          }
+          // The agent hears that it ended, whatever the panel does about it; not of a match the panel goes on without
+          if (e instanceof WbError && e.code !== "replaced" && !(h.error && e.unsupported === "match")) console.warn(`wb.subscribe failed: ${e.message}${e.hint ? ` (${e.hint})` : ""}`);
           h.error?.(e as Error);
           return;
         }

@@ -370,9 +370,8 @@ function play(s) {
       status();
     },
     error(e) {
-      if (g !== generation) return;
-      if (e.code === "bad-args" && /^match /.test(e.message)) sub = wb.subscribe(slowQuery(s), handlers);
-      else console.warn(`Reading the stream failed: ${e.message}`);
+      // A file match can't read: by a display filter; of any other end the agent hears from WireBuddy
+      if (g === generation && e.unsupported === "match") sub = wb.subscribe(slowQuery(s), handlers);
     },
   };
   sub = wb.subscribe(streamQuery(s), handlers);
