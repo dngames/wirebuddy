@@ -65,8 +65,9 @@ with provenance: each version's npm page links to the commit and the workflow ru
   switching one off doesn't stop the agent from testing it or switching it on again.
 - An extension is only read and loaded when no other user could have changed it: every folder
   from `/` down belongs to root or the user and only they can write it (a group counts only when
-  it is the user's own private group and no ACL lets others in; sticky folders like `/tmp` protect
-  only the user's entries), or a folder of the user's on the way is closed to others and the
+  it is the user's own private group and no ACL lets others in: read with `getfacl`, and where
+  that isn't installed an entry with any ACL at all, or whose ACL can't be read, counts as
+  writable by others; sticky folders like `/tmp` protect only the user's entries), or a folder of the user's on the way is closed to others and the
   extension is on the same filesystem. The extension folders and files themselves must belong to
   the user (or root), be writable only by them, and be on the same filesystem; files must be regular
   files with a single hard link, not symbolic links, and are checked again as they are read.

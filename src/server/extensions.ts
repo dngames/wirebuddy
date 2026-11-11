@@ -683,9 +683,15 @@ export class Extensions {
     if (!this.home) throw new Error(`extensions are unavailable: ${this.unavailable}`);
     const dir = join(this.home, folder, String(++this.copies), e.info.name);
     mkdirSync(dir, { recursive: true });
-    const files = luaFiles(e.folder);
-    for (const f of files) writeFileSync(join(dir, f), readChecked(join(e.folder, f), e.trust));
-    return [e.info.name, dir, ...files].join("\t");
+    try {
+      const files = luaFiles(e.folder);
+      for (const f of files) writeFileSync(join(dir, f), readChecked(join(e.folder, f), e.trust));
+      return [e.info.name, dir, ...files].join("\t");
+    } catch (err) {
+      // No half copy stays behind
+      rmSync(dirname(dir), { recursive: true, force: true });
+      throw err;
+    }
   }
 
   /** Environment for sharkd and Wireshark: WireBuddy's plugin folder and the extensions to load. */
@@ -724,6 +730,11 @@ export class Extensions {
     const out: Entry[] = [];
     for (const root of [this.dir, ...this.shared]) {
       if (!existsSync(root)) continue;
+      // Who can change a folder is only checked on Linux: elsewhere none is looked into, for panels neither
+      if (process.platform !== "linux") {
+        ignored.push(`${printable(root)}: extensions are only supported on Linux`);
+        continue;
+      }
       // Lua runs as the user: a folder others can change is not even listed
       const trust = rootTrust(root);
       let names: string[];
@@ -816,9 +827,9 @@ export class Extensions {
     return done(last ? { status: last.status, error: last.error, protocols: last.protocols } : {}, panel);
   }
 
-  /** A panel's files, read and checked again now: what its frame will be served. */
-  panelFiles(name: string): PanelFiles {
-    const e = this.panelEntry(name);
+  /** A panel's files, read and checked again now: what its frame will be served. `off`: also of an extension switched off, to check them. */
+  panelFiles(name: string, off = false): PanelFiles {
+    const e = this.panelEntry(name, off);
     const tree = panelTree(e.folder, e.trust);
     if (tree.problem || tree.invalid) throw new Error(`${tree.problem ?? tree.invalid}`);
     const files = new Map<string, { bytes: Buffer; type: string }>();
@@ -870,12 +881,12 @@ export class Extensions {
     return e?.panel ? fingerprint(e.folder, panelTree(e.folder, e.trust)) : null;
   }
 
-  private panelEntry(name: string): Entry {
+  private panelEntry(name: string, off = false): Entry {
     const e = this.entries().find((x) => x.info.name === name);
     if (!e) throw new Error(this.missing(name));
     if (!loadable(e.info)) throw new Error(`extension "${name}" can't load: ${e.info.error}`);
     if (!e.panel) throw new Error(`extension "${name}" has no panel ("panel" in its extension.json, and panel/main.js)`);
-    if (!e.info.enabled) throw new Error(`extension "${name}" is switched off`);
+    if (!e.info.enabled && !off) throw new Error(`extension "${name}" is switched off`);
     return e;
   }
 
@@ -908,6 +919,9 @@ export class Extensions {
       try {
         this.setEnabled(r.crashedIn, false, "sharkd crashed while loading it");
       } catch (err) {
+        // Off until WireBuddy exits all the same: loaded again, it would crash sharkd again
+        this.state = { off: Object.assign(Object.create(null), this.state.off, { [r.crashedIn]: "sharkd crashed while loading it" }) };
+        this.last.delete(r.crashedIn);
         out.push({ level: "WARNING", text: `Could not remember that "${r.crashedIn}" is off: ${printable((err as Error).message)}` });
       }
     }
@@ -919,13 +933,23 @@ export class Extensions {
     return out;
   }
 
-  /** Switches an extension on or off for later loads; throws when that can't be saved. */
+  /** Switches an extension on or off for later loads; throws when that can't be saved, and nothing is switched then. */
   setEnabled(name: string, on: boolean, why = ""): void {
     if (!NAME.test(name)) throw new Error(`no extension "${name}"`);
-    if (on) delete this.state.off[name];
-    else this.state.off[name] = why;
+    const off: State["off"] = Object.assign(Object.create(null), this.state.off);
+    if (on) delete off[name];
+    else off[name] = why;
+    // A new file renamed over the old one: never half written
+    const tmp = `${this.stateFile}.${process.pid}.tmp`;
+    try {
+      rmSync(tmp, { force: true });
+      writeFileSync(tmp, JSON.stringify({ off }, null, 2), { mode: 0o600, flag: "wx" });
+      renameSync(tmp, this.stateFile);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+    this.state = { off };
     this.last.delete(name);
-    writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2), { mode: 0o600 });
   }
 
   guide(topic: "lua" | "panel" = "lua"): string {
@@ -1034,7 +1058,8 @@ API (global wb):
                    "visible" (true/false), "theme" ("light"/"dark"); returns a function that stops it
   wb.packets(q)    one page of packets, q:
      filter        a display filter
-     match         packets by their headers, read from the file without dissecting (pcap and pcapng only):
+     match         packets by their headers, read from the file without dissecting (pcap and pcapng only; for
+                   another file the call fails with .unsupported "match": ask with a filter instead):
                    {proto: "udp" | "tcp" | ..., port, srcport, dstport, addr, src, dst (also "10.0.0.0/8"),
                    ethertype, vlan}; each a value or a list of them; every key given must hold. Per packet:
                    IP fragments after the first have no ports
@@ -1051,7 +1076,9 @@ API (global wb):
   wb.all(q)        every page joined (at most 64 MiB)
   wb.subscribe(q, {batch(page, {live}), reset(), error(e)})   pages through q, then the packets a live
                    capture adds; batch is awaited before the next page; q.from "end": new packets only;
-                   waits for a capture if none is open; returns {close()}
+                   waits for a capture if none is open; returns {close()}. A failure WireBuddy says will pass
+                   is asked again; one that ends it calls error(e) and is reported to you (an unsupported match
+                   isn't when there is an error(e) to go on with a filter)
   wb.frame(n, {tree, bytes})   {frame, tree, bytes, sources: [{name, bytes}] (reassembled data), followers}
   wb.follow({frame} | {protocol: "TCP", stream: 0} | {protocol, filter}, {offset, maxBytes, epoch})
                    {protocol, filter, client, server, truncated, next, epoch, chunks: a page with dirs (1: from the server)}
@@ -1263,7 +1290,11 @@ function privateGid(): number | null {
 
 const aclCache = new Map<string, boolean>();
 
-/** Whether a POSIX ACL lets named users or groups write (the group bits then show the ACL mask). */
+/**
+ * Whether a POSIX ACL lets named users or groups write (the group bits then
+ * show the ACL mask). What can't be found out counts as letting them: getfacl
+ * failing, or an ACL where there is no getfacl to read it with.
+ */
 function aclLetsOthersWrite(path: string, st: Stats): boolean {
   const key = `${st.dev}:${st.ino}:${st.ctimeMs}`;
   let result = aclCache.get(key);
@@ -1275,11 +1306,27 @@ function aclLetsOthersWrite(path: string, st: Stats): boolean {
       const [type, who, perms = ""] = line.split(":");
       if ((type === "user" || type === "group") && who && perms.slice(0, 3).includes("w")) result = true;
     }
-  } catch {
-    // no getfacl: no ACLs set with it either
+  } catch (err) {
+    // Not installed (the acl package): ACLs can be there all the same, restored or inherited
+    result = (err as NodeJS.ErrnoException).code === "ENOENT" ? hasAcl(path) : true;
   }
   aclCache.set(key, result);
   return result;
+}
+
+let gnuLs: boolean | undefined;
+
+/** Whether `path` has an ACL of its own or one for new entries, which GNU ls marks with "+" after the mode; true when ls can't tell. */
+function hasAcl(path: string): boolean {
+  try {
+    gnuLs ??= execFileSync("ls", ["--version"], { encoding: "utf8", timeout: 5000 }).includes("GNU coreutils");
+    if (!gnuLs) return true;
+    const mode = execFileSync("ls", ["-ld", "--", path], { encoding: "utf8", timeout: 5000 }).split(/\s/)[0];
+    // "." marks a security context alone
+    return !/^[-a-zA-Z]{10}\.?$/.test(mode);
+  } catch {
+    return true;
+  }
 }
 
 /** Writable by someone besides the user (and root). */
@@ -1385,8 +1432,13 @@ function readChecked(path: string, trust: RootTrust, max = Infinity): Buffer {
 /** Asks sharkd, through a throwaway plugin, where its global plugins live. */
 function probeSharkd(sharkd: string): Promise<{ globalDir: string }> {
   const config = mkdtempSync(join(tmpdir(), "wirebuddy-probe-"));
-  mkdirSync(join(config, "plugins"));
-  writeFileSync(join(config, "plugins/probe.lua"), `io.stderr:write("WIREBUDDY-PROBE\\t" .. Dir.global_plugins_path() .. "\\n")\n`);
+  try {
+    mkdirSync(join(config, "plugins"));
+    writeFileSync(join(config, "plugins/probe.lua"), `io.stderr:write("WIREBUDDY-PROBE\\t" .. Dir.global_plugins_path() .. "\\n")\n`);
+  } catch (err) {
+    rmSync(config, { recursive: true, force: true });
+    throw err;
+  }
   return new Promise((done, fail) => {
     const p = spawn(sharkd, ["-"], { env: { ...process.env, WIRESHARK_CONFIG_DIR: config }, stdio: ["pipe", "ignore", "pipe"] });
     let err = "";

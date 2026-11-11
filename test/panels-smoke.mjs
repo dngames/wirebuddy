@@ -171,6 +171,9 @@ try {
   await check("panels: the page only as a frame, with WireBuddy's bridge and no token", async () => {
     assert.equal((await panelReq(host, "/")).status, 403);
     assert.equal((await panelReq(host, "/", { headers: { "sec-fetch-site": "cross-site", "sec-fetch-dest": "document" } })).status, 403);
+    // No page of it was served yet: nobody has a nonce to listen to its events with
+    const early = await Promise.race([panelReq(host, "/_wb/events", { headers: sub("empty") }), new Promise((r) => setTimeout(() => r({ status: "a stream" }), 3000))]);
+    assert.equal(early.status, 409);
     const doc = await panelReq(host, "/", { headers: frameHeaders });
     assert.equal(doc.status, 200);
     assert.match(doc.body, /<script src="\/_wb\/bridge\.js"><\/script><script type="module" src="\/main\.js"><\/script>/);
@@ -199,6 +202,10 @@ try {
     assert.equal((await panelReq(host, "/main.js", { headers: { ...sub("script"), "service-worker": "script" } })).status, 403);
     assert.equal((await panelReq(host, "/api/state", { headers: sub("empty") })).status, 404);
     assert.equal((await panelReq(host, "/../extension.json", { headers: sub("empty") })).status, 404);
+    // A path that can't be decoded is answered as the panel's own
+    const odd = await panelReq(host, "/%E0%A4%A", { headers: sub("script") });
+    assert.equal(odd.status, 400);
+    assert.match(odd.headers["content-security-policy"], /^default-src 'none'; /);
     // Not WireBuddy's own pages, nor WireBuddy's API with its token
     const api = await panelReq(host, "/api/state", { headers: { ...sub("empty"), "x-wirebuddy-token": token } });
     assert.equal(api.status, 404);
@@ -229,7 +236,29 @@ try {
     assert.equal(p.state, "ready");
     assert.equal(p.statusText, "line one?fake line");
     assert.equal(p.errors, 1);
+    // Requests held open count against the panel's four at a time, storage too; cut off, they free their places
+    const mine = { origin: `http://${host}`, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-wb-doc": nonce };
+    const storage = () => panelReq(host, "/_wb/api/storage", { method: "POST", body: '{"op":"get"}', headers: mine });
+    const held = Array.from({ length: 4 }, () => {
+      const req = request({ host: "127.0.0.1", port, path: "/_wb/api/storage", method: "POST", headers: { host, ...mine, "content-length": 100 } });
+      req.on("error", () => {});
+      req.write('{"op":');
+      return req;
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const fifth = await storage();
+    assert.deepEqual([fifth.status, JSON.parse(fifth.body).code], [429, "busy"]);
+    for (const req of held) req.destroy();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal((await storage()).status, 200);
+    // More reports than the bridge ever sends are dropped, and the agent hears of it once
+    const flood = await Promise.all(Array.from({ length: 300 }, (_, i) => report({ kind: "status", text: `s${i}` })));
+    assert.ok(flood.filter((r) => r.status === 429).length >= 100, `${flood.filter((r) => r.status === 429).length} refused`);
+    assert.ok(flood.filter((r) => r.status === 200).length >= 50);
     const events = (await api("/api/events/take", {})).json.events.map((e) => `${e.level} ${e.text}`).join("\n");
+    assert.equal(events.match(/WARNING Panel "hello" sends more than 100 reports a second/g)?.length, 1, events);
+    // Requests cut off half way, or with a path that can't be decoded, are nothing for the agent
+    assert.doesNotMatch(events, /aborted|malformed|_wb/);
     assert.match(events, new RegExp(`ERROR Panel "hello" \\[panel output\\]: boom at ${extDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/hello/panel/main\\.js:3:9`));
   });
 
@@ -591,6 +620,10 @@ try {
     const m = await ownCall("packets", { match: { proto: "tcp" } });
     assert.equal(m.status, 400);
     assert.match(json(m).error, /can't read http\.pcapng\.gz: it is compressed\. Use a display filter instead/);
+    // Told apart from a mistake in the match itself, which a filter wouldn't mend
+    assert.deepEqual([json(m).code, json(m).unsupported], ["bad-args", "match"]);
+    const typo = json(await ownCall("packets", { match: { prot: "tcp" } }));
+    assert.deepEqual([typo.code, typo.unsupported], ["bad-args", undefined]);
     const frames = await pkts({ bytes: "frame", frames: [[10, 12]] });
     for (let i = 0; i < 3; i++) assert.ok(frames.bytes(i).equals(Buffer.from((await api(`/api/frame?num=${10 + i}`)).json.bytes, "base64")));
     // Wireshark numbers a systemd journal entry as a frame; FrameStore doesn't: off for that file
@@ -601,6 +634,7 @@ try {
     const j = await ownCall("packets", { match: { proto: "udp" } });
     assert.equal(j.status, 400);
     assert.match(json(j).error, /found 2 packets, Wireshark 3/);
+    assert.equal(json(j).unsupported, "match");
     assert.equal((await ownCall("packets", { match: { proto: "udp" } })).status, 400);
     const warnings = (await api("/api/events/take", {})).json.events.filter((e) => /through sharkd only/.test(e.text));
     assert.equal(warnings.length, 1);

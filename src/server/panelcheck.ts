@@ -9,12 +9,13 @@ export interface PanelCheck {
   warnings: string[];
 }
 
-const LINTS: [RegExp, string, "error" | "warning"][] = [
-  [/\bimport\b[^;\n]*["'`]https?:\/\//, "imports from the network: panels load only their own files, copy the library into panel/", "error"],
-  [/\b(?:eval\s*\(|new\s+Function\s*\()/, "eval and new Function are blocked in panels", "error"],
-  [/\b(?:fetch\s*\(|new\s+(?:WebSocket|XMLHttpRequest|EventSource)\b)/, "panels have no network: get data from wb (fetch, WebSocket and XMLHttpRequest only reach the panel's own files)", "warning"],
-  [/\.(?:innerHTML|outerHTML)\s*=|\binsertAdjacentHTML\s*\(|\bdocument\.write\s*\(/, "HTML from strings: only for your own markup, never packet data (use wb.h or textContent)", "warning"],
-  [/\b(?:alert|confirm|prompt)\s*\(/, "alert, confirm and prompt are blocked in panels", "warning"],
+/** What may not work when it runs, found by its text alone (also in comments, strings and code that never runs): warnings only. */
+const LINTS: [RegExp, string][] = [
+  [/\bimport\b[^;\n]*["'`]https?:\/\//, "imports from the network: the panel's content security policy refuses them when they run (panels load only their own files; copy the library into panel/)"],
+  [/\b(?:eval\s*\(|new\s+Function\s*\()/, "eval and new Function: the panel's content security policy refuses them when they run (fine in code that never runs, like a library's fallback)"],
+  [/\b(?:fetch\s*\(|new\s+(?:WebSocket|XMLHttpRequest|EventSource)\b)/, "panels have no network: get data from wb (fetch, WebSocket and XMLHttpRequest only reach the panel's own files)"],
+  [/\.(?:innerHTML|outerHTML)\s*=|\binsertAdjacentHTML\s*\(|\bdocument\.write\s*\(/, "HTML from strings: only for your own markup, never packet data (use wb.h or textContent)"],
+  [/\b(?:alert|confirm|prompt)\s*\(/, "alert, confirm and prompt are blocked in panels"],
 ];
 
 /** Checks a panel's files as read for opening it. */
@@ -26,9 +27,9 @@ export async function checkPanel(files: PanelFiles): Promise<PanelCheck> {
     const code = f.bytes.toString("utf8");
     const syntax = await nodeCheck(code);
     if (syntax) out.errors.push(`${where(rel, syntax.line)}: ${syntax.message}`);
-    for (const [re, text, level] of LINTS) {
+    for (const [re, text] of LINTS) {
       const line = lineOf(code, re);
-      if (line) (level === "error" ? out.errors : out.warnings).push(`${where(rel, line)}: ${text}`);
+      if (line) out.warnings.push(`${where(rel, line)}: ${text}`);
     }
   }
   if (/<script\b/i.test(files.body)) out.errors.push(`${where("body.html")}: scripts in body.html don't run: put code into main.js`);
