@@ -45,6 +45,64 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+      # Capturing reads /dev/bpf*, which are root-only by default. The hosted runner is a throwaway VM, so
+      # they are opened to everyone. macOS may add devices while captures run (libpcap takes the first free
+      # one), so a loop keeps the mode on those too until the job ends; the first chmod is done in the
+      # foreground, so the checks below start with it in place. Wireshark's ChmodBPF needs a group the
+      # running shell wouldn't have joined yet.
+      - name: Give the job's user access to the BPF devices
+        shell: bash
+        run: |
+          echo "bpf devices before: $(ls /dev/bpf* 2>/dev/null | wc -l | tr -d ' ')"
+          sudo chmod o+rw /dev/bpf*
+          sudo nohup bash -c 'while :; do chmod o+rw /dev/bpf* 2>/dev/null; sleep 1; done' >/dev/null 2>&1 &
+          disown
+          echo "bpf devices after: $(ls /dev/bpf* | wc -l | tr -d ' ')"
+          ls -l /dev/bpf0
+
+      # Never fails: what the live checks use on this machine
+      - name: What the live checks rely on
+        shell: bash
+        run: |
+          echo "--- ping as the runner user"
+          id -un
+          ping -i 0.2 -c 2 127.0.0.1 || echo "ping -i 0.2: exit $?"
+          ping -i 0.005 -c 2 127.0.0.1 || echo "ping -i 0.005: exit $?"
+          echo "--- tools"
+          /usr/bin/curl --version | head -1 || true
+          command -v curl || true
+          python3 --version || true
+          openssl version || true
+          pgrep -V 2>&1 | head -1 || true
+          command -v pgrep lsof ps || true
+          echo "--- boot session"
+          sysctl -n kern.bootsessionuuid || echo "kern.bootsessionuuid: exit $?"
+          echo "--- ps rss of this shell (KiB)"
+          ps -o rss= -p $$ || true
+          true
+
+      # Fails when capturing on the loopback doesn't work: the live steps below can't mean anything then
+      - name: Capture on the loopback
+        shell: bash
+        run: |
+          set -euo pipefail
+          dumpcap -D | tee "$RUNNER_TEMP/interfaces.txt"
+          grep -Eq '^[0-9]+\. lo0( |$)' "$RUNNER_TEMP/interfaces.txt" || { echo "dumpcap -D doesn't list lo0"; exit 1; }
+          dumpcap -L -i lo0 | tee "$RUNNER_TEMP/linktypes.txt"
+          grep -q "Data link types" "$RUNNER_TEMP/linktypes.txt" || { echo "dumpcap -L -i lo0 printed no link types"; exit 1; }
+          rm -f "$RUNNER_TEMP/probe.pcapng"
+          dumpcap -q -i lo0 -a duration:1 -w "$RUNNER_TEMP/probe.pcapng"
+          capinfos "$RUNNER_TEMP/probe.pcapng"
+          # Counted, not checked: whether each ping packet is seen once or twice on lo0
+          rm -f "$RUNNER_TEMP/ping.pcapng"
+          dumpcap -q -i lo0 -f icmp -a duration:4 -w "$RUNNER_TEMP/ping.pcapng" &
+          capture=$!
+          sleep 1.5
+          ping -c 3 127.0.0.1
+          wait "$capture"
+          echo "packets captured during 3 pings (6 if each is seen once): $(capinfos -c -M "$RUNNER_TEMP/ping.pcapng" | awk '/Number of packets/ {print $NF}')"
+          echo "bpf devices now: $(ls /dev/bpf* | wc -l | tr -d ' ')"
+
       # Never fails: what the extension trust checks read here, to compare with the samples in
       # test/units.mjs, and what they make of the folders extensions and their copies live in
       - name: What the extension trust checks read
@@ -97,10 +155,28 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run test:package
       # The runner's Chrome; without one these fail here instead of skipping
-      - name: npm run test:browser
+      - name: test/browser.mjs
         if: ${{ !cancelled() }}
         env:
           CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        run: npm run test:browser
+        run: node test/browser.mjs
+      - name: test/browser-control.mjs
+        if: ${{ !cancelled() }}
+        env:
+          CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        run: node test/browser-control.mjs
 
-      # No test:live here: capturing needs BPF permissions on the runner, a later step
+      # npm run test:live is the same three files; here each one reports on its own
+      - name: test/live-smoke.mjs
+        if: ${{ !cancelled() }}
+        run: node test/live-smoke.mjs
+      - name: test/live-tail.mjs
+        if: ${{ !cancelled() }}
+        env:
+          CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        run: node test/live-tail.mjs
+      - name: test/live-follow.mjs
+        if: ${{ !cancelled() }}
+        env:
+          CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        run: node test/live-follow.mjs
