@@ -4,9 +4,6 @@ name: macOS (experimental)
 
 on:
   workflow_dispatch:
-  # Only until this file is on main, where it can be started by hand
-  push:
-    branches: [claude/beautiful-noether-f96fnh]
 
 permissions:
   contents: read
