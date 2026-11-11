@@ -21,6 +21,10 @@ All notable changes to this project are documented here. The format follows
 - Panels: `eval`, `new Function` and network imports found in a panel's text are warnings, only code that doesn't parse keeps it from opening; `wb.subscribe` asks again after a passing failure and the agent hears when one ends; an unsupported `match` rejects with `e.unsupported === "match"`
 - Panels: at most 100 reports a second, `wb.storage` counts against the four requests at a time, and a panel's malformed requests no longer show up as viewer errors for the agent
 - Switching a panel-only extension off no longer reads the capture again
+- A slow request no longer makes the ones queued behind it time out: sharkd gets its 5 minutes per request from the moment it starts on it
+- A sharkd crash noticed while writing to it is reported like any other crash (exit code or signal, extension rollback) instead of "write EPIPE"
+- Live capture: provisional rows read while the columns, TLS keys or Decode As changed are no longer shown under the new view, and they are read again when their slice brings along other packets
+- Provisional packets, panel raw matches and the `ip`/`payload` layers see IP behind PPPoE sessions and MPLS labels; later IPv6 fragments of packets with extension headers are recognized as IPv6
 - A wrong command-line option or port is said in one line
 
 ## [0.15.0] - 2026-11-03

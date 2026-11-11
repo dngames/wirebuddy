@@ -18,7 +18,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-slices-"));
 const entry = join(out, "entry.ts");
 writeFileSync(entry, ["livetail", "flows", "framestore", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n") + `\nexport { memoryShort } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`);
 await build({ entryPoints: [entry], outfile: join(out, "slices.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { LiveTail, FlowIndex, FrameStore, Sharkd, Superseded, CHUNK, CONTEXT, sliceFrames, toGlobal, toLocal, renumberRow, renumberInfo, renumberTree, heldReason, streamNumbered, matchingFrames, memoryShort } = await import(join(out, "slices.mjs"));
+const { LiveTail, FlowIndex, FrameStore, Sharkd, Superseded, CHUNK, CONTEXT, sliceFrames, sliceKey, toGlobal, toLocal, renumberRow, renumberInfo, renumberTree, heldReason, streamNumbered, matchingFrames, memoryShort } = await import(join(out, "slices.mjs"));
 
 // sharkd with an empty home, so the user's Wireshark settings don't count
 const home = join(out, "home");
@@ -399,6 +399,15 @@ try {
     assert.deepEqual([tcp[1].l, tcp[1].f, tcp[1].fnum], ["[Reassembled PDU in frame: 20004]", "tcp.reassembled_in == 20004", 20004]);
     assert.equal(tcp[2].l, "[2 Reassembled TCP Segments (2896 bytes): #18001(1448), #20005(1448)]");
     assert.deepEqual([tcp[3].l, tcp[3].f, tcp[3].fnum], ["[Frame: 18001, payload: 0-4 (5 bytes)]", "tcp.segment == 18001", 18001]);
+  });
+
+  await check("slices: one key for the same slice, another when any frame it brings along differs", () => {
+    const like = (changes) => ({ ...s, extras: Int32Array.from(s.extras), after: Int32Array.from(s.after), ref: 0, ...changes });
+    assert.equal(sliceKey(like({})), sliceKey(like({})));
+    // As many frames from after it, but others: a full budget went to another flow's packets
+    const others = [like({ after: Int32Array.of(20100, 20301) }), like({ extras: Int32Array.of(1, 8, 900) }), like({ extras: Int32Array.of(1, 7), after: Int32Array.of(900, 20100, 20300) }), like({ hi: 20006 }), like({ ref: 7 })];
+    const keys = new Set([sliceKey(like({})), ...others.map(sliceKey)]);
+    assert.equal(keys.size, others.length + 1, [...keys].join(" "));
   });
 
   await check("packet comments: rows keep them, details leave their text as written", () => {
@@ -1074,6 +1083,40 @@ try {
       await assert.rejects(tail.rows(0, 100, view, () => false), Superseded);
       assert.equal(sharkdChildren(), before);
       assert.equal((await tail.rows(0, 100, view, () => true)).length, 100);
+    } finally {
+      tail.close();
+    }
+  });
+
+  await check("rows read for a view that changed meanwhile aren't kept for the new one", async () => {
+    const file = await cutAt(37_000);
+    const tail = new LiveTail({ file, dir: out, sharkd: newSharkd });
+    try {
+      await tail.update();
+      tail.rebase(30_000);
+      // The view's columns as they were, read slowly; the view changes while its slice is read
+      const old = { ...view, key: "old columns", fetch: async (engine, params) => (await sleep(300), (await view.fetch(engine, params)).map((r) => ({ ...r, c: r.c.map((v, j) => (j ? "old" : v)) }))) };
+      const slow = tail.rowsOf([30_001, 30_002], old);
+      await sleep(20);
+      const [newer] = await tail.rowsOf([36_000], view);
+      assert.deepEqual([(await slow).map((r) => r.c[1]), newer.c[0]], [["old", "old"], "36000"]);
+      // Nothing kept of the old read: the rows are read again
+      await assert.rejects(tail.rowsOf([30_001, 30_002], view, () => false), Superseded);
+      const rows = await tail.rowsOf([30_001, 30_002, 36_000], view, () => true);
+      assert.ok(rows.every((r) => r.c.length > 1 && !r.c.includes("old")), JSON.stringify(rows[0]));
+      // And kept: they come without a read now
+      assert.deepEqual((await tail.rowsOf([30_001, 30_002, 36_000], view, () => false)).map((r) => r.c.join()), rows.map((r) => r.c.join()));
+      // A filter pass reading its newest matches for the old view while the view changes keeps none of them either
+      let reading;
+      const started = new Promise((resolve) => (reading = resolve));
+      tail.setFilter("dns", null);
+      const pass = tail.filterPass({ ...old, fetch: (engine, params) => (reading(), old.fetch(engine, params)) }, 500);
+      await started;
+      await tail.rowsOf([36_000], view);
+      await pass;
+      const dns = Array.from({ length: tail.listed() }, (_, i) => tail.frameAt(i));
+      assert.ok(dns.length > 20, `${dns.length} matches`);
+      assert.ok((await tail.rowsOf(dns, view)).every((r) => !r.c.includes("old")));
     } finally {
       tail.close();
     }
