@@ -308,6 +308,17 @@ try {
     assert.equal(r.series[1].values.reduce((a, b) => a + b, 0), 16422);
     assert.equal((await api("/api/frame-at?t=0.005")).json.frame, 18);
     assert.equal((await api("/api/frame-at?t=99")).json.frame, null);
+    // Within an interval: frame 18 comes 9.33 ms in, the one before it 3.31 ms
+    assert.equal((await api("/api/frame-at?t=0.005&until=0.010")).json.frame, 18);
+    assert.equal((await api("/api/frame-at?t=0.005&until=0.009")).json.frame, null);
+    assert.equal((await api("/api/frame-at?t=0.005&until=0.005")).status, 400);
+    // Time references don't move it: the graph's intervals count from the first packet
+    await api("/api/timerefs", { frames: [10], on: true });
+    try {
+      assert.equal((await api("/api/frame-at?t=0.005&until=0.010")).json.frame, 18);
+    } finally {
+      await api("/api/timerefs/clear", {});
+    }
   });
 
   await check("export specified packets", async () => {
@@ -322,6 +333,7 @@ try {
       const again = await api("/api/export", { path: out, which: "range", range: "1-3" });
       assert.equal(again.status, 400);
       assert.match(again.json.error, /already exists/);
+      assert.equal(again.json.code, "exists");
       assert.equal((await api("/api/export", { path: out, which: "range", range: "1-3", overwrite: true })).json.frames, 3);
       assert.equal(count(out), 3);
       await api("/api/filter", { filter: "http" });
@@ -531,6 +543,16 @@ try {
       const none = await api("/api/export", { path: join(dir, "none.pcapng"), which: "selected" });
       assert.equal(none.status, 400);
       assert.match(none.json.error, /no packets to export/);
+      // The packets a dialog was opened for, whatever is selected by the time it exports
+      const { file, filter, generation } = await state();
+      const about = { frame: 21, rows: [[0, 0], [2, 3]], view: { file, filter, generation } };
+      await api("/api/select", { frame: 5 });
+      const pinned = await api("/api/export", { path: join(dir, "pinned.pcapng"), which: "selected", about });
+      assert.equal(pinned.json.frames, 3, JSON.stringify(pinned.json));
+      assert.deepEqual(info(join(dir, "pinned.pcapng")), [3, 152 + 152 + 535]);
+      await api("/api/filter", { filter: "tcp" });
+      const gone = await api("/api/export", { path: join(dir, "gone.pcapng"), which: "selected", about });
+      assert.equal(gone.status, 409, JSON.stringify(gone.json));
     } finally {
       await api("/api/filter", { filter: "" });
       rmSync(dir, { recursive: true, force: true });

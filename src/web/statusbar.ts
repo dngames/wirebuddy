@@ -175,7 +175,7 @@ export function createStatusBar(): HTMLElement {
       const c = s.capture;
       // The file being written, where, and how many so far (new files automatically)
       const file = c.currentFile ?? c.files[c.files.length - 1] ?? null;
-      const where = file ? `\nWriting ${baseName(file)} in ${c.dir}${c.files.length > 1 ? ` · ${c.files.length} files` : ""}` : "";
+      const where = file ? `\nWriting ${baseName(file)} in ${c.dir}${c.filesWritten > 1 ? ` · ${c.filesWritten} files` : ""}` : "";
       capSeg.hidden = false;
       capSeg.className = `sb-seg sb-cap ${st.cls}`;
       setText(capSeg, st.text);

@@ -424,10 +424,10 @@ export class Viewer extends EventEmitter {
     });
     this.capture.on("file", (file: string) => {
       // A new capture takes over the view; later ring files only if the view still follows it
-      const files = this.capture.state.files;
-      if (files.length === 1) removeStaleSlices(dirname(file));
-      if (files.length > 1 && !this.followingCapture(files[files.length - 2])) return;
-      this.open(file, files.length > 1).catch((err) => this.problem(`Live view: ${(err as Error).message}`));
+      const { files, filesWritten } = this.capture.state;
+      if (filesWritten === 1) removeStaleSlices(dirname(file));
+      if (filesWritten > 1 && !this.followingCapture(files[files.length - 2])) return;
+      this.open(file, filesWritten > 1).catch((err) => this.problem(`Live view: ${(err as Error).message}`));
       this.scheduleReload();
       this.tailTimer ??= setInterval(() => void this.tailTick(), LIVE_RELOAD_MS);
     });
@@ -2287,11 +2287,12 @@ export class Viewer extends EventEmitter {
     };
   }
 
-  /** First frame at or after `seconds` since the first frame, within the display filter. */
-  async frameAt(seconds: number): Promise<number | null> {
+  /** First frame at or after `seconds` since the first frame (and before `until`, if given), within the display filter. */
+  async frameAt(seconds: number, until?: number): Promise<number | null> {
     this.requireFile();
     if (!Number.isFinite(seconds) || seconds < 0) throw new Error("time must be a non-negative number of seconds");
-    const at = `frame.time_relative >= ${seconds.toFixed(9)}`;
+    if (until !== undefined && !(Number.isFinite(until) && until > seconds)) throw new Error("until must be a time after t");
+    const at = `frame.time_relative >= ${seconds.toFixed(9)}${until === undefined ? "" : ` && frame.time_relative < ${until.toFixed(9)}`}`;
     return this.firstMatching(this.engine, this.state.filter ? `(${this.sharkdFilter(this.state.filter)}) && ${at}` : at);
   }
 
@@ -2469,7 +2470,7 @@ export class Viewer extends EventEmitter {
       const tail = this.listedTail;
       if (this.displayed && tail) leftOut = tail.held ? tail.frames : tail.listed() + tail.unfiltered();
     } else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
-    else if (req.which === "selected") ranges = this.selectedOrCurrent();
+    else if (req.which === "selected") ranges = req.about ? this.framesAbout(req.about) : this.selectedOrCurrent();
     else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), known);
     else throw new Error(`unknown selection "${req.which}"`);
     if (!ranges.length) throw new Error("no packets to export");
@@ -2915,8 +2916,8 @@ export class Viewer extends EventEmitter {
     this.extensions.check(name, on);
     this.extensions.setEnabled(name, on);
     if (!on) this.panels.close(name);
-    // A panel alone needs no sharkd restart
-    if (on && !this.extensions.list().find((e) => e.name === name)?.lua) {
+    // A panel alone needs no sharkd restart, nor does a switch where sharkd loads no extensions
+    if (this.extensions.unavailable || !this.extensions.list().find((e) => e.name === name)?.lua) {
       this.refreshExtensions();
       void this.checkOffers(true);
       return;
@@ -3232,7 +3233,8 @@ function availableBytes(): number | null {
   }
 }
 
-export const CAPTURE_FILE = /\.(pcapng|pcap|cap|ntar|erf|snoop|trc|dmp)(\.(gz|zst|lz4))?$/i;
+/** Names the file dialog lists: of the formats looksLikeCapture lets open() read. */
+export const CAPTURE_FILE = /\.(pcapng|pcap|cap|ntar|snoop)(\.(gz|zst))?$/i;
 
 /** pcap (both byte orders, µs and ns), pcapng, snoop and Network Monitor 2 files start with these. */
 const CAPTURE_MAGIC = ["a1b2c3d4", "d4c3b2a1", "a1b23c4d", "4d3cb2a1", "0a0d0d0a", "736e6f6f70000000", "474d4255"];

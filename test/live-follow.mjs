@@ -13,12 +13,10 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocket } from "ws";
+import { chromeOrSkip } from "./chrome.mjs";
 
-const chromeBin = process.env.CHROME ?? "/usr/bin/google-chrome";
-if (!existsSync(chromeBin)) {
-  console.log(`skip: no Chrome at ${chromeBin} (set CHROME)`);
-  process.exit(0);
-}
+const chromeBin = chromeOrSkip();
+if (!chromeBin) process.exit(0);
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const work = mkdtempSync(join(tmpdir(), "wirebuddy-live-follow-"));
 const home = join(work, "home");

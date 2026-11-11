@@ -286,7 +286,7 @@ export function captureStatusText(s: ViewState): { text: string; cls: string } {
     case "error":
       return { text: `Capture failed: ${c.error ?? "unknown error"}`, cls: "error" };
     default:
-      return { text: c.files.length ? `Idle · last capture wrote ${c.files.length} file${c.files.length === 1 ? "" : "s"}` : "Idle", cls: "idle" };
+      return { text: c.filesWritten ? `Idle · last capture wrote ${c.filesWritten} file${c.filesWritten === 1 ? "" : "s"}` : "Idle", cls: "idle" };
   }
 }
 

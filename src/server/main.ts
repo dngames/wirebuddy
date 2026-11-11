@@ -43,20 +43,33 @@ function which(name: string): string | null {
   return null;
 }
 
-const { values, positionals } = parseArgs({
-  allowPositionals: true,
-  options: {
-    mcp: { type: "boolean", default: false },
-    port: { type: "string", default: process.env.WIREBUDDY_PORT ?? "8765" },
-    token: { type: "string", default: process.env.WIREBUDDY_TOKEN },
-    "capture-dir": { type: "string", default: process.env.WIREBUDDY_CAPTURE_DIR },
-    profile: { type: "string", default: process.env.WIREBUDDY_PROFILE },
-    "tls-keylog": { type: "string" },
-    watch: { type: "string" },
-    help: { type: "boolean", short: "h", default: false },
-    version: { type: "boolean", default: false },
-  },
-});
+/** An option the command line got wrong: said in a line, not as a stack trace. */
+function usageError(message: string): never {
+  process.stderr.write(`wirebuddy: ${message}\n(wirebuddy --help lists the options)\n`);
+  process.exit(2);
+}
+
+function parse() {
+  try {
+    return parseArgs({
+      allowPositionals: true,
+      options: {
+        mcp: { type: "boolean", default: false },
+        port: { type: "string", default: process.env.WIREBUDDY_PORT ?? "8765" },
+        token: { type: "string", default: process.env.WIREBUDDY_TOKEN },
+        "capture-dir": { type: "string", default: process.env.WIREBUDDY_CAPTURE_DIR },
+        profile: { type: "string", default: process.env.WIREBUDDY_PROFILE },
+        "tls-keylog": { type: "string" },
+        watch: { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+        version: { type: "boolean", default: false },
+      },
+    });
+  } catch (err) {
+    usageError((err as Error).message);
+  }
+}
+const { values, positionals } = parse();
 
 if (values.help) {
   console.log(USAGE);
@@ -68,6 +81,9 @@ if (values.version) {
 }
 
 if (values.watch) process.exit(await watch(values.watch));
+
+const port = Number(values.port);
+if (!/^\d+$/.test(values.port) || port > 65535) usageError(`the port must be a number from 0 to 65535, not "${values.port}"`);
 
 // In MCP mode stdout carries the protocol, so everything human goes to stderr
 const log = (msg: string) => (values.mcp ? process.stderr : process.stdout).write(`wirebuddy: ${msg}\n`);
@@ -117,7 +133,7 @@ if (token.length < 16) {
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), "../web");
 const http = await startHttp(viewer, {
-  port: Number(values.port),
+  port,
   token,
   webRoot,
 });
@@ -134,7 +150,12 @@ process.on("SIGTERM", shutdown);
 // The terminal closed
 process.on("SIGHUP", shutdown);
 log(`UI at ${http.url}`);
-writeInstance(instance, http.url);
+// The watcher's way in: without it the server runs all the same
+try {
+  writeInstance(instance, http.url);
+} catch (err) {
+  log(`--watch is unavailable: ${(err as Error).message}`);
+}
 
 if (positionals[0]) {
   viewer.open(resolve(positionals[0])).catch((err) => log(`could not open ${positionals[0]}: ${(err as Error).message}`));

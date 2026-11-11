@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocket } from "ws";
+import { chromeOrSkip } from "./chrome.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const work = mkdtempSync(join(tmpdir(), "wirebuddy-live-tail-"));
@@ -118,8 +119,8 @@ function sharkdsReading(pid, file) {
 
 /** The viewer in headless Chrome: evaluates an expression in its page; null without Chrome. */
 async function openBrowser(url) {
-  const bin = process.env.CHROME ?? "/usr/bin/google-chrome";
-  if (!existsSync(bin)) return null;
+  const bin = chromeOrSkip();
+  if (!bin) return null;
   const profile = mkdtempSync(join(work, "chrome-"));
   const chrome = spawn(bin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"], { stdio: "ignore" });
   let port;
@@ -399,7 +400,7 @@ try {
 
   await check("the packet list marks provisional rows, the status bar counts them (headless Chrome)", async () => {
     browser = await openBrowser(wb.ui);
-    if (!browser) return console.log("     skipped: no Chrome (set CHROME)");
+    if (!browser) return;
     const page = async () => JSON.parse(await browser.evaluate(`JSON.stringify({ prov: [...document.querySelectorAll('.pl-row.prov')].filter((r) => r.style.display !== 'none').map((r) => r.title), live: document.querySelector('.sb-live')?.hidden ? '' : document.querySelector('.sb-live')?.textContent })`) ?? "{}");
     let seenPage = {};
     for (const end = Date.now() + 15_000; !(seenPage.prov?.length && seenPage.live) && Date.now() < end; await sleep(200)) seenPage = await page();

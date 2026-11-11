@@ -1,11 +1,13 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
-import { toRanges } from "./export.ts";
+import { listenLoopback } from "./loopback.ts";
+import { TargetExists, toRanges } from "./export.ts";
 import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
@@ -68,7 +70,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/stats/endpt": (q) => viewer.endpoints(convType(q), q.get("filter") ?? ""),
     "/api/stats/expert": (q) => viewer.expert(q.get("filter") ?? ""),
     "/api/stats/iograph": (q) => viewer.ioGraph(graphs(q.get("graphs")), num(q, "interval")),
-    "/api/frame-at": async (q) => ({ frame: await viewer.frameAt(num(q, "t")) }),
+    "/api/frame-at": async (q) => ({ frame: await viewer.frameAt(num(q, "t"), q.has("until") ? num(q, "until") : undefined) }),
     "/api/follow": (q) => viewer.follow(q.get("proto") || "TCP", q.get("filter") ?? ""),
     "/api/find": (q) => viewer.find(q.get("filter") ?? "", num(q, "from"), num(q, "dir")),
     // Download tokens stay here: a save names objects by frame and sha1
@@ -180,7 +182,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     res.end(json);
   };
 
-  const server = createServer(async (req, res) => {
+  const onRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
       // Panels have hosts of their own and never reach what follows
       if (await viewer.panels.handle(req, res, req.headers.host ?? "")) return;
@@ -208,10 +210,15 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       }
       send(res, 200, result);
     } catch (err) {
-      if (res.headersSent) return res.destroy();
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       if (err instanceof StaleGenerationError) return send(res, 409, { error: err.message });
       // A panel's refusals carry the code its promise rejects with; the panel tells the agent itself
       if (err instanceof ApiError) return send(res, err.status, { error: err.message, code: err.code, ...err.extra });
+      // The export dialog asks whether to replace the file
+      if (err instanceof TargetExists) return send(res, 400, { error: err.message, code: "exists" });
       const status = err instanceof HttpError ? err.status : 400;
       const path = parseUrl(req.url)?.pathname ?? "";
       // The agent hears about what failed for the user (the events routes are its own, a refused question isn't news)
@@ -220,11 +227,11 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       }
       send(res, status, { error: (err as Error).message });
     }
-  });
+  };
 
   // The page only listens; anything it sends is at most a tiny ping
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
-  server.on("upgrade", (req, socket, head) => {
+  const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
     const url = parseUrl(req.url);
     // Browsers can't set headers on a WebSocket: the token comes in the URL here
     if (!url || url.pathname !== "/ws" || !trusted(req) || !tokenOk(url.searchParams.get("token"))) {
@@ -237,7 +244,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
       ws.on("error", () => ws.terminate());
       ws.send(JSON.stringify({ type: "state", state: viewer.state } satisfies ServerEvent));
     });
-  });
+  };
 
   const broadcast = (event: ServerEvent) => {
     let data: string;
@@ -259,18 +266,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
   });
   viewer.on("toast", (level: "info" | "error", text: string) => broadcast({ type: "toast", level, text }));
 
-  await new Promise<void>((resolveListen, reject) => {
-    const tryListen = (p: number, fallback: boolean) => {
-      server.once("error", (err: NodeJS.ErrnoException) => {
-        if (fallback && err.code === "EADDRINUSE") tryListen(0, false);
-        else reject(err);
-      });
-      server.listen(p, "127.0.0.1", () => resolveListen());
-    };
-    tryListen(port, port !== 0);
-  });
-  const address = server.address();
-  port = typeof address === "object" && address ? address.port : port;
+  const listening = await listenLoopback(() => createServer(onRequest).on("upgrade", onUpgrade), port);
+  port = listening.port;
   viewer.panels.port = port;
 
   return {
@@ -278,7 +275,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     viewers: () => [...(wss.clients as Set<WebSocket>)].filter((ws) => ws.readyState === ws.OPEN).length,
     close: () => {
       wss.close();
-      server.close();
+      for (const server of listening.servers) server.close();
     },
   };
 }
@@ -529,7 +526,9 @@ function columnList(value: unknown): CustomColumn[] {
 }
 
 function exportRequest(b: any): ExportRequest {
-  return { path: String(b.path ?? ""), which: b.which, range: b.range === undefined ? undefined : String(b.range), overwrite: !!b.overwrite, markComments: !!b.markComments };
+  const view = viewKey(b.about?.view);
+  const about = view ? { frame: b.about.frame ?? null, rows: rowRanges(b.about.rows), view } : undefined;
+  return { path: String(b.path ?? ""), which: b.which, range: b.range === undefined ? undefined : String(b.range), overwrite: !!b.overwrite, markComments: !!b.markComments, ...(about ? { about } : {}) };
 }
 
 /** Request URLs are client input: malformed ones must not throw out of a handler. */

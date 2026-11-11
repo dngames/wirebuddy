@@ -7,13 +7,14 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
-import { accessSync, chmodSync, constants, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
+import { chromeOrSkip } from "./chrome.mjs";
 import { writeCtCapture } from "./media/ct-archive.mjs";
 import { writeHttpGallery } from "./media/http-gallery.mjs";
 import { SCANS, writeLidarCapture } from "./media/lidar-wbpc.mjs";
@@ -24,25 +25,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { values } = parseArgs({ options: { shots: { type: "string" }, verbose: { type: "boolean", default: false } } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function findChrome() {
-  if (process.env.CHROME) return process.env.CHROME;
-  for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
-    for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-      try {
-        accessSync(join(dir, name), constants.X_OK);
-        return join(dir, name);
-      } catch {
-        // not here
-      }
-    }
-  }
-  return null;
-}
-const chromePath = findChrome();
-if (!chromePath) {
-  console.log("skipped: no Chrome or Chromium found (set CHROME to its path)");
-  process.exit(0);
-}
+const chromePath = chromeOrSkip();
+if (!chromePath) process.exit(0);
 
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
 const extDir = join(home, ".local/share/wirebuddy/extensions");

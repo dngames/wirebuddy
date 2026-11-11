@@ -5,9 +5,9 @@
  * to be woken when the user runs into trouble or asks it something.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ViewerEvent } from "../shared/api.ts";
 import { eventLines } from "./events.ts";
 
@@ -19,14 +19,32 @@ interface Instance {
   pid: number;
 }
 
-/** Where this server publishes its URL and token for the watcher (only the user can read it). */
+/**
+ * Where this server publishes its URL and token for the watcher: the user's
+ * runtime folder, else a folder of the user's own in the shared temp folder.
+ */
 export function instanceFile(): string {
-  return join(process.env.XDG_RUNTIME_DIR || tmpdir(), "wirebuddy", `${process.pid}.json`);
+  const uid = process.getuid?.();
+  const runtime = process.env.XDG_RUNTIME_DIR || (uid !== undefined && existsSync(`/run/user/${uid}`) ? `/run/user/${uid}` : null);
+  const dir = runtime ? join(runtime, "wirebuddy") : join(tmpdir(), uid === undefined ? "wirebuddy" : `wirebuddy-${uid}`);
+  return join(dir, `${process.pid}.json`);
 }
 
+/**
+ * Writes the instance file so that only the user can read it: its folder must
+ * be the user's own (no link, no one else's), and the file is made anew, so a
+ * file or link someone left under its name is never written through.
+ */
 export function writeInstance(file: string, url: string): void {
-  mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
-  writeFileSync(file, JSON.stringify({ url, pid: process.pid } satisfies Instance), { mode: 0o600 });
+  const dir = dirname(file);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = lstatSync(dir);
+  const uid = process.getuid?.();
+  if (!st.isDirectory()) throw new Error(`${dir} is not a folder`);
+  if (uid !== undefined && st.uid !== uid) throw new Error(`${dir} belongs to another user`);
+  if (uid !== undefined && st.mode & 0o077) chmodSync(dir, 0o700);
+  rmSync(file, { force: true });
+  writeFileSync(file, JSON.stringify({ url, pid: process.pid } satisfies Instance), { mode: 0o600, flag: "wx" });
 }
 
 export function removeInstance(file: string): void {

@@ -422,11 +422,11 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       if (s.panels.length) lines.push(`Panels open: ${s.panels.map((p) => `${p.name} (${p.state}, opened by ${p.by}${p.errors ? `, ${p.errors} errors` : ""})`).join(", ")}`);
       // The status bar shows the first three
       if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.slice(0, 3).map((o) => `${o.name} ("${o.text}")`).join(", ")}${s.panelOffers.length > 3 ? ` (${s.panelOffers.length - 3} more not shown)` : ""}`);
-      if (c.status !== "idle" || c.files.length) {
+      if (c.status !== "idle" || c.filesWritten) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
         lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
         const active = c.status === "starting" || c.status === "running" || c.status === "stopping";
-        const ring = c.ring ? ` (${c.ring.files ? `ring buffer of ${c.ring.files} files` : "new files automatically"}, ${c.files.length} written)` : "";
+        const ring = c.ring ? ` (${c.ring.files ? `ring buffer of ${c.ring.files} files` : "new files automatically"}, ${c.filesWritten} written)` : "";
         if (c.currentFile) lines.push(`  ${active ? "writing" : "last file:"} ${c.currentFile}${ring}`);
         if (active && c.currentFile && s.file !== c.currentFile) lines.push("  (the view shows a different file, not the live capture)");
       }

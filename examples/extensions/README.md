@@ -10,7 +10,8 @@ Panels to copy and adapt, each written against the `wb` API that the panel guide
 | `lidar-wbpc` | A made-up lidar protocol, `wbpc`, as a point cloud in WebGL2: orbit, zoom, color by intensity, height or ring, scan stepping | `wbpc.lua` decodes UDP port 7502 |
 
 To try one, copy its folder into `~/.local/share/wirebuddy/extensions/` (not writable by others),
-make a capture for it and open the panel from View › Panels:
+make a capture for it and open the panel from View › Panels. The capture generators are in a
+clone of the repository, not in the npm package:
 
 ```bash
 node test/media/http-gallery.mjs gallery.pcap
@@ -18,4 +19,4 @@ node test/media/rtp-h264.mjs rtp.pcap
 node test/media/lidar-wbpc.mjs lidar.pcap
 ```
 
-`npm run test:browser` opens each one on its capture in headless Chrome.
+There, `npm run test:browser` opens each one on its capture in headless Chrome.

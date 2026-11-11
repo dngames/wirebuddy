@@ -2,8 +2,8 @@
  * Contract between the wirebuddy server and its web UI.
  *
  * All HTTP endpoints live under `/api`, take and return JSON, and require the
- * session token: either the `X-WireBuddy-Token` header or a `token` query
- * parameter. The UI reads the token from its own URL (`/?token=...`).
+ * session token in the `X-WireBuddy-Token` header. The UI reads the token
+ * from its own URL (`/?token=...`).
  * Errors come back as a non-2xx status with an {@link ApiError} body.
  *
  * The WebSocket at `/ws?token=...` only pushes {@link ServerEvent}s; the UI
@@ -56,11 +56,13 @@
  * | GET    | /api/stats/endpt              | ?type=eth\|ipv4\|ipv6\|tcp\|udp&filter= | EndpointRow[]     |
  * | GET    | /api/stats/expert             | ?filter= (optional)                  | ExpertItem[]           |
  * | GET    | /api/stats/iograph            | ?interval=<ms>&graphs=<JSON IoGraphSpec[]> | IoGraphResult    |
- * | GET    | /api/frame-at                 | ?t=<seconds since first frame>       | { frame: number \| null } |
+ * | GET    | /api/frame-at                 | ?t=<seconds since first frame>[&until=<seconds>] | { frame: number \| null } |
  * | POST   | /api/columns                  | { columns: CustomColumn[] }          | FilterCheck            |
  * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
  * | POST   | /api/decode-as                | DecodeAsChange                       | DecodeAsResult         |
- * | POST   | /api/export                   | ExportRequest                        | ExportResult           |
+ * | POST   | /api/export                   | ExportRequest                        | ExportResult (400 with code "exists": the file is there, ask before `overwrite`) |
+ * | GET    | /api/objects                  | ?kind=http\|imf\|smb\|tftp\|dicom\|ftp-data | ObjectList      |
+ * | POST   | /api/objects/save             | { kind, dir, file, keys? } (409 if another capture is open) | ObjectSaveResult |
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
  * | POST   | /api/marks                    | { frames, note }                     | { ok: true }           |
  * | POST   | /api/marks/clear              | { frames? } (omit: clear all)        | { ok: true }           |
@@ -84,9 +86,6 @@
  * | POST   | /api/panels/health            | { name, label, state }               | { ok: true }           |
  * | POST   | /api/panels/act               | PanelAct                             | { ok: true } (403 denied) |
  * | POST   | /api/panels/offers/dismiss    | { name }                             | { ok: true }           |
- *
- * Panels are served on hosts of their own, `p<label>.localhost:<port>`
- * (src/server/panels.ts), never with the token.
  * | GET    | /api/events                   | ?after=<seq>&wait=<ms>&problems=1    | { events, last, taken } |
  * | POST   | /api/events                   | { level, text, details? } (from the page) | { ok: true }      |
  * | POST   | /api/events/take              |                                      | { events }             |
@@ -97,6 +96,9 @@
  * | GET    | /api/capture/activity         |                                      | InterfaceActivity      |
  * | POST   | /api/capture/start            | CaptureRequest                       | { ok: true }           |
  * | POST   | /api/capture/stop             |                                      | { ok: true }           |
+ *
+ * Panels are served on hosts of their own, `p<label>.localhost:<port>`
+ * (src/server/panels.ts), never with the token.
  */
 
 import type { Ranges } from "./ranges.ts";
@@ -548,8 +550,10 @@ export interface CaptureState {
   promiscuous: boolean;
   /** File being written now (the live view shows this file). */
   currentFile: string | null;
-  /** All files written by the current or last capture, oldest first. */
+  /** Files written by the current or last capture, oldest first: the newest ones of a capture that goes on in new files. */
   files: string[];
+  /** How many files it wrote in all. */
+  filesWritten: number;
   /** Directory captures are written to. */
   dir: string;
   /** Epoch milliseconds, null when not capturing. */
@@ -622,6 +626,12 @@ export interface ExportRequest {
   /** Which packets: the displayed ones, the marked ones, the selected ones (see {@link ViewState.selectedRows}), or a range like "1-10,25". */
   which: "displayed" | "marked" | "selected" | "range" | "all";
   range?: string;
+  /**
+   * For "selected": the packets the dialog was opened for (the rows `rows`,
+   * else the frame `frame`, of the list `view` showed) in place of the ones
+   * selected now; refused with 409 once that list is gone.
+   */
+  about?: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } };
   /** Replace an existing file. */
   overwrite?: boolean;
   /**

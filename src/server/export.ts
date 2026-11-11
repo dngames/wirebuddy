@@ -41,6 +41,9 @@ export function toRanges(frames: Iterable<number>): Ranges {
   return mergeRanges([...frames].map((f) => [f, f] as [number, number]));
 }
 
+/** The export target is an existing file and `overwrite` wasn't given: the UI asks before replacing it. */
+export class TargetExists extends Error {}
+
 /**
  * Checks an export target and returns its file format. `protectedFiles` (the
  * open capture, files being recorded) are compared by identity, so another
@@ -58,7 +61,7 @@ export function checkTarget(path: string, protectedFiles: string[], overwrite: b
     const st = statSync(file, { throwIfNoEntry: false });
     if (st && st.dev === existing.dev && st.ino === existing.ino) throw new Error("can't export over the open capture or a file being recorded");
   }
-  if (!overwrite) throw new Error(`${path} already exists`);
+  if (!overwrite) throw new TargetExists(`${path} already exists`);
   return ext === ".pcap" ? "pcap" : "pcapng";
 }
 
