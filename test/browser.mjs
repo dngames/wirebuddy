@@ -201,11 +201,17 @@ try {
     assert.match(test, new RegExp(`Panel of "${name}": checks out`), test);
     assert.doesNotMatch(test, /warning:/, test);
     const opened = await tool("panel", { action: "open", name, wait_ms: 15000 });
-    assert.match(opened, /ready after \d+ ms\. Isolated: yes\./, opened);
+    assert.match(opened, /ready after \d+ ms\./, opened);
     assert.doesNotMatch(opened, /Errors \[panel output\]/, opened);
     const src = (await api("/api/state")).panels.find((x) => x.name === name).src;
     const frame = await until(async () => (await targets()).find((t) => t.type === "iframe" && t.url.startsWith(src)));
     assert.ok(frame?.webSocketDebuggerUrl, `no DevTools target for the frame of ${name}`);
+    // Chrome says the frame is out of process; WireBuddy's own check, which may take a few rounds, must agree
+    const verdict = await until(async () => {
+      const m = (await tool("panel", { action: "status", name })).match(/Isolated: (yes|no)\./);
+      return m ? m[1] : { done: false };
+    }, 10000);
+    assert.equal(verdict, "yes", `Chrome: frame is its own target; WireBuddy: ${typeof verdict === "string" ? `Isolated: ${verdict}` : "no verdict within 10 s"}`);
     return { test, frame: await connect(frame.webSocketDebuggerUrl) };
   }
 

@@ -17,7 +17,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -26,6 +26,7 @@ const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, r
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
+const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 
 let failures = 0;
@@ -53,6 +54,22 @@ function packetComments(file) {
 }
 
 try {
+  await check("panel isolation: a page task inside the busy window proves it, empty rounds count only when answered", () => {
+    const m = MARGIN_MS;
+    assert.equal(apart([100, 130, 150], 120, 180), true);
+    assert.equal(apart([100, 110, 190, 200], 120, 180), false, "ticks only before and after");
+    assert.equal(apart([120 + m - 1, 180 - m + 1], 120, 180), false, "inside the margins");
+    for (let t = 118; t < 135; t++) assert.equal(apart([t], 120, 120 + 2 * m - 1), false, "a window shorter than two margins");
+    assert.equal(apart([], 0, 1000), false);
+    assert.equal(verdict([]), "again");
+    assert.equal(verdict(["empty", "empty"]), "again");
+    assert.equal(verdict(["empty", "empty", "empty"]), "not-isolated");
+    assert.equal(verdict(["empty", "empty", "apart"]), "isolated");
+    assert.equal(verdict(["apart"]), "isolated");
+    assert.equal(verdict(["unanswered", "unanswered", "unanswered", "unanswered"]), "again");
+    assert.equal(verdict(["empty", "unanswered", "empty", "unanswered", "unanswered"]), "again");
+    assert.equal(verdict(["empty", "unanswered", "empty", "empty"]), "not-isolated");
+  });
   await check("frame sets: building, clipping, intersecting, ranking, paging", () => {
     const a = FrameSet.fromSorted([1, 2, 2, 3, 7, 9, 10]);
     assert.equal(a.count, 6);

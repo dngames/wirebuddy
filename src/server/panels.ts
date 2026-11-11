@@ -442,8 +442,9 @@ export class Panels extends EventEmitter {
         break;
       case "isolated":
       case "not-isolated":
+        // A verdict may come long after ready; the warning is told once, when it turns to "no"
+        if (health === "not-isolated" && inst.isolated !== false) this.tell(inst, "WARNING", "does not run in a process of its own in this browser: a slow panel slows WireBuddy down");
         inst.isolated = health === "isolated";
-        if (!inst.isolated) this.tell(inst, "WARNING", "does not run in a process of its own in this browser: a slow panel slows WireBuddy down");
         break;
     }
     for (const wake of inst.state === "starting" ? [] : inst.waiters.splice(0)) wake();
