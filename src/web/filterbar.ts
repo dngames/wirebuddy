@@ -27,6 +27,9 @@ let applyBtn: HTMLButtonElement;
 let lastServerFilter: string | null = null;
 let checkSeq = 0;
 let completeSeq = 0;
+let applySeq = 0;
+/** Applies under way. */
+let applying = 0;
 let history: string[] = load<string[]>("filterhistory", []).filter((x) => typeof x === "string");
 
 let popMode: "complete" | "history" | null = null;
@@ -161,12 +164,18 @@ async function apply(): Promise<void> {
   check.cancel();
   checkSeq++;
   const text = input.value.trim();
+  const seq = ++applySeq;
+  applying++;
   box.classList.add("busy");
   applyBtn.disabled = true;
   const r = await act.applyFilter(text);
-  box.classList.remove("busy");
-  applyBtn.disabled = false;
-  showCheck(text, r);
+  // Busy until the last of overlapping applies is back
+  if (--applying === 0) {
+    box.classList.remove("busy");
+    applyBtn.disabled = false;
+  }
+  // Text typed or applied since has its own check or apply
+  if (seq === applySeq && input.value.trim() === text) showCheck(text, r);
   if (r.ok && text) addHistory(text);
 }
 

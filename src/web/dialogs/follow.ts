@@ -6,7 +6,7 @@
 import type { ConvRow, FollowResult, FrameDetail } from "../../shared/api.ts";
 import { errorText, get } from "../api.ts";
 import * as act from "../actions.ts";
-import { app, hooks } from "../app.ts";
+import { app, bus, hooks } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import type { MenuItem } from "../menu.ts";
 import { b64ToBytes, copyText, fmtInt, h, hex2, keyLabel, load, save } from "../util.ts";
@@ -168,6 +168,8 @@ export function openFollowDialog(proto: string, filter: string): void {
   let pieces: { frame: number; server: boolean; text: string }[] = [];
   let found = -1;
   let seq = 0;
+  /** The capture it follows was closed or another one opened: its packets and filters aren't the view's anymore. */
+  let gone = false;
 
   const filterOut = d.button(
     "Filter Out This Stream",
@@ -182,7 +184,7 @@ export function openFollowDialog(proto: string, filter: string): void {
   d.button(
     "Back",
     () => {
-      hooks.setFilter(previous, true);
+      if (!gone) hooks.setFilter(previous, true);
       d.close();
     },
     { title: "Restore the previous display filter and close" },
@@ -207,7 +209,7 @@ export function openFollowDialog(proto: string, filter: string): void {
 
   const setInfo = (frame: number | null): void => {
     if (!res) return;
-    info.textContent = `${frame ? `Packet ${frame}. ` : ""}${counts()} Click to select.`;
+    info.textContent = `${frame ? `Packet ${frame}. ` : ""}${counts()}${gone ? "" : " Click to select."}`;
   };
 
   const render = (): void => {
@@ -343,9 +345,23 @@ export function openFollowDialog(proto: string, filter: string): void {
   });
   text.addEventListener("mouseleave", () => setInfo(null));
   text.addEventListener("click", (e) => {
-    if (window.getSelection()?.toString()) return;
+    if (gone || window.getSelection()?.toString()) return;
     const sp = (e.target as HTMLElement).closest<HTMLElement>("[data-frame]");
     if (sp) act.jumpToFrame(Number(sp.dataset.frame));
+  });
+
+  // What is shown stays to read, copy and save; the view is another capture's
+  const file = app.state?.file ?? null;
+  const instance = app.state?.instance;
+  d.onClose = bus.on("state", (st) => {
+    if (gone || (st.file === file && st.instance === instance)) return;
+    gone = true;
+    seq++;
+    d.setTitle(`Follow ${kind} (${current}) [capture closed]`);
+    filterOut.disabled = true;
+    streamIn.disabled = true;
+    if (res) setInfo(null);
+    else text.replaceChildren(h("div", { class: "stat-msg" }, "The capture was closed"));
   });
 
   d.show(text);

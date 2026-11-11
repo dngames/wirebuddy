@@ -119,9 +119,11 @@ export function applyState(s: ViewState): void {
   bus.emit("state", s, prev);
   if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
   // A provisional packet read in full now: its exact details; other time references: its times
-  if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) reloadFrame();
-  else if (app.selFrame !== null && prev?.file === s.file && prev.timeRefsRevision !== s.timeRefsRevision) reloadFrame();
-  else if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
+  if (app.selFrame !== null && prev?.file === s.file && prev.timeRefsRevision !== s.timeRefsRevision) reloadFrame();
+  else if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) {
+    // Once: the states that follow while its request is under way leave that request alone
+    if (loadingNum !== app.frame.num) reloadFrame();
+  } else if (app.selFrame !== (app.frame?.num ?? null)) loadFrame(app.selFrame);
   if (reveal) bus.emit("reveal", reveal.index, reveal.flash);
 }
 
@@ -302,6 +304,8 @@ async function fetchFrame(num: number): Promise<FrameDetail | null> {
     if (num !== app.selFrame) return fd;
     app.frame = fd;
     bus.emit("frame", fd);
+    // Asked for before the full read that covers it by now: its exact details
+    if (fd.provisional && num <= (app.state?.totalFrames ?? 0)) reloadFrame();
     return fd;
   } catch (e) {
     if (seq === frameSeq) {

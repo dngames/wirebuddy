@@ -1,6 +1,6 @@
 /** Statistics > I/O Graphs: up to four packet/byte/bit rate lines over time. */
 
-import type { FilterCheck, FrameDetail, IoGraphResult, IoGraphSpec } from "../../shared/api.ts";
+import type { FilterCheck, IoGraphResult, IoGraphSpec } from "../../shared/api.ts";
 import { errorText, get } from "../api.ts";
 import * as act from "../actions.ts";
 import { app, bus, captureActive } from "../app.ts";
@@ -66,20 +66,6 @@ function niceTicks(max: number, count: number): { top: number; step: number; tic
 
 function decimalsFor(step: number): number {
   return step >= 1 ? 0 : Math.min(6, Math.ceil(-Math.log10(step) - 1e-9));
-}
-
-/** Seconds since the first frame, from the frame's `frame.time_relative` field; null if unknown. */
-async function frameTime(num: number): Promise<number | null> {
-  const fd = await get<FrameDetail>("api/frame", { num });
-  for (const top of fd.tree ?? []) {
-    for (const n of top.n ?? []) {
-      if (n.fn !== "frame.time_relative") continue;
-      const m = /==\s*(-?[\d.]+)/.exec(n.f ?? "") ?? /(-?\d+\.\d+)/.exec(n.l);
-      const v = m ? Number(m[1]) : NaN;
-      return Number.isFinite(v) ? v : null;
-    }
-  }
-  return null;
 }
 
 let current: Dialog | null = null;
@@ -168,7 +154,7 @@ export function openIoGraphDialog(): void {
     const tMax = n * ivS;
     geo = { ml, mt, pw, ph, n, ivS, tMax };
     const xs = (t: number): number => ml + (t / tMax) * pw;
-    const maxOf = (list: typeof series): number => Math.max(0, ...list.flatMap((x) => x.values));
+    const maxOf = (list: typeof series): number => list.reduce((m, x) => x.values.reduce((a, v) => (v > a ? v : a), m), 0);
     const yCount = Math.max(2, Math.floor(ph / 45));
     const axL = niceTicks(maxOf(left), yCount);
     const axR = right.length ? niceTicks(maxOf(right), yCount) : null;
@@ -404,14 +390,10 @@ export function openIoGraphDialog(): void {
     const dec = Math.max(3, decimalsFor(geo.ivS));
     const span = `${t0.toFixed(dec)} s – ${t1.toFixed(dec)} s`;
     try {
-      const r = await get<{ frame: number | null }>("api/frame-at", { t: t0.toFixed(9) });
+      // Times since the first packet, as the graph counts them, whatever the time references
+      const r = await get<{ frame: number | null }>("api/frame-at", { t: t0.toFixed(9), until: t1.toFixed(9) });
       if (r.frame === null || r.frame === undefined) {
-        toast("info", `No packet in this interval (${span})`);
-        return;
-      }
-      const ft = await frameTime(r.frame);
-      if (ft !== null && (ft < t0 - 1e-9 || ft >= t1 - 1e-9)) {
-        toast("info", `No packet in this interval (${span})`);
+        toast("info", `No ${app.state?.filter ? "displayed " : ""}packet in this interval (${span})`);
         return;
       }
       act.jumpToFrame(r.frame);
