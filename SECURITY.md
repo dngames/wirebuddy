@@ -124,8 +124,10 @@ with provenance: each version's npm page links to the commit and the workflow ru
 - Residual risks of panels: code in a panel can still reach the network through WebRTC, which no
   Content Security Policy blocks, so a panel has the same trust as the Lua the agent writes; a
   panel reads everything in the open capture, TLS-decrypted data included; and the isolation needs
-  a browser that puts each `*.localhost` site into a process of its own (the page checks this and
-  reports a panel that isn't).
+  a browser that puts each `*.localhost` site into a process of its own (the page checks this, by
+  seeing its own tasks run while the panel is busy, and reports a panel that isn't; a panel that
+  sets out to can pass the check, so it tells of a browser that doesn't isolate, not of a hostile
+  panel).
 - Packet contents are untrusted and are always rendered as text, never as HTML.
 - Problems in the viewer, what the user does there and the questions the user asks the agent
   are reported to the attached agent (`--watch` reads them through an instance file only the

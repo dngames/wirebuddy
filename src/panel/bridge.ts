@@ -155,13 +155,14 @@ const FILTER_WAIT_MS = 5 * 60_000;
   // The page checks that the panel responds, and whether it runs in a process of its own
   addEventListener("message", (e) => {
     if (e.source !== parent || (parentOrigin !== "*" && e.origin !== parentOrigin)) return;
-    const m = e.data as { wb?: number; t?: string; seq?: number; ms?: number; id?: number; ok?: boolean; code?: string; error?: string } | null;
+    const m = e.data as { wb?: number; t?: string; seq?: number; ms?: number; n?: number; id?: number; ok?: boolean; code?: string; error?: string } | null;
     if (m?.wb !== 1) return;
     if (m.t === "ping") post({ t: "pong", seq: m.seq });
     else if (m.t === "probe") {
       const end = performance.now() + Math.min(m.ms ?? 0, 200);
+      const from = Date.now();
       while (performance.now() < end);
-      post({ t: "probed" });
+      post({ t: "probed", n: m.n, from, to: Date.now() });
     } else if (m.t === "actres") {
       const pending = acts.get(m.id ?? -1);
       if (!pending) return;

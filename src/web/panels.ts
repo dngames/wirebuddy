@@ -7,6 +7,8 @@
  */
 
 import type { ExtensionList, PanelState, ViewState } from "../shared/api.ts";
+import { apart, verdict } from "../shared/isolation.ts";
+import type { Round } from "../shared/isolation.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { agentName, app, bus } from "./app.ts";
 import { Dialog } from "./dialog.ts";
@@ -34,7 +36,11 @@ interface Win {
   ping: number;
   messages: number;
   second: number;
-  probing: ((done: boolean) => void) | null;
+  /** The probe round waiting for its answer. */
+  probing: ((answer: { from: number; to: number } | null) => void) | null;
+  /** Counts probe sequences: a newer one ends the older. */
+  probeRun: number;
+  probeRound: number;
   footer: HTMLElement;
   maximized: boolean;
   /** When the pointer entered the frame, or 0 while it is outside. */
@@ -149,7 +155,7 @@ function open(p: PanelState): void {
   const dialog = new Dialog(p.title, { width: geo?.w || p.size[0], height: geo?.h || p.size[1], cls: "dlg-panel", modal: false });
   const footer = h("span", { class: "pn-status" });
   dialog.footerLeft.append(footer);
-  const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, footer, maximized: false, pointerIn: 0 };
+  const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, probeRun: 0, probeRound: 0, footer, maximized: false, pointerIn: 0 };
   dialog.button("Reload", () => void post("api/panels/reload", { name: p.name }).catch((e) => toast("error", errorText(e))), { title: "Read the panel's files again and restart it" });
   const maxBtn = dialog.button("Maximize", () => {
     w.maximized = !w.maximized;
@@ -234,7 +240,9 @@ function watch(w: Win): void {
 function stopWatch(w: Win): void {
   if (w.ping) window.clearInterval(w.ping);
   w.ping = 0;
-  w.probing?.(false);
+  // Ends a probe sequence and its round
+  w.probeRun++;
+  w.probing?.(null);
 }
 
 /** Removes the frame, which ends its process, and tells the server why. */
@@ -256,14 +264,19 @@ function onMessage(e: MessageEvent): void {
   if (m?.wb !== 1) return;
   if (m.t === "hello") {
     w.lastPong = Date.now();
-    void probe(w);
+    w.probeRun++;
+    w.probing?.(null);
+    void probe(w, w.probeRun);
   } else if (m.t === "pong") {
     w.lastPong = Date.now();
     if (w.dialog.win.classList.contains("pn-hung")) {
       w.dialog.win.classList.remove("pn-hung");
       health(w, "responding");
     }
-  } else if (m.t === "probed") w.probing?.(true);
+  } else if (m.t === "probed") {
+    const p = m as { n?: unknown; from?: unknown; to?: unknown };
+    if (p.n === w.probeRound && typeof p.from === "number" && typeof p.to === "number") w.probing?.({ from: p.from, to: p.to });
+  }
   else if (m.t === "key" && m.key === "Escape") w.dialog.close();
   else if (m.t === "act") void act(w, m.id, m.m, m.a);
 }
@@ -294,28 +307,72 @@ async function act(w: Win, id: unknown, m: unknown, a: unknown): Promise<void> {
   }
 }
 
-/**
- * Whether the panel runs in a process of its own: it busies itself for 60 ms
- * while this page's timer ticks; in a shared process the ticks stall.
- */
-async function probe(w: Win): Promise<void> {
-  // One at a time: a second hello meanwhile gets this one's answer
-  if (!w.frame || w.probing) return;
-  let worst = 0;
-  let last = performance.now();
-  const ticker = window.setInterval(() => {
-    const now = performance.now();
-    worst = Math.max(worst, now - last);
-    last = now;
-  }, 10);
-  const answered = await new Promise<boolean>((done) => {
-    w.probing = done;
-    w.frame?.contentWindow?.postMessage({ wb: 1, t: "probe", ms: 60 }, w.origin);
-    window.setTimeout(() => done(false), 500);
+/** Pauses before the next round after an empty one, and after an unanswered one (then it gives up). */
+const EMPTY_PAUSES_MS = [250, 1000];
+const UNANSWERED_PAUSES_MS = [2000, 5000, 15000];
+const ROUND_TIMEOUT_MS = 1500;
+
+const sleep = (ms: number): Promise<void> => new Promise((done) => window.setTimeout(done, ms));
+const visible = (): Promise<void> =>
+  new Promise((done) => {
+    const on = (): void => {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", on);
+      done();
+    };
+    document.addEventListener("visibilitychange", on);
   });
-  w.probing = null;
+
+/**
+ * One round: the panel busy-loops 60 ms and says when; meanwhile this page records the time of
+ * a task every 4 ms. A timer, not a message loop: it costs this page nothing between rounds and a
+ * busy window of 60 ms holds a dozen ticks, while a message loop would itself load a loaded CPU.
+ */
+async function round(w: Win): Promise<Round> {
+  if (document.hidden) return "unanswered";
+  const ticks: number[] = [];
+  const ticker = window.setInterval(() => ticks.push(Date.now()), 4);
+  const n = ++w.probeRound;
+  const sent = Date.now();
+  let finish: ((answer: { from: number; to: number } | null) => void) | null = null;
+  const answer = await new Promise<{ from: number; to: number } | null>((done) => {
+    finish = w.probing = done;
+    w.frame?.contentWindow?.postMessage({ wb: 1, t: "probe", ms: 60, n }, w.origin);
+    window.setTimeout(() => done(null), ROUND_TIMEOUT_MS);
+  });
+  const got = Date.now();
+  if (w.probing === finish) w.probing = null;
   window.clearInterval(ticker);
-  if (answered && !document.hidden) health(w, worst >= 45 ? "not-isolated" : "isolated");
+  if (!answer || document.hidden) return "unanswered";
+  // The window can't reach outside the time this page itself waited
+  return apart(ticks, Math.max(answer.from, sent), Math.min(answer.to, got)) ? "apart" : "empty";
+}
+
+/**
+ * Whether the panel runs in a process of its own: rounds until one proves it, or enough empty
+ * ones, spaced out, say it doesn't. A round without an answer, or in a hidden page, says nothing
+ * and is tried again later. `run` identifies this sequence; a newer one or a closed window ends it.
+ */
+async function probe(w: Win, run: number): Promise<void> {
+  const live = (): boolean => w.probeRun === run && !!w.frame;
+  const rounds: Round[] = [];
+  let unanswered = 0;
+  while (live()) {
+    const v = verdict(rounds);
+    if (v !== "again") return health(w, v);
+    if (document.hidden) {
+      await visible();
+      continue;
+    }
+    const r = await round(w);
+    if (!live()) return;
+    rounds.push(r);
+    if (r === "unanswered") {
+      if (document.hidden) continue;
+      if (unanswered >= UNANSWERED_PAUSES_MS.length) return;
+      await sleep(UNANSWERED_PAUSES_MS[unanswered++]);
+    } else if (r === "empty" && verdict(rounds) === "again") await sleep(EMPTY_PAUSES_MS[Math.min(rounds.filter((x) => x === "empty").length, EMPTY_PAUSES_MS.length) - 1]);
+  }
 }
 
 function render(w: Win, p: PanelState): void {
