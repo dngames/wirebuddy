@@ -380,6 +380,7 @@ async function fetchPage(p: number): Promise<void> {
   const g = gen;
   const view = viewKey();
   const comments = app.state?.commentRevision;
+  const reads = readsKey();
   const start = p * PAGE;
   const count = Math.min(PAGE, total - start);
   if (count <= 0) return;
@@ -390,9 +391,9 @@ async function fetchPage(p: number): Promise<void> {
     if (viewKey() !== view || r.generation !== g) return;
     const rows = r.start === start ? r.rows : alignRows(r, start, count);
     if (g !== gen) {
-      // The list only grew since (a live capture): the same frames, as the server reads them now, unless their times or comments changed
+      // The list only grew since (a live capture): the same frames, as the server reads them now, unless their times, comments, columns or dissection changed
       if (pages.has(p)) return;
-      if (g >= timesGen && current(rows, start) && comments === app.state?.commentRevision) setPage(p, rows);
+      if (g >= timesGen && current(rows, start) && comments === app.state?.commentRevision && reads === readsKey()) setPage(p, rows);
       else {
         stale.set(p, [...rows, ...(stale.get(p)?.slice(rows.length) ?? [])]);
         trimStale();
@@ -426,6 +427,11 @@ function setPage(p: number, rows: PacketRow[]): void {
   stale.delete(p);
   failed.delete(p);
   evict(p);
+}
+
+/** Changes when rows read differently: other columns, or packets dissected again. */
+function readsKey(): string {
+  return `${headerKey}\u0002${app.state?.epoch}`;
 }
 
 /** Whether an older generation's page is the whole page of the list now, its rows read in full or provisional as they are now. */
@@ -764,8 +770,10 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
     anchor = i;
     act.selectRow(i, row.num);
   }
-  const n = countRanges(app.selRows);
   const fd = await act.frameDetail(row.num);
+  // Another packet selected while its details loaded: the menu would act on that one
+  if (pendingSel || app.selFrame !== row.num || app.selIndex !== i) return;
+  const n = countRanges(app.selRows);
   const s = app.state;
   const marked = app.marks.has(row.num);
   const conv = fd ? conversationFilters(fd) : [];

@@ -2,7 +2,7 @@
 
 import type { ExportRequest } from "../../shared/api.ts";
 import { countRanges, inRanges } from "../../shared/ranges.ts";
-import { errorText } from "../api.ts";
+import { errorText, HttpError } from "../api.ts";
 import * as act from "../actions.ts";
 import { app, knownFrames } from "../app.ts";
 import { confirmDialog, Dialog } from "../dialog.ts";
@@ -32,6 +32,8 @@ export function openExportDialog(initial: Which = "displayed"): void {
   const marked = app.marks.size;
   const sel = app.selFrame;
   const nSel = countRanges(app.selRows);
+  // "Selected" exports the packets selected now, as the dialog names them, even if the selection changes while it is open
+  const about = { frame: sel, rows: app.selRows, view: { file, filter: s.filter, generation: s.generation } };
   let which: Which = initial === "selected" && !nSel && sel === null ? "displayed" : initial;
   let pathEdited = false;
 
@@ -134,13 +136,14 @@ export function openExportDialog(initial: Which = "displayed"): void {
     showErr(null);
     exportBtn.disabled = true;
     try {
-      // The server exports the selection it knows: send a pending one first
+      // A selection still on its way to the server isn't settled: the dialog may name another
       if (which === "selected" && !(await act.flushSelection())) {
         showErr("The packet list changed; select the packets again");
         return;
       }
       const req: ExportRequest = { path, which };
       if (which === "range") req.range = range;
+      if (which === "selected") req.about = about;
       if (overwrite) req.overwrite = true;
       if (commentsBox.checked && !commentsBox.disabled) req.markComments = true;
       const r = await act.exportPackets(req);
@@ -156,13 +159,12 @@ export function openExportDialog(initial: Which = "displayed"): void {
           }),
       });
     } catch (e) {
-      const m = errorText(e);
-      if (!overwrite && /exist/i.test(m)) {
+      if (!overwrite && e instanceof HttpError && e.code === "exists") {
         exportBtn.disabled = false;
         if (await confirmDialog("Replace File?", `${baseName(path)} already exists. Replace it?`, "Replace")) await run(true);
         return;
       }
-      showErr(m);
+      showErr(e instanceof HttpError && e.status === 409 ? "The packet list changed since this opened; close it and select the packets again" : errorText(e));
     } finally {
       exportBtn.disabled = false;
     }

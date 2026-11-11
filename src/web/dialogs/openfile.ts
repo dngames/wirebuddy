@@ -102,23 +102,28 @@ export function openFilePicker(opts: PickerOptions): void {
     if (!listing.entries.length) list.appendChild(h("div", { class: "of-empty" }, opts.kind === "any" ? "This directory is empty" : "No capture files in this directory"));
   };
 
+  let navSeq = 0;
   const nav = async (dir?: string, fallback = false): Promise<void> => {
+    const seq = ++navSeq;
     showErr(null);
     list.classList.add("loading");
     try {
       const l = await get<DirListing>("api/files", { dir, kind: opts.kind });
+      // Another directory was asked for since
+      if (seq !== navSeq) return;
       listing = l;
       dirIn.value = l.dir;
       save(opts.storeKey, l.dir);
       render();
     } catch (e) {
+      if (seq !== navSeq) return;
       if (fallback) {
         await nav(undefined);
         return;
       }
       showErr(errorText(e));
     } finally {
-      list.classList.remove("loading");
+      if (seq === navSeq) list.classList.remove("loading");
     }
   };
 

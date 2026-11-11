@@ -83,7 +83,7 @@ function renderRow(i: number): HTMLElement {
   if (n.t === "framenum" && n.fnum) {
     lab = h("span", { class: "dt-label dt-link", title: `Go to packet ${n.fnum}` }, label);
   } else if (n.t === "url" && n.url && /^https?:\/\//i.test(n.url)) {
-    lab = h("span", { class: "dt-label dt-link", title: `Open ${n.url.length > 200 ? `${n.url.slice(0, 200)}…` : n.url}` }, label);
+    lab = h("span", { class: "dt-label dt-link", title: `Double-click to open ${n.url.length > 200 ? `${n.url.slice(0, 200)}…` : n.url}` }, label);
   } else {
     lab = h("span", { class: "dt-label" }, label);
   }
@@ -378,11 +378,16 @@ export function createDetailsPane(opts: { onSelect: (n: TreeNode | null) => void
   });
   vl.el.addEventListener("click", (e) => {
     const n = nodeFromEvent(e);
-    if (n && (e.target as HTMLElement).closest(".dt-link")) activateLink(n);
+    // A click follows a frame link; a URL is the capture's text and opens on a double-click only
+    if (n && n.t === "framenum" && (e.target as HTMLElement).closest(".dt-link")) activateLink(n);
   });
   vl.el.addEventListener("dblclick", (e) => {
     const n = nodeFromEvent(e);
-    if (!n || (e.target as HTMLElement).closest(".dt-tog, .dt-link")) return;
+    if (!n || (e.target as HTMLElement).closest(".dt-tog")) return;
+    if ((e.target as HTMLElement).closest(".dt-link")) {
+      if (n.t === "url") activateLink(n);
+      return;
+    }
     toggle(n);
   });
   vl.el.addEventListener("contextmenu", (e) => {

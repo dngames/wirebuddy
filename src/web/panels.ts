@@ -47,6 +47,8 @@ let pageInput = 0;
 const ACTIVATION_MS = 5000;
 
 const wins = new Map<string, Win>();
+/** Labels of panels closed here that the server may still list: a state sent before it heard doesn't open them again. */
+const closing = new Set<string>();
 /** Extensions with a panel, for the menus. */
 let available: { name: string; title: string }[] = [];
 
@@ -125,6 +127,7 @@ function health(w: Win, state: Health): void {
 
 function sync(s: ViewState): void {
   const live = new Map(s.panels.map((p) => [p.name, p]));
+  for (const label of closing) if (!s.panels.some((p) => p.label === label)) closing.delete(label);
   for (const [name, w] of wins) {
     if (!live.has(name)) {
       wins.delete(name);
@@ -133,8 +136,9 @@ function sync(s: ViewState): void {
   }
   for (const p of s.panels) {
     const w = wins.get(p.name);
-    if (!w) open(p);
-    else if (w.label !== p.label) restart(w, p);
+    if (!w) {
+      if (!closing.has(p.label)) open(p);
+    } else if (w.label !== p.label) restart(w, p);
     else render(wins.get(p.name)!, p);
   }
 }
@@ -161,7 +165,10 @@ function open(p: PanelState): void {
     // Closed here (Close, Esc): the server forgets it too
     if (wins.get(p.name) === w) {
       wins.delete(p.name);
-      void closePanel(p.name);
+      const label = w.label;
+      closing.add(label);
+      // Not closed there after all: the next state shows it again
+      void post("api/panels/close", { name: p.name }).catch(() => closing.delete(label));
     }
   };
   // A resize starts on the window's own edge
@@ -292,7 +299,8 @@ async function act(w: Win, id: unknown, m: unknown, a: unknown): Promise<void> {
  * while this page's timer ticks; in a shared process the ticks stall.
  */
 async function probe(w: Win): Promise<void> {
-  if (!w.frame) return;
+  // One at a time: a second hello meanwhile gets this one's answer
+  if (!w.frame || w.probing) return;
   let worst = 0;
   let last = performance.now();
   const ticker = window.setInterval(() => {

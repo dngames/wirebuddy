@@ -92,6 +92,8 @@ export function openConvDialog(kind: Kind, initial = "ipv4"): void {
 
   const data = new Map<string, Row[] | string>();
   const sortBy = new Map<string, { col: number; desc: boolean }>();
+  /** Types being computed, with the scope they were asked for. */
+  const loading = new Map<string, number>();
   let type = TYPES.some(([t]) => t === initial) ? initial : "ipv4";
   let selected: Row | null = null;
 
@@ -224,6 +226,9 @@ export function openConvDialog(kind: Kind, initial = "ipv4"): void {
     const sc = scopeSeq;
     renderTable();
     if (data.has(t) && typeof data.get(t) !== "string") return;
+    // Its tab clicked again while it computes: the answer under way fills it
+    if (loading.get(t) === sc) return;
+    loading.set(t, sc);
     data.delete(t);
     renderTable();
     try {
@@ -234,6 +239,8 @@ export function openConvDialog(kind: Kind, initial = "ipv4"): void {
     } catch (e) {
       if (sc !== scopeSeq) return;
       data.set(t, errorText(e));
+    } finally {
+      if (loading.get(t) === sc) loading.delete(t);
     }
     renderTabs();
     if (t === type) renderTable();

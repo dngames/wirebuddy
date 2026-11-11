@@ -93,6 +93,7 @@ export class Dialog {
 
   show(focus?: HTMLElement | null): void {
     watchMainFocus();
+    watchModalFocus();
     watchResize();
     const active = document.activeElement;
     this.returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
@@ -177,6 +178,59 @@ function watchMainFocus(): void {
   document.addEventListener("focusin", (e) => {
     const t = e.target;
     if (t instanceof HTMLElement && !t.closest(".dlg, .menu")) mainFocus = t;
+  });
+}
+
+/** Where Tab stops in `root`, in order. */
+function tabStops(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>("button, input, select, textarea, a[href], iframe, [tabindex]")].filter((el) => {
+    if (el.tabIndex < 0 || (el as HTMLButtonElement).disabled || !el.getClientRects().length) return false;
+    // A radio group is one stop: its checked button
+    if (el instanceof HTMLInputElement && el.type === "radio" && !el.checked) return !root.querySelector(`input[type="radio"][name="${CSS.escape(el.name)}"]:checked`);
+    return true;
+  });
+}
+
+/** Whether `el` is in the topmost modal dialog `top` or a window opened over it. */
+function overModal(top: Dialog, el: Element | null): boolean {
+  return !!el && open.slice(open.indexOf(top)).some((d) => d.win.contains(el));
+}
+
+let trapping = false;
+/** Where the focus last was in each dialog. */
+const lastFocus = new WeakMap<Dialog, HTMLElement>();
+
+/** While a modal dialog is open, the keyboard focus stays in it: Tab cycles through it, and focus that lands behind it comes back. */
+function watchModalFocus(): void {
+  if (trapping) return;
+  trapping = true;
+  const topModal = (): Dialog | undefined => open.findLast((d) => d.modal);
+  document.addEventListener("keydown", (e) => {
+    const top = topModal();
+    if (!top || e.key !== "Tab" || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const at = document.activeElement;
+    const stops = tabStops(top.win);
+    // A window over it (a panel the agent opened) keeps its own keys
+    if (!stops.length || (!top.win.contains(at) && overModal(top, at))) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    let to: HTMLElement | null = null;
+    if (!top.win.contains(at)) to = e.shiftKey ? last : first;
+    else if (e.shiftKey ? at === first : at === last) to = e.shiftKey ? last : first;
+    if (!to) return;
+    e.preventDefault();
+    to.focus();
+  });
+  document.addEventListener("focusin", (e) => {
+    const top = topModal();
+    const t = e.target;
+    if (!top || !(t instanceof HTMLElement)) return;
+    if (top.win.contains(t)) lastFocus.set(top, t);
+    // Menus and toasts are shown over dialogs
+    if (overModal(top, t) || t.closest(".menu, .toasts")) return;
+    const back = lastFocus.get(top);
+    if (back?.isConnected && top.win.contains(back)) back.focus();
+    if (!top.win.contains(document.activeElement)) tabStops(top.win)[0]?.focus();
   });
 }
 
