@@ -2,8 +2,10 @@
 // export runs, saved objects, the event log, the cleanup of slice folders and Decode As entries.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
+import net from "node:net";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,7 +17,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs", "decodeas", "panelcheck"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -23,6 +25,7 @@ const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Shar
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
+const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -773,6 +776,107 @@ try {
     } finally {
       for (const n of [...gone, ...stuck]) if (existsSync(join(dir, n))) chmodSync(join(dir, n), 0o700);
       for (const n of stuck) if (existsSync(join(dir, n, "sub"))) chmodSync(join(dir, n, "sub"), 0o700);
+    }
+  });
+  await check("instance file: written for the user alone, never through a link, in a folder that is the user's own and not a link", () => {
+    const base = mkdtempSync(join(out, "instance-"));
+    const mode = (path) => statSync(path).mode & 0o777;
+    const saved = process.env.XDG_RUNTIME_DIR;
+    try {
+      // A new folder is private, and so is the file
+      const plain = join(base, "a/1.json");
+      writeInstance(plain, "http://127.0.0.1:1/?token=t");
+      assert.deepEqual([mode(join(base, "a")), mode(plain)], [0o700, 0o600]);
+      assert.deepEqual(JSON.parse(readFileSync(plain, "utf8")), { url: "http://127.0.0.1:1/?token=t", pid: process.pid });
+      // A link left under the name is replaced, not written through
+      const victim = join(base, "victim");
+      writeFileSync(victim, "keep", { mode: 0o644 });
+      mkdirSync(join(base, "b"), { mode: 0o700 });
+      symlinkSync(victim, join(base, "b/2.json"));
+      writeInstance(join(base, "b/2.json"), "http://127.0.0.1:1/?token=secret");
+      assert.equal(readFileSync(victim, "utf8"), "keep");
+      assert.equal(lstatSync(join(base, "b/2.json")).isSymbolicLink(), false);
+      assert.equal(mode(join(base, "b/2.json")), 0o600);
+      assert.match(readFileSync(join(base, "b/2.json"), "utf8"), /secret/);
+      // A world-readable file under the name is replaced by a private one
+      mkdirSync(join(base, "c"));
+      writeFileSync(join(base, "c/3.json"), "old", { mode: 0o644 });
+      writeInstance(join(base, "c/3.json"), "u");
+      assert.equal(mode(join(base, "c/3.json")), 0o600);
+      assert.equal(JSON.parse(readFileSync(join(base, "c/3.json"), "utf8")).url, "u");
+      // A folder that is a link is refused, and nothing is written below it
+      mkdirSync(join(base, "real"));
+      symlinkSync(join(base, "real"), join(base, "d"));
+      assert.throws(() => writeInstance(join(base, "d/4.json"), "u"));
+      assert.deepEqual(readdirSync(join(base, "real")), []);
+      // The user's own folder with a loose mode is tightened
+      mkdirSync(join(base, "e"));
+      chmodSync(join(base, "e"), 0o777);
+      writeInstance(join(base, "e/5.json"), "u");
+      assert.deepEqual([mode(join(base, "e")), mode(join(base, "e/5.json"))], [0o700, 0o600]);
+      // Where it goes: the runtime folder when set, else never straight into the shared temp folder
+      process.env.XDG_RUNTIME_DIR = base;
+      assert.equal(instanceFile(), join(base, "wirebuddy", `${process.pid}.json`));
+      delete process.env.XDG_RUNTIME_DIR;
+      const uid = process.getuid?.();
+      if (uid === undefined) assert.equal(dirname(instanceFile()), join(tmpdir(), "wirebuddy"));
+      else {
+        const want = existsSync(`/run/user/${uid}`) ? `/run/user/${uid}/wirebuddy` : join(tmpdir(), `wirebuddy-${uid}`);
+        assert.equal(instanceFile(), join(want, `${process.pid}.json`));
+        assert.notEqual(dirname(instanceFile()), join(tmpdir(), "wirebuddy"));
+      }
+    } finally {
+      if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = saved;
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  await check("loopback: one port on every address, a taken port gives way to a free one, an address the machine lacks is left out", async () => {
+    // On Linux every 127.x.y.z address can be bound: two of them stand in for the IPv4 and IPv6 loopback
+    if (process.platform !== "linux") return console.log("skip the loopback check: only Linux binds every 127.x.y.z address");
+    const hosts = ["127.0.0.1", "127.0.0.2"];
+    const make = () => createServer((req, res) => res.end("ok"));
+    const open = [];
+    const hold = (port, host) =>
+      new Promise((resolve, reject) => {
+        const s = net.createServer();
+        open.push(s);
+        s.once("error", reject);
+        s.listen(port, host, () => resolve(s));
+      });
+    const stop = (s) => new Promise((resolve) => (s.listening ? s.close(resolve) : resolve()));
+    const ports = (l) => l.servers.map((s) => s.address().port);
+    try {
+      // The same port on both, and both answer
+      const first = await listenLoopback(make, 0, hosts);
+      open.push(...first.servers);
+      assert.deepEqual(ports(first), [first.port, first.port]);
+      for (const h of hosts) assert.equal(await (await fetch(`http://${h}:${first.port}/`)).text(), "ok");
+      const p = first.port;
+      await Promise.all(first.servers.map(stop));
+      // Another program holds the port on the second address: another port, free on both, and the first address's old port is released
+      await hold(p, "127.0.0.2");
+      const moved = await listenLoopback(make, p, hosts);
+      open.push(...moved.servers);
+      assert.notEqual(moved.port, p);
+      assert.deepEqual(ports(moved), [moved.port, moved.port]);
+      await (await hold(p, "127.0.0.1")).close();
+      await Promise.all(moved.servers.map(stop));
+      // The port is in use on the first address: a free one
+      await hold(p, "127.0.0.1");
+      const fell = await listenLoopback(make, p, hosts);
+      open.push(...fell.servers);
+      assert.notEqual(fell.port, p);
+      assert.equal(fell.servers.length, 2);
+      await Promise.all(fell.servers.map(stop));
+      // An address no interface has (EADDRNOTAVAIL) is left out, and nothing throws
+      const some = await listenLoopback(make, 0, ["127.0.0.1", "192.0.2.1"]);
+      open.push(...some.servers);
+      assert.equal(some.servers.length, 1);
+      assert.equal(some.servers[0].address().address, "127.0.0.1");
+    } finally {
+      await Promise.all(open.map(stop));
     }
   });
 } finally {

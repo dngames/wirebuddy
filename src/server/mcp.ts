@@ -116,7 +116,6 @@ function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: num
   return lines.join("\n");
 }
 
-/** The user's selected frames as a display filter, unless that gets too long. */
 /** The capture once dumpcap writes its file, fails or ends, or after `ms`. */
 function captureSettled(viewer: Viewer, ms: number): Promise<CaptureState> {
   return new Promise((done) => {
@@ -153,6 +152,7 @@ function commentsLine(comments: string[]): string {
   return n < comments.length ? `${line} ... and ${comments.length - n} more` : line;
 }
 
+/** The user's selected frames as a display filter, unless that gets too long. */
 function selectionLine(frames: Ranges, count: number): string {
   const filter = framesFilter(frames, MAX_SELECTION_FILTER);
   if (!filter) return `Selected packets: ${count} (too many to list; export_packets with which "selected" exports them)`;
