@@ -1,0 +1,85 @@
+# A probe, started by hand: shows what works on macOS, which we can't try locally.
+# Not a gate. It never runs on push or pull requests, so it can't affect their status.
+name: macOS (experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Wireshark's command-line tools
+        run: brew install wireshark
+
+      # Never fails: the output says which tools the formula ships
+      - name: Which Wireshark tools are on PATH
+        shell: bash
+        run: |
+          for tool in sharkd dumpcap editcap mergecap capinfos; do
+            if path=$(command -v "$tool"); then
+              echo "$tool: $path"
+              "$tool" --version 2>&1 | head -1 || true
+            else
+              echo "$tool: MISSING"
+            fi
+          done
+          echo "--- sharkd Lua support"
+          if command -v sharkd >/dev/null; then
+            sharkd --version 2>&1 | grep -i lua || echo "sharkd reports no Lua"
+          fi
+          true
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+      # npm test is an && chain that stops at the first failure; run its files
+      # one by one so every result shows (build is done above)
+      - name: test/units.mjs
+        if: ${{ !cancelled() }}
+        run: node test/units.mjs
+      - name: test/framestore.mjs
+        if: ${{ !cancelled() }}
+        run: node test/framestore.mjs
+      - name: test/slices.mjs
+        if: ${{ !cancelled() }}
+        run: node test/slices.mjs
+      - name: test/api-smoke.mjs
+        if: ${{ !cancelled() }}
+        run: node test/api-smoke.mjs
+      - name: test/mcp-smoke.mjs
+        if: ${{ !cancelled() }}
+        run: node test/mcp-smoke.mjs
+      - name: test/panels-smoke.mjs
+        if: ${{ !cancelled() }}
+        run: node test/panels-smoke.mjs
+      - name: test/sharkd.mjs
+        if: ${{ !cancelled() }}
+        run: node test/sharkd.mjs
+
+      - name: npm run test:examples
+        if: ${{ !cancelled() }}
+        run: npm run test:examples
+      - name: npm run test:package
+        if: ${{ !cancelled() }}
+        run: npm run test:package
+      # The runner's Chrome; without one these fail here instead of skipping
+      - name: npm run test:browser
+        if: ${{ !cancelled() }}
+        env:
+          CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        run: npm run test:browser
+
+      # No test:live here: capturing needs BPF permissions on the runner, a later step
