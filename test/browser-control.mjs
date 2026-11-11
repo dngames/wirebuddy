@@ -22,6 +22,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const chromeBin = chromeOrSkip();
 if (!chromeBin) process.exit(0);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// CDP key modifiers: Alt 1, Ctrl 2, Meta 4, Shift 8. The page's shortcut key is Command on a Mac, Ctrl elsewhere
+const ALT = 1;
+const MOD = process.platform === "darwin" ? 4 : 2;
 
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
 const panel = join(home, ".local/share/wirebuddy/extensions/clicker/panel");
@@ -330,9 +333,9 @@ try {
     assert.deepEqual((await state()).timeRefs, [6, 9]);
     // Its details, shown already, are read again
     const details = () => evaluate("[...document.querySelectorAll('.dt-label')].map((l) => l.textContent).join('\\n')");
-    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39, modifiers: 2 });
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39, modifiers: MOD });
     await until("frame 9's details as a reference", async () => /Time since reference or first frame: 0\.000000000 seconds/.test(await details()));
-    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "t", code: "KeyT", windowsVirtualKeyCode: 84, modifiers: 3 });
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "t", code: "KeyT", windowsVirtualKeyCode: 84, modifiers: MOD | ALT });
     await until("no time references", async () => (await state()).timeRefs.length === 0);
     await until("frame 9's time from the first packet", async () => (await time(9)) === before);
     await until("frame 9's details from the first packet", async () => /Time since reference or first frame: (?!0\.000000000 )/.test(await details()));
@@ -386,8 +389,7 @@ try {
   });
 
   const key = (k, code, keyCode, modifiers = 0) => cdp("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: keyCode, modifiers });
-  // Ctrl is 2, Alt 1
-  const saveComment = () => key("Enter", "Enter", 13, 2);
+  const saveComment = () => key("Enter", "Enter", 13, MOD);
   const commentBox = (title) => evaluate(`document.querySelector('.dlg-comment .dlg-title-text')?.textContent === ${JSON.stringify(title)} && document.activeElement?.closest('.dlg-comment') !== null`);
   const viewState = async () => (await call("get_view_state")).text;
   const closeComment = async () => {
@@ -418,7 +420,7 @@ try {
   await check("browser: packet comments from the keyboard, the Edit menu, the packet list and the details; the row shows them", async () => {
     await click(...center(await box(row(6))));
     await until("frame 6 selected", async () => (await state()).selected === 6);
-    await key("c", "KeyC", 67, 3);
+    await key("c", "KeyC", 67, MOD | ALT);
     await until("Add Packet Comment", () => commentBox("Add Packet Comment"));
     await cdp("Input.insertText", { text: "first line\nsecond line" });
     await saveComment();
@@ -638,7 +640,7 @@ try {
       // A menu left open by an earlier check would take the keys
       if (await evaluate("!!document.querySelector('.menu-item')")) await key("Escape", "Escape", 27);
       await evaluate("document.querySelector('.pl-scroll').focus()");
-      await key("g", "KeyG", 71, 2);
+      await key("g", "KeyG", 71, MOD);
       await until("the dialog", () => inDialog("dlg-goto"));
       for (let n = 1; n <= 9; n++) {
         await tab();
@@ -686,7 +688,7 @@ try {
       await until("its details", () => evaluate(`document.querySelector('.dt-label')?.textContent.startsWith('Frame ${frame}:') === true`));
       await evaluate("document.querySelector('.vl.dt').focus()");
       // Ctrl+Right expands everything
-      await key("ArrowRight", "ArrowRight", 39, 2);
+      await key("ArrowRight", "ArrowRight", 39, MOD);
       const url = "document.querySelector('.dt-link[title^=\"Double-click to open\"]')";
       await click(...(await findLink(url)));
       await sleep(300);

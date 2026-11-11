@@ -34,7 +34,7 @@ const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
 /** Live capture needs dumpcap rights (wireshark group); without them those checks are skipped. */
 function canCapture() {
   try {
-    execFileSync("dumpcap", ["-L", "-i", "lo"], { stdio: "ignore", timeout: 10000 });
+    execFileSync("dumpcap", ["-L", "-i", LOOPBACK], { stdio: "ignore", timeout: 10000 });
     return true;
   } catch {
     return false;
@@ -88,7 +88,7 @@ async function startServer(extra) {
 let failures = 0;
 async function checkCapture(name, fn) {
   if (capture) await check(name, fn);
-  else console.log(`skip ${name}: dumpcap may not capture on lo here`);
+  else console.log(`skip ${name}: dumpcap may not capture on ${LOOPBACK} here`);
 }
 
 async function check(name, fn) {

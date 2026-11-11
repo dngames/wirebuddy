@@ -114,6 +114,8 @@ async function openBrowser(url, name) {
   await cdp("Page.navigate", { url: url.href });
   const evaluate = async (expression) => (await cdp("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.result?.value;
   const mouse = (type, x, y, extra = {}) => cdp("Input.dispatchMouseEvent", { type, x, y, ...extra });
+  // The page's shortcut key as a CDP modifier: Command (4) on a Mac, Ctrl (2) elsewhere
+  const MOD = process.platform === "darwin" ? 4 : 2;
   const key = async (key, code, keyCode, modifiers = 0) => {
     await cdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code, windowsVirtualKeyCode: keyCode, modifiers });
     await cdp("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: keyCode, modifiers });
@@ -135,7 +137,7 @@ async function openBrowser(url, name) {
       // A busy page may miss the shortcut, or not know packet n yet (its refusal goes to the agent): asked again
       for (let tries = 0; tries < 10; tries++) {
         if (!(await open())) {
-          await key("g", "KeyG", 71, 2);
+          await key("g", "KeyG", 71, MOD);
           for (let k = 0; k < 40 && !(await open()); k++) await sleep(50);
           if (!(await open())) continue;
         }

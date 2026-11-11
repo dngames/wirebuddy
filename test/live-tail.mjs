@@ -14,8 +14,8 @@
 // references, also one long before their slice. dumpcap is test/fake-dumpcap.mjs, which writes
 // generated traffic. The packet list's marking is checked in headless Chrome when there is one.
 // Usage: node test/live-tail.mjs   (after npm run build; CHROME=<path> picks the browser)
-import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -104,6 +104,10 @@ async function server(name, env = {}, homeDir = home) {
 
 /** The sharkd processes of the server `pid` that have `file` open (they read it in full). */
 function sharkdsReading(pid, file) {
+  return existsSync("/proc/self/stat") ? sharkdsReadingProc(pid, file) : sharkdsReadingLsof(pid, file);
+}
+
+function sharkdsReadingProc(pid, file) {
   const out = [];
   for (const p of readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
     try {
@@ -113,6 +117,34 @@ function sharkdsReading(pid, file) {
     } catch {
       // ended meanwhile
     }
+  }
+  return out;
+}
+
+/** Without /proc: the server's sharkd children from pgrep, their open files from lsof (which names the real path). */
+function sharkdsReadingLsof(pid, file) {
+  const run = (cmd, args) => {
+    try {
+      return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+    } catch (err) {
+      // Both exit 1 when nothing matches; any other failure (a missing tool, a timeout) fails the check
+      if (err.status === 1) return String(err.stdout ?? "");
+      throw err;
+    }
+  };
+  let real;
+  try {
+    real = realpathSync(file);
+  } catch {
+    return [];
+  }
+  const children = run("pgrep", ["-x", "-P", String(pid), "sharkd"]).split("\n").filter((l) => /^\d+$/.test(l));
+  if (!children.length) return [];
+  const out = [];
+  let current = 0;
+  for (const line of run("lsof", ["-a", "-p", children.join(","), "-Fpn"]).split("\n")) {
+    if (line[0] === "p") current = Number(line.slice(1));
+    else if (line[0] === "n" && (line.slice(1) === real || line.slice(1) === file) && !out.includes(current)) out.push(current);
   }
   return out;
 }
