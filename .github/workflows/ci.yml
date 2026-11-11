@@ -49,5 +49,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - run: npm run test:examples
       - run: npm run test:package
+      # The runner's Chrome; without one these fail here instead of skipping
+      - run: npm run test:browser
       - run: npm run test:live
