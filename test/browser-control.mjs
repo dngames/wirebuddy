@@ -662,16 +662,21 @@ try {
       for (let frame = 1; frame <= 29; frame++) if (hasUrl((await get(`/api/frame?num=${frame}`)).tree)) return frame;
       return 0;
     };
+    // The details list holds only the rows in view and is filled again when the packet's details are: the link is looked for anew each time
     const findLink = async (selector) => {
+      let at = null;
       await evaluate("document.querySelector('.vl.dt').scrollTop = 0");
       await until(selector, async () => {
-        if (await box(selector)) return true;
-        await evaluate("document.querySelector('.vl.dt').scrollTop += 100");
-        return false;
+        if (!(await box(selector))) {
+          await evaluate("(() => { const v = document.querySelector('.vl.dt'); v.scrollTop = v.scrollTop + v.clientHeight >= v.scrollHeight ? 0 : v.scrollTop + 100; })()");
+          return false;
+        }
+        await evaluate(`${selector}?.scrollIntoView({ block: 'center' })`);
+        await sleep(200);
+        at = await box(selector);
+        return !!at;
       });
-      await evaluate(`${selector}.scrollIntoView({ block: 'center' })`);
-      await sleep(200);
-      return center(await box(selector));
+      return center(at);
     };
     await evaluate("window.__open = window.open; window.__opened = []; window.open = (url) => (window.__opened.push(url), null)");
     try {
@@ -686,7 +691,7 @@ try {
       await click(...(await findLink(url)));
       await sleep(300);
       assert.deepEqual(await evaluate("window.__opened"), []);
-      await dblclick(...center(await box(url)));
+      await dblclick(...(await findLink(url)));
       await until("the URL to open", () => evaluate("window.__opened.length === 1"));
       assert.match(await evaluate("window.__opened[0]"), /^https?:\/\//);
       // E.g. "Response in frame: N"
