@@ -2,10 +2,11 @@
  * FrameStore: raw packets read straight from the open file, without sharkd,
  * for panels and the live view's slices, when it is an uncompressed pcap or
  * pcapng file. It keeps only where
- * each record starts (8 bytes a packet); times, lengths and bytes are read
- * with the record. Indexing stops at the first incomplete or broken block and
- * looks there again when the file grows. Nothing in the file is trusted: no
- * record is read past its block, and none is longer than MAX_RECORD.
+ * each record starts and how long its block is (12 bytes a packet); times,
+ * lengths and bytes are read with the record. Indexing stops at the first
+ * incomplete or broken block and looks there again when the file grows.
+ * Nothing in the file is trusted: no record is read past its block, and none
+ * is longer than MAX_RECORD.
  */
 
 import { closeSync, openSync, readSync, statSync } from "node:fs";

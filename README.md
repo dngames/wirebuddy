@@ -443,7 +443,7 @@ the questions you asked it.
 
 ```bash
 npm run build
-npm test               # unit checks, the capture file reader, live slices against full reads, the HTTP API, MCP tools and panels
+npm test               # unit checks, the sharkd client, the capture file reader, live slices against full reads, the HTTP API, MCP tools and panels
 npm run test:browser   # panels and the examples in headless Chrome (skipped without Chrome)
 npm run test:examples  # the investigations' bugs and their fixes, over loopback without a capture
 npm run test:package   # the npm package installed as users get it, run over MCP
@@ -464,6 +464,16 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   three requests were pipelined into, read as plain TCP segments, and ones of a message that ends
   more than about 8 MiB after them don't say where it is reassembled (less when many connections
   are busy at once).
+- Provisional packets count as settled once no sender with a message or an answer under way has
+  sent anything for 10 s of capture time. If one goes on after such a pause (a slow response, a
+  stalled download, a late DNS or ping reply), the packets listed before it keep reading as if
+  it had ended there (segments don't say where they are reassembled, a request doesn't name its
+  answer, and a display filter's provisional matches among them aren't checked again) until the
+  next full read. Provisional packets behind more than four VLAN tags or eight MPLS labels, on
+  link types other than Ethernet, Linux cooked capture, raw IP and loopback, or inside a tunnel
+  (GRE, VXLAN, Geneve, IP in IP, an Ethernet pseudowire) come without the start of their own
+  connection unless it is among the 2000 or so packets before them, so until read in full they
+  read like a capture begun mid-connection (no window scaling, TLS not decrypted).
 - A time reference the display filter hides stays hidden, while Wireshark lists time references
   whatever the filter; the packets after it count from it all the same, and Next/Previous Time
   Reference go to it. "Open in Wireshark" doesn't take the time references along.

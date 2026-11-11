@@ -323,6 +323,8 @@ export class LiveTail {
   private readonly cache = new Map<number, Map<number, PacketRow>>();
   private cachedRows = 0;
   private cacheKey = "";
+  /** Changes with the view the rows kept are of: rows read for another one aren't kept. */
+  private viewSeq = 0;
   /** Other rows, by chunk, with the slice they were read from: kept while it is the chunk's slice. */
   private readonly recent = new Map<number, { key: string; rows: Map<number, PacketRow> }>();
   private recentRows = 0;
@@ -496,14 +498,15 @@ export class LiveTail {
 
   /** Rows of the given tail frames (ascending), whatever the filter; slices are read only while `wanted` says so. */
   async rowsOf(frames: number[], view: RowView, wanted: () => boolean = () => true): Promise<PacketRow[]> {
-    this.useView(view);
+    const mine = this.useView(view);
     const refs = this.refsSeq;
     const got = new Map<number, PacketRow>();
     for (let i = 0; i < frames.length; ) {
       const { lo, end, complete } = this.chunk(frames[i]);
       let j = i;
       while (j + 1 < frames.length && frames[j + 1] <= end) j++;
-      const cached = this.cache.get(lo);
+      // Another view's rows since a slice was read: they aren't this one's
+      const cached = mine() ? this.cache.get(lo) : undefined;
       if (cached) {
         this.cache.delete(lo);
         this.cache.set(lo, cached);
@@ -514,7 +517,7 @@ export class LiveTail {
         return !r;
       };
       let part = frames.slice(i, j + 1).filter(take(cached));
-      const recent = part.length ? this.recentOf(lo) : undefined;
+      const recent = part.length && mine() ? this.recentOf(lo) : undefined;
       if (recent) part = part.filter(take(recent));
       // A filter's matches are sparse: pages around these ask for the chunk's others next, when they are few
       if (part.length && complete && this.filter && !this.held) {
@@ -523,22 +526,26 @@ export class LiveTail {
       }
       if (part.length) {
         const { rows, slice } = await this.readChunk(part, view, wanted);
-        // Read with time references set or unset meanwhile: not kept
-        this.keepAll(slice, part, rows, got, refs === this.refsSeq);
+        // Read with time references set or unset meanwhile, or while another view's rows came to be kept: not kept
+        this.keepAll(slice, part, rows, got, refs === this.refsSeq && mine());
       }
       i = j + 1;
     }
     return frames.map((f) => got.get(f)!);
   }
 
-  /** Rows kept are of `view`: none once rows read differently. */
-  private useView(view: RowView): void {
-    if (view.key === this.cacheKey) return;
-    this.cache.clear();
-    this.cachedRows = 0;
-    this.recent.clear();
-    this.recentRows = 0;
-    this.cacheKey = view.key;
+  /** Rows kept are of `view`: none once rows read differently. Returns whether they still are, asked after a read. */
+  private useView(view: RowView): () => boolean {
+    if (view.key !== this.cacheKey) {
+      this.cache.clear();
+      this.cachedRows = 0;
+      this.recent.clear();
+      this.recentRows = 0;
+      this.cacheKey = view.key;
+      this.viewSeq++;
+    }
+    const seq = this.viewSeq;
+    return () => seq === this.viewSeq;
   }
 
   /** Rows read from slice `s` of `frames` into `got`, kept (with `keep`) while they read so. */
@@ -754,11 +761,11 @@ export class LiveTail {
       this.unsettled.delete(s.lo);
       if (s.complete && !s.final) this.unsettled.set(s.lo, { key: sliceKey(s), checked: this.count, looked: this.count });
       if (view && rows > 0 && next === from && now.length) {
-        this.useView(view);
+        const mine = this.useView(view);
         const refs = this.refsSeq;
         const newest = now.slice(-rows);
         const read = await this.read(engine, newest, view);
-        this.keepAll(s, newest, read.rows, undefined, refs === this.refsSeq);
+        this.keepAll(s, newest, read.rows, undefined, refs === this.refsSeq && mine());
         if (seq !== this.seq) return false;
       }
       if (!s.complete) this.growingAt = 2 * Date.now() - started;
@@ -976,9 +983,20 @@ export class LiveTail {
   }
 }
 
-/** Which slice an engine holds. */
-function sliceKey(s: Slice): string {
-  return `${s.lo}-${s.end}-${s.hi}-${s.extras.length}-${s.after.length}-${s.ref}`;
+/** Slices' keys, each worked out once. */
+const sliceKeys = new WeakMap<Slice, string>();
+
+/** Which slice an engine holds: its chunk, how far it reaches, its time reference and the frames it brings along. */
+export function sliceKey(s: Slice): string {
+  let key = sliceKeys.get(s);
+  if (key === undefined) {
+    // The same number of other frames is another slice: a budget full of one flow's packets, then of another's
+    const hash = createHash("sha1");
+    for (const frames of [s.extras, s.after]) hash.update(new Uint8Array(frames.buffer, frames.byteOffset, frames.byteLength));
+    key = `${s.lo}-${s.end}-${s.hi}-${s.extras.length}-${s.after.length}-${s.ref}-${hash.digest("base64")}`;
+    sliceKeys.set(s, key);
+  }
+  return key;
 }
 
 /** Where `v` is in the ascending `a`, or -1. */

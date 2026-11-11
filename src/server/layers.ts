@@ -2,7 +2,8 @@
  * Finds the IP packet, or the UDP/TCP payload, in a frame's bytes, for panels
  * that parse their protocol themselves, and what raw matches and the live
  * view's flows look at (link type, VLAN ids, addresses, protocol, ports, TCP
- * flags). Per packet, without reassembly:
+ * flags). IP directly behind the link layer, VLAN tags, a PPPoE session or
+ * MPLS labels; not inside tunnels. Per packet, without reassembly:
  * IP fragments and link types it doesn't know have no layer.
  */
 
@@ -14,6 +15,12 @@ export type Link = "eth" | "sll" | "sll2" | "null" | "raw" | null;
 const ETH_VLAN = new Set([0x8100, 0x88a8, 0x9100]);
 const IPV4 = 0x0800;
 const IPV6 = 0x86dd;
+/** A PPPoE session's packets, and the PPP protocols of IPv4 and IPv6 in them. */
+const PPPOE_SESSION = 0x8864;
+const PPP_IP = new Set([0x0021, 0x0057]);
+/** MPLS, unicast and multicast, and the labels read in a row. */
+const ETH_MPLS = new Set([0x8847, 0x8848]);
+const MAX_MPLS_LABELS = 8;
 /** VLAN tags read in a row (QinQ and more). */
 const MAX_VLAN_TAGS = 4;
 /** IPv6 extension headers skipped on the way to UDP or TCP. */
@@ -46,7 +53,7 @@ export function linkOfType(type: number): Link {
 
 /** What one parse of a frame found; one object is filled again for each frame. -1: not there. */
 export class Parsed {
-  /** Of the network layer, behind any VLAN tags; for raw and loopback links, from the IP version. */
+  /** Of what follows the link layer and any VLAN tags (PPPoE's or MPLS's own when IP is behind them); for raw and loopback links, from the IP version. */
   ethertype = -1;
   /** VLAN ids, outer first. */
   readonly vlans: number[] = [];
@@ -102,7 +109,14 @@ function ipStart(b: Uint8Array, link: Link, out: Parsed): number | null {
   const u16 = (i: number): number => (i + 2 <= b.length ? (b[i] << 8) | b[i + 1] : -1);
   const byType = (type: number, at: number): number | null => {
     out.ethertype = type;
-    return type === IPV4 || type === IPV6 ? at : null;
+    if (type === IPV4 || type === IPV6) return at;
+    // Version 1, type 1, session data: 6 bytes, then the PPP protocol
+    if (type === PPPOE_SESSION) return b[at] === 0x11 && b[at + 1] === 0 && PPP_IP.has(u16(at + 6)) ? at + 8 : null;
+    if (ETH_MPLS.has(type)) {
+      // Behind the label that ends the stack: IP by its version, as Wireshark takes it
+      for (let labels = 0; labels < MAX_MPLS_LABELS && at + 4 <= b.length; labels++, at += 4) if (b[at + 2] & 1) return at + 4;
+    }
+    return null;
   };
   switch (link) {
     case "eth": {
@@ -163,6 +177,8 @@ function ipv6(b: Uint8Array, at: number, out: Parsed): void {
       if ((offset & 0xfff9) !== 0) fragment = true;
       if ((offset & 0xfff8) !== 0) first = false;
       [next, p] = [b[p], p + 8];
+      // A later fragment goes on in the middle of the packet: no header follows
+      if (!first) break;
     } else if (next === 51) {
       if (p + 2 > end) return;
       [next, p] = [b[p], p + (b[p + 1] + 2) * 4];

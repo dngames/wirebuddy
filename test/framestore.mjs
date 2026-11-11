@@ -383,6 +383,35 @@ try {
     assert.deepEqual([later4.fragment, later4.ports, later4.payload, later4.proto], [true, [-1, -1], null, 17]);
     // Don't fragment is no fragment
     assert.equal(view(g.ip4(17, g.udp(1000, 2000, hello), { flags: 0x4000 }), "raw").payload, "hello");
+    // A later fragment of a packet with destination options: what follows its fragment header is the packet's middle, no header
+    const middle6 = view(g.ip6(44, Buffer.concat([Buffer.from([60, 0, 0x05, 0xa8, 0, 0, 0, 1]), Buffer.from([43, 7]), Buffer.alloc(30, 0x61)])), "raw");
+    assert.deepEqual([middle6.ip, middle6.fragment, middle6.ports, middle6.payload, middle6.proto, middle6.src, middle6.dst], [6, true, [-1, -1], null, 60, 8, 24]);
+  });
+
+  await check("layers: IP behind a PPPoE session and behind MPLS labels, also with VLAN tags, as sharkd reads it", async () => {
+    const pppoe = (protocol, ip, code = 0) => Buffer.concat([Buffer.from([0x11, code, 0, 1, (ip.length + 2) >> 8, (ip.length + 2) & 255, protocol >> 8, protocol & 255]), ip]);
+    const label = (n, last) => Buffer.from([n >> 12, (n >> 4) & 255, ((n & 15) << 4) | (last ? 1 : 0), 64]);
+    const udpV6 = (src, extra = {}) => udpV4(src, { ip: 6, dst: src + 16, ...extra });
+    /** Frames with IP in them, and how they read. */
+    const carried = [
+      [g.eth(0x8864, pppoe(0x0021, v4)), udpV4(34, { ethertype: 0x8864 })],
+      [g.eth(0x8864, pppoe(0x0057, v6), [[0x8100, 7]]), udpV6(34, { ethertype: 0x8864, vlans: [7] })],
+      [g.eth(0x8847, Buffer.concat([label(100, true), v4])), udpV4(30, { ethertype: 0x8847 })],
+      [g.eth(0x8847, Buffer.concat([label(100, false), label(200, false), label(16, true), v6])), udpV6(34, { ethertype: 0x8847 })],
+      [g.eth(0x8848, Buffer.concat([label(300, true), v4]), [[0x88a8, 3], [0x8100, 4]]), udpV4(38, { ethertype: 0x8848, vlans: [3, 4] })],
+    ];
+    for (const [frame, reads] of carried) assert.deepEqual(view(frame, "eth"), reads);
+    assert.deepEqual(view(Buffer.concat([Buffer.alloc(14), Buffer.from([0x88, 0x64]), pppoe(0x0021, v4)]), "sll"), udpV4(36, { ethertype: 0x8864 }));
+    // No IP: PPP's own protocols, PPPoE discovery, an Ethernet pseudowire, a label stack without an end
+    const none = [g.eth(0x8864, pppoe(0xc021, Buffer.alloc(40))), g.eth(0x8863, pppoe(0x0021, v4, 9)), g.eth(0x8864, pppoe(0x0021, v4, 9)), g.eth(0x8847, Buffer.concat([label(100, true), Buffer.alloc(4), g.eth(0x0800, v4)])), g.eth(0x8847, Buffer.concat([...Array.from({ length: 9 }, () => label(5, false)), v4]))];
+    for (const frame of none) assert.deepEqual([view(frame, "eth").ip, view(frame, "eth").payload, view(frame, "eth").ports], [0, null, [-1, -1]]);
+    assert.equal(view(none[0], "eth").ethertype, 0x8864);
+    // Wireshark finds the same packets in them
+    const file = write(Buffer.concat([g.pcapHeader(), ...carried.map(([frame], i) => g.pcapRecord(1700000000 + i, 0, frame))]));
+    const load = await sharkd.call("load", { file });
+    assert.equal(load.status, "OK", JSON.stringify(load));
+    const rows = await sharkd.call("frames", { column0: "ip.src:0", column1: "ipv6.src:0", column2: "udp.srcport:0", column3: "udp.dstport:0" });
+    assert.deepEqual(rows.map((r) => r.c), carried.map(([, reads]) => [reads.ip === 4 ? "10.0.0.1" : "", reads.ip === 6 ? "fe80::1" : "", "1000", "2000"]));
   });
 
   await check("fuzz: 10000 random frames parse without a throw, inside their bytes", () => {

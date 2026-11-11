@@ -5,7 +5,7 @@ import { printable } from "./text.ts";
 export const MAX_REQUEST_BYTES = 8190;
 /** The packet list's columns as fields (_ws.col.info): sharkd reads them empty, and next to another column it can abort. */
 export const COLUMN_FIELD = /^_ws\.col(\.|$)/;
-/** A request this slow means sharkd is wedged; it is restarted. */
+/** A request sharkd works on this long means it is wedged; it is restarted. */
 const CALL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Of a stderr line without an end (a plugin writing on and on), only this much is kept. */
 const MAX_PARTIAL_LINE = 64 * 1024;
@@ -58,7 +58,6 @@ interface Pending {
   method: string;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
 }
 
 /**
@@ -72,6 +71,8 @@ export class Sharkd {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
   private pending = new Map<number, Pending>();
+  /** Runs out when sharkd doesn't answer the oldest request in flight in time. */
+  private watchdog: NodeJS.Timeout | null = null;
   private lastLoad: Record<string, unknown> | undefined;
   /** The file the last load was for, also while it is still loading. */
   private loadingFile = "";
@@ -96,6 +97,8 @@ export class Sharkd {
   onLuaError: (error: LuaError) => void = () => {};
   /** Longest answer read, in characters. */
   maxAnswer = MAX_ANSWER;
+  /** Longest sharkd may work on one request, in milliseconds. */
+  callTimeout = CALL_TIMEOUT_MS;
 
   /** `generation` changes whenever `env` would give a different environment. */
   constructor(
@@ -156,8 +159,8 @@ export class Sharkd {
       }
       err = (start === 0 ? err + chunk : chunk.slice(start)).slice(-MAX_PARTIAL_LINE);
     });
-    // Writing to a sharkd that just died raises EPIPE here instead of crashing the server
-    proc.stdin.on("error", (e) => this.fail(proc, e));
+    // Writing to a sharkd that just died raises EPIPE here instead of crashing the server; its exit ("close") says how it died
+    proc.stdin.on("error", () => proc.kill());
     proc.on("error", (e) => {
       ready(null);
       this.fail(proc, e);
@@ -183,12 +186,32 @@ export class Sharkd {
     if (this.proc !== proc) return;
     this.proc = null;
     proc.kill();
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(err);
-    }
+    for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
+    this.watch();
     this.settled();
+  }
+
+  /**
+   * Gives sharkd `callTimeout` from now for the oldest request in flight: it
+   * answers in order, so a later one's time starts when its turn comes.
+   */
+  private watch(): void {
+    if (this.watchdog) clearTimeout(this.watchdog);
+    this.watchdog = null;
+    const proc = this.proc;
+    const oldest = this.pending.entries().next().value;
+    if (!proc || !oldest) return;
+    const [id, p] = oldest;
+    const secs = this.callTimeout / 1000;
+    this.watchdog = setTimeout(() => {
+      this.watchdog = null;
+      this.pending.delete(id);
+      this.settled();
+      p.reject(new SharkdExit(`sharkd did not answer "${p.method}" within ${secs} s`));
+      if (this.proc === proc) this.onFailure(`sharkd did not answer "${p.method}" within ${secs} s and was restarted`);
+      this.stop(proc, "sharkd restarted after a timeout");
+    }, this.callTimeout);
   }
 
   /** After the last request in flight: restart if asked to, wake idle() waiters. */
@@ -227,20 +250,26 @@ export class Sharkd {
     // A plugin's stray output may come first
     const at = line.indexOf('{"jsonrpc"');
     if (at < 0) return;
-    let msg: { id?: number; result?: unknown; error?: { code: number; message: string } };
+    let msg: { id?: number; result?: unknown; error?: { code: number; message: string }; unreadable?: boolean };
     try {
       msg = JSON.parse(line.slice(at));
     } catch {
-      return;
+      // An answer that can't be read still names its request: that one fails now, as no other answer comes for it
+      const id = /^\{"jsonrpc":"2\.0","id":(\d+),/.exec(line.slice(at, at + 64))?.[1];
+      if (id === undefined) return;
+      msg = { id: Number(id), unreadable: true };
     }
     if (msg.id === undefined) return;
     const p = this.pending.get(msg.id);
     if (!p) return;
     // sharkd answers only once its plugins are loaded
     this.lua?.settle();
+    // Not the oldest: sharkd passed over an older request, whose time runs on
+    const oldest = this.pending.keys().next().value === msg.id;
     this.pending.delete(msg.id);
-    clearTimeout(p.timer);
-    if (msg.error) p.reject(new SharkdError(msg.error.message, msg.error.code));
+    if (oldest) this.watch();
+    if (msg.unreadable) p.reject(new Error(`sharkd's answer to "${p.method}" could not be read`));
+    else if (msg.error) p.reject(new SharkdError(msg.error.message, msg.error.code));
     else p.resolve(msg.result);
     this.settled();
   }
@@ -267,14 +296,9 @@ export class Sharkd {
       this.loadedHere = true;
     }
     const result = new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        this.settled();
-        reject(new SharkdExit(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s`));
-        if (this.proc === proc) this.onFailure(`sharkd did not answer "${method}" within ${CALL_TIMEOUT_MS / 1000} s and was restarted`);
-        this.stop(proc, "sharkd restarted after a timeout");
-      }, CALL_TIMEOUT_MS);
-      this.pending.set(id, { method, resolve: resolve as (v: unknown) => void, reject, timer });
+      this.pending.set(id, { method, resolve: resolve as (v: unknown) => void, reject });
+      // The only one in flight: sharkd works on it from now
+      if (this.pending.size === 1) this.watch();
       proc.stdin.write(request + "\n");
     });
     if (method !== "load") return result;
