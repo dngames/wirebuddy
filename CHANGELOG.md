@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Security: the server also takes its port on `::1`, so no other program on the machine can answer for the panels' `localhost` hosts there
+- Security: the instance file `--watch` reads (URL and token) is never written through a link or into another user's folder
+- Security: packet exports are written in a private folder next to the target; nothing of them is readable by others or under a guessable name meanwhile
+- Security: an ACL that can't be read counts as letting others write an extension; without `getfacl`, an entry with any ACL isn't loaded
+- A URL in the packet details opens on a double-click, not on a click
+- A click in the I/O graph finds its packet also when time references are set
+- Modal dialogs keep the keyboard focus; text typed into the filter bar while a filter applies keeps its own validation
+- Export Specified Packets exports the selection the dialog named, and asks before replacing only a file that is there
+- A Follow Stream window acts on nothing once its capture is closed
+- A capture that goes on in new files lists its newest 100 files and counts the rest
+- The file dialog lists only the formats WireBuddy opens
+- `extensions` action "test" also checks the panel of an extension that is switched off
+- Panels: `eval`, `new Function` and network imports found in a panel's text are warnings, only code that doesn't parse keeps it from opening; `wb.subscribe` asks again after a passing failure and the agent hears when one ends; an unsupported `match` rejects with `e.unsupported === "match"`
+- Panels: at most 100 reports a second, `wb.storage` counts against the four requests at a time, and a panel's malformed requests no longer show up as viewer errors for the agent
+- Switching a panel-only extension off no longer reads the capture again
+- A wrong command-line option or port is said in one line
+
 ## [0.15.0] - 2026-11-03
 
 - Now: in a live capture, tap the flag (or N) to have the agent look at what just happened, or hold it to flag a span, marked with packet comments
