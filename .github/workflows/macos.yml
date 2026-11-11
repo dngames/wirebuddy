@@ -45,6 +45,27 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+      # Never fails: what the extension trust checks read here, to compare with the samples in
+      # test/units.mjs, and what they make of the folders extensions and their copies live in
+      - name: What the extension trust checks read
+        shell: bash
+        run: |
+          for p in / /Users "$HOME" "$HOME/.local" "$HOME/.local/share" /private /private/tmp /private/var/folders "$TMPDIR" /opt/homebrew /usr/local; do
+            if [ -e "$p" ]; then /bin/ls -ledq -- "$p" || true; fi
+          done
+          echo "--- mount"
+          /sbin/mount || true
+          echo "--- devices"
+          stat -f "%d %N" / /System/Volumes/Data /Users "$HOME" "$TMPDIR" /private/tmp || true
+          echo "--- verdicts"
+          npx esbuild src/server/trust.ts --bundle --platform=node --format=esm --outfile="$RUNNER_TEMP/trust.mjs" --log-level=warning || true
+          mkdir -p "$HOME/.local/share/wirebuddy/extensions" || true
+          node --input-type=module -e '
+            const { rootTrust } = await import(process.argv[1]);
+            for (const p of process.argv.slice(2)) console.log(p, "->", JSON.stringify(rootTrust(p)));
+          ' "$RUNNER_TEMP/trust.mjs" "$HOME/.local/share/wirebuddy/extensions" "$HOME" "$TMPDIR" /tmp /Users || true
+          true
+
       # npm test is an && chain that stops at the first failure; run its files
       # one by one so every result shows (build is done above)
       - name: test/units.mjs

@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,7 +71,8 @@ try {
     await check("over MCP: the panel guide points at the package's own examples", async () => {
       const guide = await tool("extensions", { action: "guide", topic: "panel" });
       const folder = /Examples to copy with your file tools: (\S+)\/\{/.exec(guide)?.[1];
-      assert.ok(folder?.startsWith(prefix), folder);
+      // The folder is shown by its real path (macOS temp folders are behind a link)
+      assert.ok(folder && existsSync(folder) && realpathSync(folder).startsWith(realpathSync(prefix)), folder);
       assert.ok(existsSync(join(folder, "http-gallery/extension.json")));
       assert.deepEqual(readdirSync(folder).filter((n) => !n.endsWith(".md")).sort(), ["http-gallery", "lidar-wbpc", "rtp-video"]);
     });

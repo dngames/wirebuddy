@@ -80,7 +80,7 @@ WireBuddy is for working on a capture together with the agent:
 | Protocols Wireshark doesn't decode | stay "Data" unless you install a dissector yourself (Wireshark MCP offers Decode As for protocols Wireshark has) | Decode As for protocols Wireshark has (a right-click or one agent call); Lua dissectors the agent writes, tests and loads for the rest |
 | Beyond packet rows | text and JSON for the agent | panels the agent writes: plots, images, video, point clouds |
 | Ready-made analyses | many, from statistics to threat intelligence | Wireshark's statistics and expert info |
-| Where it runs | anywhere `tshark` runs, headless too | Linux with a browser, Wireshark 4.6 and Node.js 22 (macOS and Windows untested; extensions and panels need Linux) |
+| Where it runs | anywhere `tshark` runs, headless too | Linux with a browser, Wireshark 4.6 and Node.js 22 (macOS and Windows untested; extensions and panels need Linux, or macOS where the same checks are made, verified in CI on a hosted runner, not by hand) |
 
 (Compared with what those projects describe in their READMEs, October 2026.)
 
@@ -159,8 +159,9 @@ A protocol Wireshark knows, on a port it doesn't expect (RTP on UDP port 50000, 
 agent's `decode_as` tool does the same in one call.
 
 Entries apply to every capture you open until WireBuddy exits and win over your profile's Decode As
-for the same port; WireBuddy never writes your Wireshark profile. Decode As needs Linux, like
-extensions.
+for the same port; WireBuddy never writes your Wireshark profile. Decode As needs what extensions
+need: Linux, or macOS where the same checks are made (verified in CI on a hosted runner, not by
+hand).
 
 ## Extensions
 
@@ -191,7 +192,10 @@ Extensions are Lua code that runs as you, with access to your files. WireBuddy o
 extensions no other user could have changed (see [SECURITY.md](SECURITY.md)): a shared team
 folder that colleagues can write is ignored, and so is a folder on a network or FUSE filesystem,
 where that can't be checked. Only let an agent write extensions if you would let it run commands,
-and look at what it wrote. Extensions need Linux.
+and look at what it wrote. Extensions need Linux, or macOS where the same checks are made
+(verified in CI on a hosted runner, not by hand); there a group-writable entry, or one whose ACL
+lets anyone else change it, counts as writable by others, and only local APFS or HFS+ volumes that
+keep ownership are looked into.
 
 ### Panels
 

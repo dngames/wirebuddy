@@ -28,6 +28,8 @@ const transport = new StdioClientTransport({
   env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
   stderr: "ignore",
 });
+/** The loopback interface by platform. */
+const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
 let capture = true;
 try {
   execFileSync("dumpcap", ["-L", "-i", "lo"], { stdio: "ignore", timeout: 10000 });
@@ -362,14 +364,14 @@ try {
     assert.match(heard, /QUESTION The user asks you about 3 packets: What are these\? \{"frames":"frame\.number in \{12\.\.14\}"\}/);
   });
   assert.equal((await agentState()).watching, false);
-  if (capture) await call("list_interfaces", {}, (t) => assert.match(t, /^lo\b.*\[loopback\]/m));
+  if (capture) await call("list_interfaces", {}, (t) => assert.match(t, new RegExp(`^${LOOPBACK}\\b.*\\[loopback\\]`, "m")));
   else console.log("skip list_interfaces: dumpcap may not capture on lo here");
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
   await call("start_capture", { interface: "-w/etc/passwd" }, (t, r) => {
     assert.ok(r.isError);
     assert.match(t, /unknown interface/);
   });
-  await call("start_capture", { interface: "lo", ring_files: 3 }, (t, r) => {
+  await call("start_capture", { interface: LOOPBACK, ring_files: 3 }, (t, r) => {
     assert.ok(r.isError);
     assert.match(t, /new file needs/);
   });

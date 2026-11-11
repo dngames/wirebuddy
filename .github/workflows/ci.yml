@@ -37,10 +37,29 @@ jobs:
       - name: Install Wireshark (sharkd, dumpcap, editcap, mergecap) from the stable PPA
         shell: bash
         run: |
-          sudo add-apt-repository -y ppa:wireshark-dev/stable
-          sudo apt-get update
+          # Launchpad is unreachable now and then: retry up to 5 times, pausing 15, 30, 60, 120 s
+          retry() {
+            local attempt pause=15
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "::error::'$*' failed after $attempt attempts" >&2
+                return 1
+              fi
+              echo "Attempt $attempt of '$*' failed, retrying in ${pause}s" >&2
+              sleep "$pause"
+              pause=$((pause * 2))
+            done
+          }
+          install_wireshark() {
+            sudo apt-get update &&
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireshark-common
+          }
+          retry sudo add-apt-repository -y ppa:wireshark-dev/stable
           echo "wireshark-common wireshark-common/install-setuid boolean false" | sudo debconf-set-selections
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireshark-common
+          retry install_wireshark
           # let the runner user capture on loopback for the capture tests
           sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/dumpcap
           sharkd --version | head -1

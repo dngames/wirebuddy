@@ -149,13 +149,13 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 // The terminal closed
 process.on("SIGHUP", shutdown);
-log(`UI at ${http.url}`);
-// The watcher's way in: without it the server runs all the same
+// The watcher's way in, there before the URL is out; without it the server runs all the same
 try {
   writeInstance(instance, http.url);
 } catch (err) {
   log(`--watch is unavailable: ${(err as Error).message}`);
 }
+log(`UI at ${http.url}`);
 
 if (positionals[0]) {
   viewer.open(resolve(positionals[0])).catch((err) => log(`could not open ${positionals[0]}: ${(err as Error).message}`));

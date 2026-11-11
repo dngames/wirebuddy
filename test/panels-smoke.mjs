@@ -2,7 +2,7 @@
 // Usage: node test/panels-smoke.mjs   (after npm run build)
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -259,7 +259,7 @@ try {
     assert.equal(events.match(/WARNING Panel "hello" sends more than 100 reports a second/g)?.length, 1, events);
     // Requests cut off half way, or with a path that can't be decoded, are nothing for the agent
     assert.doesNotMatch(events, /aborted|malformed|_wb/);
-    assert.match(events, new RegExp(`ERROR Panel "hello" \\[panel output\\]: boom at ${extDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/hello/panel/main\\.js:3:9`));
+    assert.match(events, new RegExp(`ERROR Panel "hello" \\[panel output\\]: boom at ${realpathSync(extDir).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/hello/panel/main\\.js:3:9`));
   });
 
   await check("panels: the watchdog's verdicts reach the agent; closing ends the host", async () => {

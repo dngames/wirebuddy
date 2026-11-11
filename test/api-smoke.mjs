@@ -28,6 +28,9 @@ const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--po
   env,
 });
 
+/** The loopback interface by platform. */
+const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
+
 /** Live capture needs dumpcap rights (wireshark group); without them those checks are skipped. */
 function canCapture() {
   try {
@@ -221,9 +224,9 @@ try {
 
   await checkCapture("capture interfaces and filter check", async () => {
     const ifs = (await api("/api/capture/interfaces")).json;
-    assert.ok(ifs.some((i) => i.name === "lo" && i.loopback));
-    assert.equal((await api("/api/capture/check?iface=lo&filter=" + encodeURIComponent("tcp port 80"))).json.ok, true);
-    const bad = (await api("/api/capture/check?iface=lo&filter=" + encodeURIComponent("tcp portt 80"))).json;
+    assert.ok(ifs.some((i) => i.name === LOOPBACK && i.loopback));
+    assert.equal((await api("/api/capture/check?iface=" + LOOPBACK + "&filter=" + encodeURIComponent("tcp port 80"))).json.ok, true);
+    const bad = (await api("/api/capture/check?iface=" + LOOPBACK + "&filter=" + encodeURIComponent("tcp portt 80"))).json;
     assert.equal(bad.ok, false);
     assert.match(bad.error, /Invalid capture filter/);
   });
@@ -1329,8 +1332,8 @@ try {
     await new Promise((r) => setTimeout(r, 2600));
     const later = (await api("/api/capture/activity")).json;
     assert.ok(!later.error, later.error);
-    assert.ok(later.ifaces.lo?.length >= 1, JSON.stringify(later).slice(0, 200));
-    assert.ok(later.ifaces.lo.every((n) => Number.isInteger(n) && n >= 0));
+    assert.ok(later.ifaces[LOOPBACK]?.length >= 1, JSON.stringify(later).slice(0, 200));
+    assert.ok(later.ifaces[LOOPBACK].every((n) => Number.isInteger(n) && n >= 0));
   });
 
   await check("security: origin null, token in the URL, non-JSON posts, big bodies, bad WebSocket frames", async () => {
