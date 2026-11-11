@@ -7,32 +7,14 @@
  * sharkd, and a loader that loads the enabled extensions and reports on each.
  */
 
-import { execFileSync, spawn } from "node:child_process";
-import {
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  statfsSync,
-  statSync,
-  symlinkSync,
-  writeFileSync,
-  type Stats,
-} from "node:fs";
-import { homedir, tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, extname, join, resolve, sep } from "node:path";
+import { spawn } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, delimiter, dirname, extname, join, resolve } from "node:path";
 import type { ExtensionInfo, ExtensionList } from "../shared/api.ts";
 import type { LuaReport } from "./sharkd.ts";
 import { printable } from "./text.ts";
+import { entryProblem, readChecked, rootTrust, trustChecked, type RootTrust } from "./trust.ts";
 
 /** Extension folder names: also what the agent and the UI call them. */
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -70,6 +52,8 @@ export const PANEL_TYPES: Record<string, string> = {
   ".glsl": "text/plain",
 };
 const OVERLAY_PREFIX = "wirebuddy-plugins-";
+/** Why there are no extensions on a platform without the trust checks. */
+const UNCHECKED = "WireBuddy checks who could change extensions on Linux and macOS only";
 
 /** Runs before every Wireshark plugin while WireBuddy's plugin folder is used. */
 const PRELUDE = `-- WireBuddy's prelude: runs before every Wireshark plugin in WireBuddy's sharkd and Wireshark.
@@ -418,18 +402,6 @@ interface State {
   off: Record<string, string>;
 }
 
-/**
- * Whether others could change what is in a folder. `dev`: its filesystem;
- * `privateDev`: set below a folder of the user's that others can't enter,
- * for entries on that folder's filesystem.
- */
-export interface RootTrust {
-  problem: string | null;
-  real: string;
-  dev: number;
-  privateDev: number | null;
-}
-
 interface Last {
   status: "loaded" | "error";
   error?: string;
@@ -542,9 +514,9 @@ export class Extensions {
 
   /** Finds the real global plugin folder and builds WireBuddy's plugin folder next to it. */
   async init(sharkd: string): Promise<void> {
-    // The checks that keep others' Lua out rely on Linux owners, modes, ACLs and filesystem types
-    if (process.platform !== "linux") {
-      this.unavailable = "only supported on Linux";
+    // The checks that keep others' Lua out exist for Linux and macOS
+    if (!trustChecked()) {
+      this.unavailable = UNCHECKED;
       return;
     }
     try {
@@ -730,9 +702,9 @@ export class Extensions {
     const out: Entry[] = [];
     for (const root of [this.dir, ...this.shared]) {
       if (!existsSync(root)) continue;
-      // Who can change a folder is only checked on Linux: elsewhere none is looked into, for panels neither
-      if (process.platform !== "linux") {
-        ignored.push(`${printable(root)}: extensions are only supported on Linux`);
+      // Who can change a folder is only checked on Linux and macOS: elsewhere none is looked into, for panels neither
+      if (!trustChecked()) {
+        ignored.push(`${printable(root)}: ${UNCHECKED}`);
         continue;
       }
       // Lua runs as the user: a folder others can change is not even listed
@@ -1269,163 +1241,6 @@ function alive(pid: number): boolean {
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-let ownGroup: number | null | undefined;
-
-/** The user's own group when nobody else is in it (Debian's user private groups), else null. */
-function privateGid(): number | null {
-  if (ownGroup !== undefined) return ownGroup;
-  ownGroup = null;
-  const gid = process.getgid?.();
-  try {
-    const [name, , , members] = execFileSync("getent", ["group", String(gid)], { encoding: "utf8", timeout: 5000 }).trim().split(":");
-    if (gid !== undefined && name === userInfo().username && !members) ownGroup = gid;
-  } catch {
-    // no getent: a group-writable file counts as writable by others
-  }
-  return ownGroup;
-}
-
-const aclCache = new Map<string, boolean>();
-
-/**
- * Whether a POSIX ACL lets named users or groups write (the group bits then
- * show the ACL mask). What can't be found out counts as letting them: getfacl
- * failing, or an ACL where there is no getfacl to read it with.
- */
-function aclLetsOthersWrite(path: string, st: Stats): boolean {
-  const key = `${st.dev}:${st.ino}:${st.ctimeMs}`;
-  let result = aclCache.get(key);
-  if (result !== undefined) return result;
-  result = false;
-  try {
-    const acl = execFileSync("getfacl", ["--absolute-names", "--omit-header", "--", path], { encoding: "utf8", timeout: 5000 });
-    for (const line of acl.split("\n")) {
-      const [type, who, perms = ""] = line.split(":");
-      if ((type === "user" || type === "group") && who && perms.slice(0, 3).includes("w")) result = true;
-    }
-  } catch (err) {
-    // Not installed (the acl package): ACLs can be there all the same, restored or inherited
-    result = (err as NodeJS.ErrnoException).code === "ENOENT" ? hasAcl(path) : true;
-  }
-  aclCache.set(key, result);
-  return result;
-}
-
-let gnuLs: boolean | undefined;
-
-/** Whether `path` has an ACL of its own or one for new entries, which GNU ls marks with "+" after the mode; true when ls can't tell. */
-function hasAcl(path: string): boolean {
-  try {
-    gnuLs ??= execFileSync("ls", ["--version"], { encoding: "utf8", timeout: 5000 }).includes("GNU coreutils");
-    if (!gnuLs) return true;
-    const mode = execFileSync("ls", ["-ld", "--", path], { encoding: "utf8", timeout: 5000 }).split(/\s/)[0];
-    // "." marks a security context alone
-    return !/^[-a-zA-Z]{10}\.?$/.test(mode);
-  } catch {
-    return true;
-  }
-}
-
-/** Writable by someone besides the user (and root). */
-function othersCanWrite(st: Stats, path: string): boolean {
-  if (st.mode & 0o002) return true;
-  if (!(st.mode & 0o020)) return false;
-  return st.gid !== privateGid() || aclLetsOthersWrite(path, st);
-}
-
-/** Network and FUSE filesystems: the owners and modes they show don't say who can write. */
-const UNCHECKABLE_FS = new Set([
-  0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x65735546, 0x01021997, 0x00c36400, 0x5346414f, 0x73757245, 0x564c, 0x6b414653, 0x0bd00bd0, 0x47504653, 0x786f4256, 0x20030528,
-  0x19830326,
-]);
-
-/**
- * Whether others could change what is in `root`: every folder from / down to
- * it must belong to root or the user and be closed to other writers, except
- * sticky ones (like /tmp), below which only the user's own entries count. A
- * folder of the user's that others can't enter makes everything below it on
- * the same filesystem private, unless `strict`: then every folder is checked,
- * since one below may be a bind mount of a shared folder.
- */
-export function rootTrust(root: string, strict = false): RootTrust {
-  const fail = (problem: string): RootTrust => ({ problem, real: root, dev: -1, privateDev: null });
-  let real: string;
-  try {
-    real = realpathSync(root);
-  } catch {
-    return fail("it can't be read");
-  }
-  const uid = process.getuid!();
-  let path: string = sep;
-  let sticky = false;
-  let privateDev: number | null = null;
-  let dev = -1;
-  try {
-    const parts = ["", ...real.split(sep).filter(Boolean)];
-    for (const [i, part] of parts.entries()) {
-      path = join(path, part);
-      const st = statSync(path);
-      dev = st.dev;
-      // The folder itself counts even below a private one: it may be a bind mount of a shared folder
-      if (i === parts.length - 1) {
-        if (st.uid !== uid && st.uid !== 0) return fail("another user owns it");
-        if (othersCanWrite(st, path)) return fail("others can write to it");
-      }
-      if (!strict && privateDev !== null && st.dev === privateDev) continue;
-      // Another filesystem mounted below the private folder: check it from here
-      privateDev = null;
-      if (st.uid !== uid && (st.uid !== 0 || sticky)) return fail("another user owns it or a folder above it");
-      if (st.uid === uid && st.isDirectory() && (st.mode & 0o011) === 0) {
-        privateDev = st.dev;
-        sticky = false;
-        continue;
-      }
-      sticky = othersCanWrite(st, path) && (st.mode & 0o1000) !== 0;
-      if (othersCanWrite(st, path) && !sticky) return fail("others can write to it or a folder above it");
-    }
-    if (UNCHECKABLE_FS.has(Number(statfsSync(real).type))) return fail("it is on a network or FUSE filesystem, where WireBuddy can't check who can write");
-  } catch {
-    return fail("it can't be read");
-  }
-  if (sticky) return fail("others can write to it");
-  return { problem: null, real, dev, privateDev };
-}
-
-/** Why something with these stats in a trusted root could have been changed by others, or null. */
-function statProblem(st: Stats, path: string, kind: "folder" | "file", trust: RootTrust): string | null {
-  if (st.isSymbolicLink()) return "is a symbolic link";
-  if (kind === "folder" ? !st.isDirectory() : !st.isFile()) return kind === "file" ? "is not a regular file" : "is not a folder";
-  if (st.dev !== trust.dev) return "is on another filesystem";
-  // Root could change anything anyway
-  if (st.uid !== process.getuid!() && st.uid !== 0) return "belongs to another user";
-  // Another link to the file could be in a folder others can reach
-  if (kind === "file" && st.nlink > 1) return "has other hard links";
-  if (othersCanWrite(st, path)) return "can be written by others";
-  return null;
-}
-
-/** Why an extension's folder or file could have been changed by others, or null. */
-function entryProblem(path: string, kind: "folder" | "file", trust: RootTrust, optional = false): string | null {
-  const st = lstatSync(path, { throwIfNoEntry: false });
-  if (!st) return optional ? null : `${printable(path)} is missing`;
-  const problem = statProblem(st, path, kind, trust);
-  return problem && `${printable(path)} ${problem}`;
-}
-
-/** Reads a file through a descriptor checked like entryProblem, so what was checked is what is read. */
-function readChecked(path: string, trust: RootTrust, max = Infinity): Buffer {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const st = fstatSync(fd);
-    const problem = statProblem(st, path, "file", trust);
-    if (problem) throw new Error(`${printable(path)} ${problem}`);
-    if (st.size > max) throw new Error("too large");
-    return readFileSync(fd);
-  } finally {
-    closeSync(fd);
   }
 }
 

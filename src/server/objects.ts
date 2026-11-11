@@ -8,7 +8,7 @@
 
 import { closeSync, mkdirSync, openSync, realpathSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
-import { rootTrust } from "./extensions.ts";
+import { rootTrust } from "./trust.ts";
 import { printable } from "./text.ts";
 import type { ObjectKind, ObjectRow } from "../shared/api.ts";
 
@@ -35,6 +35,8 @@ export function objectFileName(frame: number, filename: string): string {
 function placeProblem(real: string, codeFolders: string[]): string | null {
   // Hidden folders hold configuration (autostart, shells, ssh)
   if (real.split(sep).some((part) => part.startsWith("."))) return "is or lies in a hidden folder";
+  // macOS volumes usually ignore case and Unicode normalization in names, and realpath keeps them as given
+  const fold = (p: string): string => (process.platform === "darwin" ? p.normalize("NFC").toLowerCase() : p);
   for (const folder of codeFolders) {
     let code: string;
     try {
@@ -42,7 +44,7 @@ function placeProblem(real: string, codeFolders: string[]): string | null {
     } catch {
       code = resolve(folder);
     }
-    if (real === code || real.startsWith(code + sep)) return "is or lies in a folder Wireshark or WireBuddy loads code from";
+    if (fold(real) === fold(code) || fold(real).startsWith(fold(code) + sep)) return "is or lies in a folder Wireshark or WireBuddy loads code from";
   }
   return null;
 }

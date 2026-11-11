@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Extensions, panels and Decode As on macOS, where the same checks are made (verified in CI on a hosted runner, not by hand): group-writable entries count as others', every folder's and file's ACL is read with `/bin/ls -led`, and only local APFS or HFS+ volumes that keep ownership are looked into; Export Objects checks folders the same way there and compares code folders ignoring case
 - Security: the server also takes its port on `::1`, so no other program on the machine can answer for the panels' `localhost` hosts there
 - Security: the instance file `--watch` reads (URL and token) is never written through a link or into another user's folder
 - Security: packet exports are written in a private folder next to the target; nothing of them is readable by others or under a guessable name meanwhile

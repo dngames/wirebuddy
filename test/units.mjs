@@ -17,7 +17,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
+  ["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -25,6 +25,7 @@ const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Shar
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
+const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 
 let failures = 0;
@@ -399,6 +400,18 @@ try {
       assert.throws(() => objectDir(join(base, "plugins/lua"), [join(base, "plugins")]), /loads code from/);
       assert.throws(() => newObjectFolder(base, "http", [base]), /loads code from/);
       assert.equal(objectDir(base, [join(base, "plugins")]), base);
+      // On macOS a name that differs only in case is usually the same folder
+      const upper = join(base, "PLUGINS");
+      const made = !existsSync(upper);
+      if (made) mkdirSync(upper);
+      const platform = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+      try {
+        assert.throws(() => objectDir(upper, [join(base, "plugins")]), /loads code from/);
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+        if (made) rmSync(upper, { recursive: true });
+      }
       // A writable folder is refused even inside a private one: it may be a bind mount of a shared one
       mkdirSync(join(base, "open"));
       chmodSync(join(base, "open"), 0o777);
@@ -471,13 +484,16 @@ try {
     } else console.log("skip the shared-folder check: /tmp isn't a sticky folder everyone can write");
   });
 
-  await check("extensions: one switched off keeps its panel files for a test; its record is replaced whole or not at all; none is looked into off Linux", () => {
+  await check("extensions: one switched off keeps its panel files for a test; its record is replaced whole or not at all; none is looked into on a platform without these checks", () => {
     const data = mkdtempSync(join(out, "data-"));
     const saved = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = data;
     try {
       const ext = new Extensions();
       mkdirSync(join(ext.dir, "demo/panel"), { recursive: true, mode: 0o755 });
+      // Where the checks exist, a folder of the test's own passes them
+      if (!["linux", "darwin"].includes(process.platform)) return console.log(`skip the extension folder checks: none on ${process.platform}`);
+      assert.equal(rootTrust(ext.dir).problem, null);
       writeFileSync(join(ext.dir, "demo/extension.json"), JSON.stringify({ label: "Demo", panel: true }), { mode: 0o644 });
       writeFileSync(join(ext.dir, "demo/demo.lua"), "-- nothing\n", { mode: 0o644 });
       writeFileSync(join(ext.dir, "demo/panel/main.js"), "wb.ready();\n", { mode: 0o644 });
@@ -502,12 +518,12 @@ try {
       assert.equal(demo().enabled, true);
       assert.deepEqual(JSON.parse(readFileSync(state, "utf8")), { off: {} });
       assert.deepEqual(readdirSync(join(data, "wirebuddy")).sort(), ["extensions", "extensions-state.json"]);
-      // Who can change a folder is only checked on Linux: elsewhere there are no extensions, and no panels
+      // Who can change a folder is only checked on Linux and macOS: elsewhere there are no extensions, and no panels
       const platform = Object.getOwnPropertyDescriptor(process, "platform");
-      Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+      Object.defineProperty(process, "platform", { ...platform, value: "win32" });
       try {
         assert.deepEqual(ext.list(), []);
-        assert.match(ext.listing().ignored.join("\n"), /only supported on Linux/);
+        assert.match(ext.listing().ignored.join("\n"), /on Linux and macOS only/);
         assert.throws(() => ext.panelFiles("demo"), /no extension "demo"/);
       } finally {
         Object.defineProperty(process, "platform", platform);
@@ -520,6 +536,7 @@ try {
   });
 
   await check("extensions: what the user's private group may write is the user's alone only when getfacl, or without it ls, shows no ACL that lets others in", () => {
+    if (process.platform !== "linux") return console.log("skip the POSIX ACL checks: they are Linux's");
     let own = false;
     try {
       const [name, , , members] = execFileSync("getent", ["group", String(process.getgid())], { encoding: "utf8" }).trim().split(":");
@@ -593,6 +610,215 @@ try {
       process.env.PATH = saved.path;
       if (saved.data === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = saved.data;
+    }
+  });
+
+  await check("trust on macOS: an ACL lets others change an entry only with an allow entry granting more than reading to someone besides the user and root; output ls wouldn't print counts as letting them", () => {
+    const me = "me";
+    const acl = (mode, ...entries) => [`${mode}  5 me  staff  160 Nov 11 10:00 /Users/me/x`, ...entries].join("\n") + "\n";
+    const none = { change: false, any: false };
+    const enter = { change: false, any: true };
+    const open = { change: true, any: true };
+    // No ACL; extended attributes alone
+    assert.deepEqual(macAcl(acl("drwxr-xr-x "), me), none);
+    assert.deepEqual(macAcl(acl("-rw-r--r--@"), me), none);
+    // A home folder's: deny entries only take rights away
+    assert.deepEqual(macAcl(acl("drwxr-x---+", " 0: group:everyone deny delete"), me), none);
+    assert.deepEqual(macAcl(acl("drwxr-xr-x+", " 0: group:everyone deny add_file,add_subdirectory,directory_inherit,only_inherit"), me), none);
+    // Another user, everyone, a group
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: user:bob allow read,write"), me), open);
+    assert.deepEqual(macAcl(acl("drwxr-xr-x+", " 0: group:everyone allow list,add_file,search,add_subdirectory,delete_child"), me), open);
+    assert.deepEqual(macAcl(acl("drwxr-xr-x+", " 0: group:staff allow list,search,delete_child"), me), open);
+    for (const right of ["write", "append", "add_file", "add_subdirectory", "delete", "delete_child", "writeattr", "writeextattr", "writesecurity", "chown"]) {
+      assert.deepEqual(macAcl(acl("-rw-r--r--+", ` 0: group:everyone allow read,${right}`), me), open, right);
+    }
+    // Reading and entering only: nothing changes, but a folder is no longer closed to others
+    assert.deepEqual(macAcl(acl("drwx------+", " 0: group:everyone allow list,search,readattr,readextattr,readsecurity,synchronize,file_inherit,directory_inherit"), me), enter);
+    // Inherited entries count like the folder's own
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: group:com.apple.sharepoint.group.1 inherited allow read,write,append,writeattr,writeextattr"), me), open);
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: user:bob inherited allow read"), me), enter);
+    // The user themself and root could change it anyway
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: user:me allow read,write,delete,writesecurity,chown", " 1: user:root inherited allow write"), me), none);
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: user:meg allow write"), me), open);
+    // Several entries: one is enough
+    const several = [" 0: group:everyone deny delete", " 1: user:me allow list,add_file", " 2: group:admin allow list,search,file_inherit,directory_inherit"];
+    assert.deepEqual(macAcl(acl("drwxr-xr-x+", ...several), me), enter);
+    assert.deepEqual(macAcl(acl("drwxr-xr-x+", ...several, " 3: user:bob allow writeextattr"), me), open);
+    // Names ls can't resolve (a UUID) or with spaces are others; a right ls may name later changes something
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: ABCDEF01-2345-6789-ABCD-EF0123456789 allow write"), me), open);
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: group:EXAMPLE\\Domain Users allow read,write"), me), open);
+    assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: user:bob allow read,frobnicate"), me), open);
+    // What isn't ls's: nothing, GNU ls, a usage message, an ACL it didn't list, a gap, an unknown kind, a stray line
+    for (const garbage of [
+      "",
+      "drwxr-xr-x. 2 me me 4096 Nov 11 10:00 /x\n",
+      "ls: invalid option -- 'e'\nTry 'ls --help' for more information.\n",
+      acl("-rw-r--r--+"),
+      acl("-rw-r--r--+", " 0: group:everyone deny delete", " 2: user:bob allow read"),
+      acl("-rw-r--r--+", " 0: user:bob unknown write"),
+      acl("-rw-r--r--+", " 0: user:bob allow read", "x"),
+      acl("-rw-r--r--+", "0: user:bob allow read"),
+    ]) {
+      assert.equal(macAcl(garbage, me), null, JSON.stringify(garbage));
+    }
+  });
+
+  await check("trust on macOS: a volume counts when, found by its device, it is a local APFS or HFS+ one that keeps ownership; network, FUSE and noowners volumes and a mount table that doesn't read don't", () => {
+    const system = [
+      "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)",
+      "devfs on /dev (devfs, local, nobrowse)",
+      "/dev/disk3s6 on /System/Volumes/VM (apfs, local, noexec, journaled, noatime, nobrowse)",
+      "/dev/disk3s2 on /System/Volumes/Preboot (apfs, local, journaled, nobrowse)",
+      "/dev/disk3s4 on /System/Volumes/Update (apfs, local, journaled, nobrowse)",
+      "/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect)",
+      "map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)",
+    ];
+    const devs = { "/": 1, "/dev": 2, "/System/Volumes/VM": 3, "/System/Volumes/Preboot": 4, "/System/Volumes/Update": 5, "/System/Volumes/Data": 6 };
+    const asked = [];
+    const problem = (extra, dev, more = {}) => {
+      const table = [...system, ...extra].join("\n") + "\n";
+      return macMountProblem(table, dev, "me", (point) => {
+        asked.push(point);
+        return { ...devs, ...more }[point];
+      });
+    };
+    // The data volume, which /Users leads to through a firmlink, and the system volume
+    assert.equal(problem([], 6), null);
+    assert.equal(problem([], 1), null);
+    // Network volumes: never even looked at, since they may not answer
+    const network = [
+      "//me@nas._smb._tcp.local/team on /Volumes/team (smbfs, nodev, nosuid, mounted by me)",
+      "nas:/export/home on /Volumes/export (nfs, nodev, nosuid, mounted by me)",
+      "//me@mac.local/Share on /Volumes/Share (afpfs, nodev, nosuid, mounted by me)",
+      "sshfs@host:/srv on /Users/me/remote (macfuse, nodev, nosuid, synchronous, mounted by me)",
+    ];
+    asked.length = 0;
+    assert.match(problem(network, 20, { "/Volumes/team": 20, "/Volumes/export": 20, "/Volumes/Share": 20, "/Users/me/remote": 20 }), /network, FUSE or other volume/);
+    assert.deepEqual(asked.filter((p) => /team|export|Share|remote/.test(p)), []);
+    // Ownership ignored (the default for external disks), local or not
+    assert.match(problem(["/dev/disk4s1 on /Volumes/USB (apfs, local, nodev, nosuid, journaled, noowners)"], 30, { "/Volumes/USB": 30 }), /ignore ownership/);
+    assert.match(problem(["/dev/disk5s1 on /Volumes/CARD (msdos, local, nodev, nosuid, noowners)"], 31, { "/Volumes/CARD": 31 }), /ignore ownership/);
+    assert.match(problem(["/dev/disk7s2 on /Volumes/Old (hfs, local, nodev, nosuid, journaled, noowners)"], 32, { "/Volumes/Old": 32 }), /ignore ownership/);
+    assert.equal(problem(["/dev/disk7s2 on /Volumes/Old (hfs, local, nodev, nosuid, journaled)"], 32, { "/Volumes/Old": 32 }), null);
+    // A volume mounted in the home folder: its own entry counts, not the data volume around it
+    assert.equal(problem(["/dev/disk6s1 on /Users/me/My Volume (apfs, local, nodev, nosuid, journaled, mounted by me)"], 40, { "/Users/me/My Volume": 40 }), null);
+    assert.match(problem(["/dev/disk6s1 on /Users/me/vol (apfs, local, nodev, nosuid, journaled, mounted by bob)"], 40, { "/Users/me/vol": 40 }), /network, FUSE/);
+    assert.match(problem(["//me@nas/team on /Users/me/team (smbfs, nodev, nosuid, mounted by me)"], 41, { "/Users/me/team": 41 }), /network, FUSE/);
+    assert.match(problem(["/dev/disk6s1 on /Users/me/u (apfs, local, union, journaled)"], 42, { "/Users/me/u": 42 }), /network, FUSE/);
+    // Another volume mounted over one: what shows there is the one on top
+    assert.match(problem(["/dev/disk8s1 on /Volumes/X (apfs, local, journaled)", "//me@nas/x on /Volumes/X (smbfs, nodev, nosuid, mounted by me)"], 50, { "/Volumes/X": 50 }), /network, FUSE/);
+    // A device no volume of the table has
+    assert.match(problem([], 99), /network, FUSE/);
+    // Tables that don't read: empty, an error, Linux's
+    for (const table of ["", "mount: illegal option -- x\nusage: mount [-dfrkuvw] [-o options] [-t external_type] special mount_point\n"]) {
+      assert.match(macMountProblem(table, 6, "me", (p) => devs[p]), /mount table didn't read/);
+    }
+    assert.notEqual(macMountProblem("/dev/sda1 on / type ext4 (rw,relatime)\n", 1, "me", (p) => devs[p]), null);
+  });
+
+  await check("trust on macOS: the walk from / reads the ACL of every folder and file it relies on and the volume from the mount table; what they open, or can't say, keeps an extension from loading", () => {
+    const cp = createRequire(import.meta.url)("node:child_process");
+    const spawn = cp.spawnSync;
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    const now = Date.now;
+    const me = userInfo().username;
+    // ACL lines by real path; paths whose ls fails
+    const acls = new Map();
+    const failing = new Set();
+    const realOut = realpathSync(out);
+    let table = "";
+    let skew = 0;
+    // The test's folder as the volume: here / may be on the same one
+    const volume = (opts) => `devfs on /dev (devfs, local, nobrowse)\n/dev/disk3s5 on ${realOut} (${opts})\n`;
+    const setTable = (text) => {
+      table = text;
+      // Past the time the last table is kept
+      skew += 60_000;
+    };
+    cp.spawnSync = (tool, args, opts) => {
+      if (tool === "/sbin/mount") return { status: 0, stdout: table, stderr: "" };
+      if (tool !== "/bin/ls") return spawn(tool, args, opts);
+      const path = args.at(-1);
+      if (failing.has(path)) return { status: 1, stdout: "", stderr: "ls: fts_open: Permission denied\n" };
+      const lines = acls.get(path) ?? [];
+      const kind = lstatSync(path).isDirectory() ? "d" : "-";
+      return { status: 0, stdout: [`${kind}rwxr-xr-x${lines.length ? "+" : " "}  1 ${me}  staff  0 Nov 11 10:00 ${path}`, ...lines].join("\n") + "\n", stderr: "" };
+    };
+    syncBuiltinESMExports();
+    Date.now = () => now() + skew;
+    Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+    const data = mkdtempSync(join(out, "mac-"));
+    const saved = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = data;
+    try {
+      const ext = new Extensions();
+      mkdirSync(ext.dir, { recursive: true, mode: 0o755 });
+      const dir = realpathSync(ext.dir);
+      // An extension, its Lua file's mode and ACL, and its status
+      const status = (name, { mode = 0o644, lua = [], folder = [], fails = false } = {}) => {
+        mkdirSync(join(dir, name), { mode: 0o755 });
+        writeFileSync(join(dir, name, "extension.json"), "{}", { mode: 0o644 });
+        const file = join(dir, name, "x.lua");
+        writeFileSync(file, "-- nothing\n");
+        chmodSync(file, mode);
+        acls.set(file, lua);
+        acls.set(join(dir, name), folder);
+        if (fails) failing.add(file);
+        const e = ext.list().find((x) => x.name === name);
+        return e.status === "untrusted" ? e.error.replace(/^.*?(x\.lua|\/\w+) /, "") : e.status;
+      };
+      // The mount table first: one that doesn't read, a network volume, one that ignores ownership
+      setTable("mount: illegal option -- x\n");
+      assert.match(rootTrust(dir).problem, /mount table didn't read/);
+      setTable(`//bob@nas/team on ${realOut} (smbfs, nodev, nosuid, mounted by bob)\n`);
+      assert.match(rootTrust(dir).problem, /network, FUSE or other volume/);
+      setTable(volume("apfs, local, journaled, noowners"));
+      assert.match(rootTrust(dir).problem, /ignore ownership/);
+      assert.match(ext.listing().ignored.join("\n"), /ignore ownership/);
+      setTable(volume("apfs, local, journaled, nobrowse, protect"));
+      assert.equal(rootTrust(dir).problem, null);
+      // No ACLs; a home folder's deny entry; the user's own entry
+      assert.equal(status("plain"), "new");
+      assert.equal(status("denied", { folder: [" 0: group:everyone deny delete"] }), "new");
+      assert.equal(status("mine", { lua: [` 0: user:${me} allow read,write,chown`] }), "new");
+      // Others may write it, by an ACL or by the group, which on macOS is the shared staff
+      assert.equal(status("written", { lua: [" 0: group:everyone allow read,write"] }), "can be written by others; WireBuddy doesn't load it");
+      assert.equal(status("inherited", { lua: [" 0: user:bob inherited allow read,append"] }), "can be written by others; WireBuddy doesn't load it");
+      assert.equal(status("grouped", { mode: 0o664 }), "can be written by others; WireBuddy doesn't load it");
+      assert.equal(status("folder", { folder: [" 0: group:staff allow list,search,add_file,delete_child"] }), "can be written by others; WireBuddy doesn't load it");
+      // An ACL ls can't read
+      assert.equal(status("unread", { fails: true }), "can be written by others; WireBuddy doesn't load it");
+      // Folders of the user's in /tmp, outside the test's private folder (macOS's own temporary folder is private too)
+      const tmp = realpathSync("/tmp");
+      if ((statSync(tmp).mode & 0o1777) !== 0o1777 || statSync(tmp).uid !== 0) return console.log("skip the checks outside the test's folder: /tmp isn't a sticky folder of root's everyone can write");
+      const made = ["closed", "entered", "above"].map((n) => realpathSync(mkdtempSync(join(tmp, `wirebuddy-${n}-`))));
+      const [closed, entered, above] = made;
+      try {
+        setTable(`${volume("apfs, local, journaled")}/dev/disk3s7 on ${tmp} (apfs, local, journaled)\n`);
+        assert.equal(rootTrust(closed).problem, null);
+        // A folder others may change anywhere above
+        mkdirSync(join(above, "ext"), { mode: 0o755 });
+        acls.set(above, [" 0: group:everyone allow list,search,add_subdirectory"]);
+        assert.match(rootTrust(join(above, "ext")).problem, /others can write to it or a folder above it/);
+        // A folder of the user's closed by its mode vouches for what is below it, unless an ACL lets others enter
+        acls.set(entered, [" 0: group:everyone allow list,search"]);
+        assert.notEqual(rootTrust(closed).privateDev, null);
+        assert.deepEqual([rootTrust(entered).problem, rootTrust(entered).privateDev], [null, null]);
+        // A sticky folder (like /tmp) protects the user's entries only while no ACL lets others change it
+        acls.set(tmp, [" 0: group:everyone allow delete_child"]);
+        const late = realpathSync(mkdtempSync(join(tmp, "wirebuddy-late-")));
+        made.push(late);
+        assert.match(rootTrust(late).problem, /others can write to it or a folder above it/);
+      } finally {
+        for (const d of made) rmSync(d, { recursive: true, force: true });
+      }
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      Date.now = now;
+      cp.spawnSync = spawn;
+      syncBuiltinESMExports();
+      if (saved === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = saved;
     }
   });
 

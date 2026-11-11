@@ -43,9 +43,10 @@ with provenance: each version's npm page links to the commit and the workflow ru
   not be in or below a hidden folder or a folder Wireshark or WireBuddy loads code or
   configuration from (WireBuddy's own `dist`, whose pages it serves, the extension folders,
   every WireBuddy's plugin folders, Wireshark's global plugin folder, its personal
-  configuration and plugin folders, `WIRESHARK_PLUGIN_DIR` and `WIRESHARK_CONFIG_DIR`). Every
-  folder from `/` down to it must belong to root or the user and be closed to other writers,
-  except sticky ones like `/tmp`, below which only the user's own entries count; unlike for
+  configuration and plugin folders, `WIRESHARK_PLUGIN_DIR` and `WIRESHARK_CONFIG_DIR`; on macOS
+  compared ignoring case and Unicode normalization, as its volumes usually do). Every
+  folder from `/` down to it must belong to root or the user and be closed to other writers (on
+  each platform as for extensions, below), except sticky ones like `/tmp`, below which only the user's own entries count; unlike for
   extensions, a private folder doesn't vouch for the ones below it, since one of them may be a
   bind mount. The folder is checked as made, so one swapped for a link is refused and its
   target left alone. Each file is created exclusively, so it never replaces an existing file
@@ -64,18 +65,39 @@ with provenance: each version's npm page links to the commit and the workflow ru
   opens. The MCP tools and the UI can test, reload and switch them on and off, not write them;
   switching one off doesn't stop the agent from testing it or switching it on again.
 - An extension is only read and loaded when no other user could have changed it: every folder
-  from `/` down belongs to root or the user and only they can write it (a group counts only when
-  it is the user's own private group and no ACL lets others in: read with `getfacl`, and where
-  that isn't installed an entry with any ACL at all, or whose ACL can't be read, counts as
-  writable by others; sticky folders like `/tmp` protect only the user's entries), or a folder of the user's on the way is closed to others and the
-  extension is on the same filesystem. The extension folders and files themselves must belong to
-  the user (or root), be writable only by them, and be on the same filesystem; files must be regular
-  files with a single hard link, not symbolic links, and are checked again as they are read.
-  Folders on network or FUSE filesystems, whose owners and modes don't say who can write, and
-  folders that fail these checks are not looked into.
+  from `/` down belongs to root or the user and only they can write it (sticky folders like `/tmp`
+  protect only the user's entries), or a folder of the user's on the way is closed to others and
+  the extension is on the same filesystem. The extension folders and files themselves must belong
+  to the user (or root), be writable only by them, and be on the same filesystem; files must be
+  regular files with a single hard link, not symbolic links, and are checked again as they are
+  read. Folders that fail these checks are not looked into. Who "only they" are depends on the
+  platform:
+  - On Linux a group counts only when it is the user's own private group and no ACL lets others
+    in: read with `getfacl`, and where that isn't installed an entry with any ACL at all, or whose
+    ACL can't be read, counts as writable by others. Folders on network or FUSE filesystems (by
+    their `statfs` type), whose owners and modes don't say who can write, are not looked into.
+  - On macOS, where the same checks are made (verified in CI on a hosted runner, not by hand), a
+    group never counts: users share `staff`. ACLs there don't depend on the mode, so the ACL of
+    every folder and file the checks rely on is read with `/bin/ls -led` (by its absolute path, so
+    no other `ls` on `PATH` answers). An `allow` entry, inherited or not, for anyone but the user
+    and root that grants more than reading (anything but `read`, `list`, `search`, `execute`,
+    `readattr`, `readextattr`, `readsecurity`, `synchronize` and the inheritance flags) counts as
+    others being able to write; `deny` entries never do, so home folders' `group:everyone deny
+    delete` is fine. An `ls` that fails, complains or prints anything it wouldn't, a gap in its
+    numbered entries among it, counts as others being able to write. A folder closed by its mode
+    vouches for those below it only when its ACL allows others nothing, and a sticky folder
+    protects the user's entries only while its ACL lets others change nothing. The volume, found
+    by its device in `/sbin/mount`'s table (not by path, since `/Users` leads from `/` to the data
+    volume), must be a local APFS or HFS+ volume that keeps ownership (not `noowners`, which
+    external disks default to and where every file shows as the viewer's), not a union mount, not
+    mounted by another user and not covered by another mount; network, FUSE and other volumes, and
+    a table that doesn't read, are refused. Not checked on macOS: ACL entries `ls` skips at the end
+    of the list without a trace, file flags, sandbox and privacy (TCC) rules, which only take
+    rights away, and Time Machine's folder hard links on HFS+ volumes.
+  - Elsewhere (Windows) no extension folder is looked into, so there are no extensions, panels or
+    Decode As.
 - On every reload WireBuddy copies the extensions into its own plugin folder, created fresh with a
   random name in a folder only the user can write; `sharkd` and Wireshark load those copies.
-- Extensions are only supported on Linux, where these checks apply.
 - An extension's panel (its own web page) runs in a sandboxed frame on a one-time origin of its
   own, `p<130 random bits>.localhost:<port>`, never with the token. Its responses carry a Content
   Security Policy that allows only its own files and requests to its own origin, and the panel
