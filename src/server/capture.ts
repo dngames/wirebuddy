@@ -1,6 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import type { CaptureInterface, CaptureRequest, CaptureState, FilterCheck, InterfaceActivity } from "../shared/api.ts";
 
@@ -16,22 +17,28 @@ function run(bin: string, args: string[], timeoutMs = 10000): Promise<{ stdout: 
   });
 }
 
-/** Interface names and indexes, to notice when interfaces come, go or are re-created. */
-function interfaceSignature(): string {
+/**
+ * Interface names and indexes, to notice when interfaces come, go or are
+ * re-created. Where `netDir` (Linux's /sys/class/net) is missing, the names
+ * the system lists alone.
+ */
+export function interfaceSignature(netDir = "/sys/class/net", listNames: () => string[] = () => Object.keys(networkInterfaces())): string {
+  let names: string[];
   try {
-    return readdirSync("/sys/class/net")
-      .map((n) => {
-        try {
-          return `${n}:${readFileSync(`/sys/class/net/${n}/ifindex`, "utf8").trim()}`;
-        } catch {
-          return n;
-        }
-      })
-      .sort()
-      .join(",");
+    names = readdirSync(netDir);
   } catch {
-    return "";
+    return listNames().sort().join(",");
   }
+  return names
+    .map((n) => {
+      try {
+        return `${n}:${readFileSync(join(netDir, n, "ifindex"), "utf8").trim()}`;
+      } catch {
+        return n;
+      }
+    })
+    .sort()
+    .join(",");
 }
 
 /** Files of a capture the state lists. */

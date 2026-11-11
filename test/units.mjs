@@ -4,6 +4,7 @@
 import { build } from "esbuild";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import net from "node:net";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -17,7 +18,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -28,6 +29,7 @@ const { checkPanel } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
+const { machineTag, interfaceSignature } = await import(join(out, "units.mjs"));
 
 let failures = 0;
 async function check(name, fn) {
@@ -1073,6 +1075,35 @@ try {
       for (const n of [...gone, ...stuck]) if (existsSync(join(dir, n))) chmodSync(join(dir, n), 0o700);
       for (const n of stuck) if (existsSync(join(dir, n, "sub"))) chmodSync(join(dir, n, "sub"), 0o700);
     }
+  });
+  await check("machine tag: host, boot and pid namespace on Linux, the boot session on macOS (the host name without one), and nothing readable still gives a tag", () => {
+    const readers = { host: () => "h", boot: () => "b\n", pids: () => "p", bootSession: () => "s\n" };
+    const sha = (parts) => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 8);
+    assert.equal(machineTag("linux", readers), sha(["h", "b", "p"]));
+    assert.equal(machineTag("darwin", readers), sha(["s"]));
+    assert.equal(machineTag("darwin", { ...readers, host: () => "another" }), machineTag("darwin", readers), "the host name doesn't count on macOS");
+    assert.notEqual(machineTag("linux", { ...readers, host: () => "another" }), machineTag("linux", readers));
+    assert.notEqual(machineTag("darwin", { ...readers, bootSession: () => "t" }), machineTag("darwin", readers));
+    const broken = () => {
+      throw new Error("no such file");
+    };
+    assert.equal(machineTag("linux", { host: () => "h", boot: broken, pids: broken, bootSession: broken }), sha(["h", "", ""]));
+    // Without a boot session a Mac is told apart by its host name
+    assert.equal(machineTag("darwin", { ...readers, bootSession: broken }), sha(["h"]));
+    assert.equal(machineTag("darwin", { ...readers, bootSession: broken, host: broken }), sha([""]));
+    assert.match(machineTag(), /^[0-9a-f]{8}$/);
+  });
+  await check("interface signature: names with indexes from the folder, the system's names alone without it", () => {
+    const net = mkdtempSync(join(out, "net-"));
+    for (const [name, index] of [["eth1", "3"], ["lo", "1"]]) {
+      mkdirSync(join(net, name));
+      writeFileSync(join(net, name, "ifindex"), `${index}\n`);
+    }
+    mkdirSync(join(net, "bonding_masters"));
+    const names = () => ["en0", "lo0", "awdl0"];
+    assert.equal(interfaceSignature(net, names), "bonding_masters,eth1:3,lo:1");
+    assert.equal(interfaceSignature(join(net, "missing"), names), "awdl0,en0,lo0");
+    assert.equal(interfaceSignature(join(net, "missing"), () => []), "");
   });
   await check("instance file: written for the user alone, never through a link, in a folder that is the user's own and not a link", () => {
     const base = mkdtempSync(join(out, "instance-"));

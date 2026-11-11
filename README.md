@@ -468,6 +468,7 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   three requests were pipelined into, read as plain TCP segments, and ones of a message that ends
   more than about 8 MiB after them don't say where it is reassembled (less when many connections
   are busy at once).
+- On macOS there is no source for the memory still free, so full reads of a live capture never wait for memory and a very big capture can make the system swap.
 - Provisional packets count as settled once no sender with a message or an answer under way has
   sent anything for 10 s of capture time. If one goes on after such a pause (a slow response, a
   stalled download, a late DNS or ping reply), the packets listed before it keep reading as if

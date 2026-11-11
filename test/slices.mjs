@@ -16,9 +16,9 @@ import { header, packet, writeTraffic } from "./media/traffic.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = mkdtempSync(join(tmpdir(), "wirebuddy-slices-"));
 const entry = join(out, "entry.ts");
-writeFileSync(entry, ["livetail", "flows", "framestore", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n") + `\nexport { memoryShort } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`);
+writeFileSync(entry, ["livetail", "flows", "framestore", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n") + `\nexport { memoryShort, rssBytes } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`);
 await build({ entryPoints: [entry], outfile: join(out, "slices.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
-const { LiveTail, FlowIndex, FrameStore, Sharkd, Superseded, CHUNK, CONTEXT, sliceFrames, sliceKey, toGlobal, toLocal, renumberRow, renumberInfo, renumberTree, heldReason, streamNumbered, matchingFrames, memoryShort } = await import(join(out, "slices.mjs"));
+const { LiveTail, FlowIndex, FrameStore, Sharkd, Superseded, CHUNK, CONTEXT, sliceFrames, sliceKey, toGlobal, toLocal, renumberRow, renumberInfo, renumberTree, heldReason, streamNumbered, matchingFrames, memoryShort, rssBytes } = await import(join(out, "slices.mjs"));
 
 // sharkd with an empty home, so the user's Wireshark settings don't count
 const home = join(out, "home");
@@ -490,6 +490,29 @@ try {
     assert.equal(memoryShort({ ...read, standbyBytes: GB, next: 1_000_000, available: 2 * GB }), true);
     assert.equal(memoryShort({ ...read, standbyBytes: 0, next: 1_000_000, available: 3.5 * GB }), true);
     assert.equal(memoryShort({ ...read, frames: 0, standbyBytes: 0, next: 1_000_000, available: 0 }), false);
+  });
+
+  await check("memory: a process's size from /proc where there is one, else from ps once in a while for each pid", () => {
+    let asked = 0;
+    const ps = (text) => () => (asked++, text);
+    const gone = () => {
+      throw new Error("no such process");
+    };
+    const proc = { hasProc: true, proc: () => "Name:\tsharkd\nVmRSS:\t   2048 kB\n", ps: gone };
+    assert.equal(rssBytes(7001, proc), 2048 * 1024);
+    assert.equal(rssBytes(null, proc), null);
+    assert.equal(rssBytes(7001, { ...proc, proc: gone }), null);
+    const t0 = 1_000_000;
+    const source = { hasProc: false, proc: gone, ps: ps("  4096\n") };
+    assert.equal(rssBytes(7002, source, t0), 4096 * 1024);
+    assert.equal(rssBytes(7002, { ...source, ps: ps("8192") }, t0 + 1999), 4096 * 1024, "cached");
+    assert.equal(asked, 1);
+    assert.equal(rssBytes(7002, { ...source, ps: ps("8192") }, t0 + 2000), 8192 * 1024, "asked again");
+    assert.equal(rssBytes(7003, { ...source, ps: ps("512") }, t0 + 2000), 512 * 1024, "another pid is asked at once");
+    assert.equal(asked, 3);
+    assert.equal(rssBytes(7004, { ...source, ps: ps("") }, t0), null, "a process that is gone");
+    assert.equal(rssBytes(7005, { ...source, ps: gone }, t0), null, "no ps");
+    assert.equal(rssBytes(7006, { ...source, ps: ps("RSS\n 12") }, t0), null, "not a number");
   });
 
   // ------------------------------------------------- against the file cut at the same packet
