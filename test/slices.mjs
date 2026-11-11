@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import * as g from "./capgen.mjs";
@@ -32,16 +32,14 @@ const newSharkd = (keylog) => {
   engines.push(e);
   return e;
 };
-/** sharkd processes this one started that still run. */
+/** sharkd processes this one started that still run (ps, which Linux and macOS both have). */
 const sharkdChildren = () =>
-  readdirSync("/proc").filter((pid) => {
-    try {
-      const m = /^\d+ \((.*)\) \S (\d+)/.exec(readFileSync(`/proc/${pid}/stat`, "utf8"));
-      return m?.[1] === "sharkd" && Number(m[2]) === process.pid;
-    } catch {
-      return false;
-    }
-  }).length;
+  execFileSync("ps", ["-axo", "pid=,ppid=,comm="], { encoding: "utf8" })
+    .split("\n")
+    .filter((line) => {
+      const m = /^\s*\d+\s+(\d+)\s+(.*\S)\s*$/.exec(line);
+      return m !== null && Number(m[1]) === process.pid && basename(m[2]) === "sharkd";
+    }).length;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Bytes of `frames` of `store` as a slice writes them. */
 const sliceBytes = (store, frames) => frames.reduce((n, f) => n + store.size(f), 0);

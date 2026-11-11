@@ -186,12 +186,13 @@ const MAC_NO_MOUNTS = "its volume can't be checked: the mount table didn't read 
 
 /**
  * Why the macOS volume with device `dev` can't be trusted, from `mount`'s
- * output, or null. It must be a local APFS or HFS+ volume that keeps
- * ownership ("noowners": every file shows as the viewer's), not a union
- * mount and not one another user mounted, and alone on its mount point. It is
- * found by device, not by path: /Users and other firmlinks lead from / to the
- * data volume. `devOf` stats a mount point; only those of such volumes are
- * looked at, since a network one may not answer.
+ * output, or null. It is found by device, not by path: /Users and other
+ * firmlinks lead from / to the data volume. `devOf` stats a mount point; only
+ * the local mounts are stat'ed, since a network one may not answer. Of those,
+ * at least one must have the device, and every one that does (two mounts can
+ * report the same number) must be an APFS or HFS+ volume that keeps ownership
+ * ("noowners": every file shows as the viewer's), not a union mount and not
+ * one another user mounted, and alone on its mount point.
  */
 export function macMountProblem(table: string, dev: number, user: string, devOf: (point: string) => number | undefined): string | null {
   const mounts: { point: string; options: string[] }[] = [];
@@ -205,9 +206,10 @@ export function macMountProblem(table: string, dev: number, user: string, devOf:
   if (!mounts.length) return MAC_NO_MOUNTS;
   const owned = (o: string[]): boolean =>
     MAC_OWNED_FS.has(o[0]) && o.includes("local") && !o.includes("noowners") && !o.includes("union") && o.every((x) => !x.startsWith("mounted by ") || x === `mounted by ${user}`);
-  const holding = mounts.filter((m) => owned(m.options) && devOf(m.point) === dev);
+  // Different mounts can share a device number (/ and the data volume do), so all of them must be trustworthy
+  const holding = mounts.filter((m) => m.options.includes("local") && devOf(m.point) === dev);
   // Another volume mounted over one shows its own files at that point
-  if (!holding.length || holding.some((h) => mounts.filter((m) => m.point === h.point).length > 1)) return MAC_NOT_OWNED;
+  if (!holding.length || !holding.every((h) => owned(h.options) && mounts.filter((m) => m.point === h.point).length === 1)) return MAC_NOT_OWNED;
   return null;
 }
 

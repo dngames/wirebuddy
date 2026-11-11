@@ -360,9 +360,11 @@ try {
     const dir = mkdtempSync(join(out, "target-"));
     const seen = join(out, "seen.txt");
     // Each editcap and mergecap run notes what stands in the target folder, and how open it is
+    // Octal mode and name: GNU stat and BSD stat (macOS) spell it differently
+    const stat = process.platform === "darwin" ? "stat -f '%Lp %N'" : "stat -c '%a %n'";
     const noting = (name) => {
       const tool = join(out, `noting-${name}`);
-      writeFileSync(tool, `#!/bin/sh\nstat -c '%a %n' "${dir}"/* "${dir}"/.[!.]* >> "${seen}" 2>/dev/null\nexec ${name} "$@"\n`, { mode: 0o755 });
+      writeFileSync(tool, `#!/bin/sh\n${stat} "${dir}"/* "${dir}"/.[!.]* >> "${seen}" 2>/dev/null\nexec ${name} "$@"\n`, { mode: 0o755 });
       return tool;
     };
     const tools = { editcap: noting("editcap"), mergecap: noting("mergecap") };
@@ -371,8 +373,8 @@ try {
     assert.deepEqual(packetComments(join(dir, "out.pcapng"))[1], ["a", "b"]);
     await exportFrames({ ...tools, input: big, output: join(dir, "runs.pcap"), format: "pcap", ranges: Array.from({ length: 600 }, (_, i) => [i * 2 + 1, i * 2 + 1]) });
     const lines = readFileSync(seen, "utf8").trim().split("\n");
-    assert.ok(lines.length >= 6, lines.join("\n"));
-    for (const line of lines) assert.match(line, /^(700 .*\/\.wirebuddy-export-\w+|600 .*\/out\.pcapng)$/);
+    assert.ok(lines.length >= 6, `${lines.length} lines noted, at least 6 wanted: ${JSON.stringify(lines)}`);
+    for (const line of lines) assert.match(line, /^(700 .*\/\.wirebuddy-export-\w+|600 .*\/out\.pcapng)$/, `noted: ${JSON.stringify(lines)}`);
     assert.deepEqual(readdirSync(dir).sort(), ["out.pcapng", "runs.pcap"]);
     assert.deepEqual(["out.pcapng", "runs.pcap"].map((f) => statSync(join(dir, f)).mode & 0o777), [0o600, 0o600]);
   });
@@ -625,6 +627,9 @@ try {
     // A home folder's: deny entries only take rights away
     assert.deepEqual(macAcl(acl("drwxr-x---+", " 0: group:everyone deny delete"), me), none);
     assert.deepEqual(macAcl(acl("drwxr-xr-x+", " 0: group:everyone deny add_file,add_subdirectory,directory_inherit,only_inherit"), me), none);
+    // Real listings: a home folder with a deny-only ACL, a temp folder with extended attributes and a trailing slash
+    assert.deepEqual(macAcl("drwxr-x---+ 39 runner  staff  1248 Nov 11 19:29 /Users/runner\n 0: group:everyone deny delete\n", "runner"), none);
+    assert.deepEqual(macAcl("drwx------@ 114 runner  staff  3648 Nov 11 19:30 /var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/\n", "runner"), none);
     // Another user, everyone, a group
     assert.deepEqual(macAcl(acl("-rw-r--r--+", " 0: user:bob allow read,write"), me), open);
     assert.deepEqual(macAcl(acl("drwxr-xr-x+", " 0: group:everyone allow list,add_file,search,add_subdirectory,delete_child"), me), open);
@@ -709,6 +714,54 @@ try {
     assert.match(problem(["/dev/disk8s1 on /Volumes/X (apfs, local, journaled)", "//me@nas/x on /Volumes/X (smbfs, nodev, nosuid, mounted by me)"], 50, { "/Volumes/X": 50 }), /network, FUSE/);
     // A device no volume of the table has
     assert.match(problem([], 99), /network, FUSE/);
+    // A real table: / and the data volume report the same device
+    const real = [
+      "/dev/disk2s1s1 on / (apfs, sealed, local, read-only, journaled)",
+      "devfs on /dev (devfs, local, nobrowse)",
+      "/dev/disk2s6 on /System/Volumes/VM (apfs, local, noexec, journaled, noatime, nobrowse)",
+      "/dev/disk2s2 on /System/Volumes/Preboot (apfs, local, journaled, nobrowse)",
+      "/dev/disk2s4 on /System/Volumes/Update (apfs, local, journaled, nobrowse)",
+      "/dev/disk1s2 on /System/Volumes/xarts (apfs, local, noexec, journaled, noatime, nobrowse)",
+      "/dev/disk1s1 on /System/Volumes/iSCPreboot (apfs, local, journaled, nobrowse)",
+      "/dev/disk1s3 on /System/Volumes/Hardware (apfs, local, journaled, nobrowse)",
+      "/dev/disk2s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, root data)",
+      "/dev/disk4s1 on /System/Library/AssetsV2/com_apple_MobileAsset_UAF_Siri_Understanding/purpose_auto/c10eb90af2d4996616c3cd0f6bac0833eb4925fa.asset/.AssetData (apfs, sealed, local, read-only, journaled, nobrowse)",
+      "map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)",
+    ];
+    const realDevs = {
+      "/": 16777226,
+      "/dev": 16777225,
+      "/System/Volumes/VM": 16777227,
+      "/System/Volumes/Preboot": 16777228,
+      "/System/Volumes/Update": 16777229,
+      "/System/Volumes/xarts": 16777230,
+      "/System/Volumes/iSCPreboot": 16777231,
+      "/System/Volumes/Hardware": 16777232,
+      "/System/Volumes/Data": 16777226,
+      "/System/Library/AssetsV2/com_apple_MobileAsset_UAF_Siri_Understanding/purpose_auto/c10eb90af2d4996616c3cd0f6bac0833eb4925fa.asset/.AssetData": 16777233,
+      "/System/Volumes/Data/home": 16777234,
+      "/Volumes/team": 16777234,
+    };
+    const realProblem = (extra, dev, more = {}) => {
+      asked.length = 0;
+      const table = [...real, ...extra].join("\n") + "\n";
+      return macMountProblem(table, dev, "runner", (point) => {
+        asked.push(point);
+        return { ...realDevs, ...more }[point];
+      });
+    };
+    const smb = "//me@nas._smb._tcp.local/team on /Volumes/team (smbfs, nodev, nosuid, mounted by runner)";
+    assert.equal(realProblem([], 16777226), null);
+    assert.equal(realProblem([smb], 16777226), null);
+    // Network and other non-local mounts are never stat'ed
+    assert.deepEqual(asked.filter((p) => p === "/Volumes/team" || p === "/System/Volumes/Data/home"), []);
+    // One more local volume with the same device that ignores ownership: refused, though / and Data are fine
+    const usb = "/dev/disk9s1 on /Volumes/USB (apfs, local, nodev, nosuid, journaled, noowners)";
+    assert.match(realProblem([usb], 16777226, { "/Volumes/USB": 16777226 }), /ignore ownership/);
+    // The same kind of volume with another device does not matter
+    assert.equal(realProblem([usb], 16777226, { "/Volumes/USB": 16777240 }), null);
+    // A local mount of another filesystem kind with the same device counts too
+    assert.match(realProblem([], 16777225), /ignore ownership/);
     // Tables that don't read: empty, an error, Linux's
     for (const table of ["", "mount: illegal option -- x\nusage: mount [-dfrkuvw] [-o options] [-t external_type] special mount_point\n"]) {
       assert.match(macMountProblem(table, 6, "me", (p) => devs[p]), /mount table didn't read/);

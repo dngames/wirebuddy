@@ -46,7 +46,8 @@ with provenance: each version's npm page links to the commit and the workflow ru
   configuration and plugin folders, `WIRESHARK_PLUGIN_DIR` and `WIRESHARK_CONFIG_DIR`; on macOS
   compared ignoring case and Unicode normalization, as its volumes usually do). Every
   folder from `/` down to it must belong to root or the user and be closed to other writers (on
-  each platform as for extensions, below), except sticky ones like `/tmp`, below which only the user's own entries count; unlike for
+  each platform as for extensions, below), except sticky ones like `/tmp`, below which only the
+  user's own entries count; unlike for
   extensions, a private folder doesn't vouch for the ones below it, since one of them may be a
   bind mount. The folder is checked as made, so one swapped for a link is refused and its
   target left alone. Each file is created exclusively, so it never replaces an existing file
@@ -88,10 +89,13 @@ with provenance: each version's npm page links to the commit and the workflow ru
     vouches for those below it only when its ACL allows others nothing, and a sticky folder
     protects the user's entries only while its ACL lets others change nothing. The volume, found
     by its device in `/sbin/mount`'s table (not by path, since `/Users` leads from `/` to the data
-    volume), must be a local APFS or HFS+ volume that keeps ownership (not `noowners`, which
-    external disks default to and where every file shows as the viewer's), not a union mount, not
-    mounted by another user and not covered by another mount; network, FUSE and other volumes, and
-    a table that doesn't read, are refused. Not checked on macOS: ACL entries `ls` skips at the end
+    volume), is judged from every `local` mount of the table (network and other mounts are never
+    looked at, as they may not answer). At least one local mount must have that device, and every
+    local mount that has it (two can report the same number) must be an APFS or HFS+ volume that
+    keeps ownership (not `noowners`, which external disks default to and where every file shows as
+    the viewer's), not a union mount, not mounted by another user, and listed once, not covered by
+    another mount; otherwise, and when the table doesn't read, it is refused. Not checked on
+    macOS: ACL entries `ls` skips at the end
     of the list without a trace, file flags, sandbox and privacy (TCC) rules, which only take
     rights away, and Time Machine's folder hard links on HFS+ volumes.
   - Elsewhere (Windows) no extension folder is looked into, so there are no extensions, panels or
