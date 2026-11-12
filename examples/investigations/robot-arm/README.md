@@ -44,7 +44,8 @@ WARNING: command rate 22.1/s is below the required 50/s, motion will not be smoo
 
 Both take `--port` (TCP, default 7700) and `--telemetry` (UDP, default 7701); the app also takes
 `--seconds` (default 6) and `--rate` (commands per second, default 50). The controller runs until
-you stop it with Ctrl+C.
+you stop it with Ctrl+C. The stutter needs Linux: the wait is Linux's delayed ACK on the loopback,
+and on macOS the loopback acknowledges at once, so the app runs smoothly there.
 
 ## Investigate it with the agent
 

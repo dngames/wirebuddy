@@ -973,7 +973,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       description:
         "Start a live capture with dumpcap, like Wireshark's Capture Options, when the user asks for one. The view opens the new file and follows it live. Without a stop condition it runs until stop_capture or the user stops it.",
       inputSchema: {
-        interface: z.string().describe("Interface name from list_interfaces, e.g. \"lo\" or \"eth0\""),
+        interface: z.string().describe("Interface name from list_interfaces, e.g. \"lo\" or \"eth0\" (macOS: \"lo0\", \"en0\")"),
         filter: z.string().default("").describe("Capture filter in BPF syntax (tcp port 80), not display-filter syntax"),
         promiscuous: z.boolean().default(true).describe("false: only traffic to and from this host"),
         stop_after_seconds: z.number().int().min(1).optional(),

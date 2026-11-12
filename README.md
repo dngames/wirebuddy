@@ -80,7 +80,7 @@ WireBuddy is for working on a capture together with the agent:
 | Protocols Wireshark doesn't decode | stay "Data" unless you install a dissector yourself (Wireshark MCP offers Decode As for protocols Wireshark has) | Decode As for protocols Wireshark has (a right-click or one agent call); Lua dissectors the agent writes, tests and loads for the rest |
 | Beyond packet rows | text and JSON for the agent | panels the agent writes: plots, images, video, point clouds |
 | Ready-made analyses | many, from statistics to threat intelligence | Wireshark's statistics and expert info |
-| Where it runs | anywhere `tshark` runs, headless too | Linux with a browser, Wireshark 4.6 and Node.js 22 (macOS and Windows untested; extensions and panels need Linux, or macOS where the same checks are made, verified in CI on a hosted runner, not by hand) |
+| Where it runs | anywhere `tshark` runs, headless too | Linux with a browser, Wireshark 4.6 and Node.js 22 (macOS is verified only in CI on a hosted runner, not by hand, and Windows is untested; extensions and panels need Linux, or macOS where the same checks are made) |
 
 (Compared with what those projects describe in their READMEs, October 2026.)
 
@@ -102,10 +102,13 @@ WireBuddy is for working on a capture together with the agent:
   sudo usermod -aG wireshark $USER         # then log out and in again
   ```
 
+  On macOS it needs read access to `/dev/bpf*`, which Wireshark's ChmodBPF sets up.
+
 - **Node.js ≥ 22**
 
 Developed on Ubuntu 22.04 with Wireshark 4.6.6; CI runs on Ubuntu 24.04 with the current stable
-Wireshark from the PPA. Other Linux distributions should work; macOS and Windows are untested.
+Wireshark from the PPA. Other Linux distributions should work; macOS, live capture
+included, was verified only in CI on a hosted runner, not by hand; Windows is untested.
 
 ## Install and run
 
