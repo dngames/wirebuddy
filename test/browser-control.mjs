@@ -775,6 +775,9 @@ try {
       await post("/api/select", { frame: 4 });
       await until("frame 4 selected", async () => (await state()).selected === 4);
       await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      // The page shows the selection before the row's menu is asked for: a right-click on a row it doesn't show as
+      // selected selects it, and that selection would still be on its way when the filter changes below
+      await until("frame 4's row selected in the page", () => evaluate(`${row(4)}?.classList.contains('sel') === true`));
       await fromMenu(4, "Export Selected Packet");
       await until("the export dialog", () => evaluate("!!document.querySelector('.dlg-export')"));
     };
