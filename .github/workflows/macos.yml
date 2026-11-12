@@ -67,17 +67,10 @@ jobs:
       - name: What the live checks rely on
         shell: bash
         run: |
-          echo "--- ping as the runner user"
-          id -un
-          ping -i 0.2 -c 2 127.0.0.1 || echo "ping -i 0.2: exit $?"
-          ping -i 0.005 -c 2 127.0.0.1 || echo "ping -i 0.005: exit $?"
           echo "--- what a capture start prepares (the app's dumpcap -D -M, then the filter check)"
           time dumpcap -D -M >/dev/null || true
           time dumpcap -i lo0 -f icmp -d >/dev/null || true
           echo "--- tools"
-          /usr/bin/curl --version | head -1 || true
-          command -v curl || true
-          python3 --version || true
           openssl version || true
           pgrep -V 2>&1 | head -1 || true
           command -v pgrep lsof ps || true
