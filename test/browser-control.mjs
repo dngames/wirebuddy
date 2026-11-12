@@ -237,8 +237,18 @@ try {
   const row = (frame) => `[...document.querySelectorAll('.pl-row')].find((r) => !r.hidden && r.querySelector('.pl-cell')?.textContent === '${frame}')`;
   const menuItem = (label) => `[...document.querySelectorAll('.menu-item')].find((m) => m.textContent.includes(${JSON.stringify(label)}))`;
   const toasts = () => evaluate("[...document.querySelectorAll('.toast-text')].map((t) => t.textContent).join('\\n')");
+  /** What the packet list holds: its rows' numbers, where it is scrolled to, what covers it, and the view's state. */
+  const listed = async () => {
+    const page = await evaluate(
+      `(() => { const s = document.querySelector('.pl-scroll'), o = document.querySelector('.pl-overlay'); return JSON.stringify({ rows: [...document.querySelectorAll('.pl-row')].filter((r) => !r.hidden).map((r) => r.querySelector('.pl-cell')?.textContent).join(' '), scrollTop: s.scrollTop, height: s.clientHeight, overlay: o && !o.hidden ? o.textContent : null, dialogs: [...document.querySelectorAll('.dlg-title-text')].map((d) => d.textContent), menu: document.querySelectorAll('.menu-item').length }); })()`,
+    );
+    const { selected, filter, generation, totalFrames, displayedFrames, loading } = await state();
+    return `the list: ${page}; the view: ${JSON.stringify({ selected, filter, generation, totalFrames, displayedFrames, loading })}`;
+  };
   const fromMenu = async (frame, label) => {
-    await until(`frame ${frame}'s row`, async () => !!(await box(row(frame))));
+    await until(`frame ${frame}'s row`, async () => !!(await box(row(frame)))).catch(async (err) => {
+      throw new Error(`${err.message}; ${await listed()}`);
+    });
     await rightClick(center(await box(row(frame))));
     await until(`"${label}"`, async () => !!(await box(menuItem(label)))).catch(async (err) => {
       throw new Error(`${err.message}; the menu: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ')")}`);
