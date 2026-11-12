@@ -14,14 +14,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { WebSocket } from "ws";
 import { chromeOrSkip } from "./chrome.mjs";
+import { chromePort, pageSocket, rawCdp, sleep, startChrome, suite } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const chromeBin = chromeOrSkip();
 if (!chromeBin) process.exit(0);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // CDP key modifiers: Alt 1, Ctrl 2, Meta 4, Shift 8. The page's shortcut key is Command on a Mac, Ctrl elsewhere
 const ALT = 1;
 const MOD = process.platform === "darwin" ? 4 : 2;
@@ -76,22 +75,9 @@ const token = ui.searchParams.get("token");
 const state = async () => (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": token } })).json();
 
 const profile = mkdtempSync(join(tmpdir(), "wirebuddy-chrome-"));
-const chrome = spawn(
-  chromeBin,
-  ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"],
-  { stdio: "ignore" },
-);
+const chrome = startChrome(chromeBin, profile, ["--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu"]);
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 const until = async (what, fn, ms = 10_000) => {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await fn()) return;
   throw new Error(`timed out waiting for ${what}`);
@@ -99,30 +85,15 @@ const until = async (what, fn, ms = 10_000) => {
 
 let ws;
 try {
-  let port;
-  await until("Chrome", () => {
-    const file = join(profile, "DevToolsActivePort");
-    if (existsSync(file)) port = readFileSync(file, "utf8").split("\n")[0];
-    return port;
-  }, 30_000);
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.once("open", resolve);
-    ws.once("error", reject);
-  });
-  let id = 0;
-  const pending = new Map();
-  ws.on("message", (m) => {
-    const d = JSON.parse(m);
-    pending.get(d.id)?.(d);
-    pending.delete(d.id);
-  });
-  const cdp = (method, params = {}) =>
-    new Promise((resolve, reject) => {
-      pending.set(++id, (d) => (d.error ? reject(new Error(`${method}: ${d.error.message}`)) : resolve(d.result)));
-      ws.send(JSON.stringify({ id, method, params }));
-    });
+  const port = await chromePort(profile);
+  if (!port) throw new Error("timed out waiting for Chrome");
+  ws = await pageSocket(port);
+  const answer = rawCdp(ws);
+  const cdp = async (method, params = {}) => {
+    const d = await answer(method, params);
+    if (d.error) throw new Error(`${method}: ${d.error.message}`);
+    return d.result;
+  };
   const evaluate = async (expression) => (await cdp("Runtime.evaluate", { expression, returnByValue: true })).result.value;
   const click = async (x, y) => {
     await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
@@ -1158,5 +1129,4 @@ try {
   rmSync(profile, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

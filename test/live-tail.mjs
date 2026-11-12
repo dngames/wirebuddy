@@ -24,6 +24,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocket } from "ws";
 import { chromeOrSkip } from "./chrome.mjs";
+import { apiFetch, launchChrome, sleep, suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const work = mkdtempSync(join(tmpdir(), "wirebuddy-live-tail-"));
@@ -34,7 +35,6 @@ mkdirSync(bin);
 writeFileSync(join(bin, "dumpcap"), `#!/bin/sh\nexec "${process.execPath}" "${join(root, "test/fake-dumpcap.mjs")}" "$@"\n`);
 chmodSync(join(bin, "dumpcap"), 0o755);
 const homeEnv = (dir) => ({ HOME: dir, XDG_CONFIG_HOME: join(dir, ".config"), XDG_DATA_HOME: join(dir, ".local/share"), XDG_RUNTIME_DIR: join(dir, "run") });
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const listLength = (s) => s.displayedFrames + (s.tail?.displayed ?? 0);
 /** What a tool result tells the agent about the live capture's packets after the last full read. */
 const liveLine = (text) => /Live capture: [^\n\]]*/.exec(text)?.[0] ?? "";
@@ -57,11 +57,7 @@ async function server(name, env = {}, homeDir = home) {
   };
   const ui = new URL((await tool("viewer_url")).text.trim());
   const api = async (path, body) => {
-    const res = await fetch(ui.origin + path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: { "X-WireBuddy-Token": ui.searchParams.get("token"), "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const res = await apiFetch(ui.origin, ui.searchParams.get("token"), path, body);
     const json = await res.json();
     if (!res.ok) throw Object.assign(new Error(`${path}: ${res.status} ${JSON.stringify(json)}`), { status: res.status });
     return json;
@@ -154,27 +150,7 @@ async function openBrowser(url) {
   const bin = chromeOrSkip();
   if (!bin) return null;
   const profile = mkdtempSync(join(work, "chrome-"));
-  const chrome = spawn(bin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"], { stdio: "ignore" });
-  let port;
-  // A busy machine may take a while to start it
-  for (const end = Date.now() + 30_000; !port && Date.now() < end; await sleep(100)) {
-    if (existsSync(join(profile, "DevToolsActivePort"))) port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
-  }
-  if (!port) {
-    chrome.kill();
-    throw new Error("Chrome did not start its DevTools server in 30 s");
-  }
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => (ws.once("open", resolve), ws.once("error", reject)));
-  let id = 0;
-  const pending = new Map();
-  ws.on("message", (m) => {
-    const d = JSON.parse(m);
-    pending.get(d.id)?.(d);
-    pending.delete(d.id);
-  });
-  const cdp = (method, params = {}) => new Promise((resolve) => (pending.set(++id, resolve), ws.send(JSON.stringify({ id, method, params }))));
+  const { chrome, ws, cdp } = await launchChrome(bin, profile, ["--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu"]);
   await cdp("Page.navigate", { url: url.href });
   return {
     evaluate: async (expression) => (await cdp("Runtime.evaluate", { expression, returnByValue: true })).result?.result?.value,
@@ -183,17 +159,7 @@ async function openBrowser(url) {
 }
 let browser = null;
 
-let failures = 0;
-async function check(name, fn) {
-  const t0 = Date.now();
-  try {
-    await fn();
-    console.log(`ok   ${name} (${Math.round((Date.now() - t0) / 1000)} s)`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite({ timed: true });
 const report = [];
 /** Of a folder of slices this machine's servers make: what tells the machine. */
 let sliceTag = null;
@@ -968,5 +934,4 @@ try {
   rmSync(work, { recursive: true, force: true });
 }
 for (const line of report) console.log(`     ${line}`);
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

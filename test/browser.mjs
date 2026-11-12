@@ -6,7 +6,6 @@
 // CHROME=<path> picks the browser.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { spawn } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +14,7 @@ import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 import { chromeOrSkip } from "./chrome.mjs";
+import { sleep, startChrome, suite } from "./harness.mjs";
 import { writeCtCapture } from "./media/ct-archive.mjs";
 import { writeHttpGallery } from "./media/http-gallery.mjs";
 import { SCANS, writeLidarCapture } from "./media/lidar-wbpc.mjs";
@@ -23,7 +23,6 @@ import { writeRtpCapture } from "./media/rtp-h264.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { values } = parseArgs({ options: { shots: { type: "string" }, verbose: { type: "boolean", default: false } } });
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const chromePath = chromeOrSkip();
 if (!chromePath) process.exit(0);
@@ -88,25 +87,17 @@ async function api(path, body) {
 }
 
 const profile = mkdtempSync(join(tmpdir(), "wirebuddy-chrome-"));
-const chrome = spawn(
-  chromePath,
-  [
-    "--headless=new",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${profile}`,
-    "--window-size=1280,900",
-    "--force-device-scale-factor=1",
-    "--hide-scrollbars",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--mute-audio",
-    // WebGL without a GPU
-    "--use-angle=swiftshader",
-    "--enable-unsafe-swiftshader",
-    "about:blank",
-  ],
-  { stdio: "ignore" },
-);
+const chrome = startChrome(chromePath, profile, [
+  "--window-size=1280,900",
+  "--force-device-scale-factor=1",
+  "--hide-scrollbars",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--mute-audio",
+  // WebGL without a GPU
+  "--use-angle=swiftshader",
+  "--enable-unsafe-swiftshader",
+]);
 
 /** A DevTools connection to one target. */
 async function connect(url) {
@@ -141,20 +132,7 @@ async function connect(url) {
   };
 }
 
-let failures = 0;
-let skipped = 0;
-async function check(name, fn) {
-  try {
-    const note = await fn();
-    if (note?.skip) {
-      skipped++;
-      console.log(`skip ${name}: ${note.skip}`);
-    } else console.log(`ok   ${name}${note ? ` (${note})` : ""}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite({ notes: true });
 
 /** Polls `fn` until its value is truthy and not {done: false}; the last value on timeout. */
 async function until(fn, ms = 20000) {
@@ -588,5 +566,4 @@ try {
   rmSync(profile, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : `all checks passed${skipped ? ` (${skipped} skipped)` : ""}`);
-process.exit(failures ? 1 : 0);
+finish();

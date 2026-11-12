@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const work = mkdtempSync(join(tmpdir(), "wirebuddy-package-"));
@@ -19,16 +20,7 @@ mkdirSync(home);
 const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), npm_config_update_notifier: "false", WIREBUDDY_EXTENSIONS: "" };
 const npm = (args, cwd = work) => execFileSync("npm", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 try {
   const [{ filename, files }] = JSON.parse(npm(["pack", "--json", "--ignore-scripts", "--pack-destination", work, root], root));
@@ -82,5 +74,4 @@ try {
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

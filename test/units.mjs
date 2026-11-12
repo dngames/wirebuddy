@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import { suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
@@ -31,16 +32,7 @@ const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory } = await import(join(out, "units.mjs"));
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 const frames = (set, after = 0, limit = 1e6) => set.page(after, limit).frames;
 
@@ -1244,5 +1236,4 @@ try {
 } finally {
   rmSync(out, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

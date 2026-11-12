@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import * as g from "./capgen.mjs";
 import { header, packet, writeTraffic } from "./media/traffic.mjs";
+import { sleep, suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = mkdtempSync(join(tmpdir(), "wirebuddy-slices-"));
@@ -40,22 +41,12 @@ const sharkdChildren = () =>
       const m = /^\s*\d+\s+(\d+)\s+(.*\S)\s*$/.exec(line);
       return m !== null && Number(m[1]) === process.pid && basename(m[2]) === "sharkd";
     }).length;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Bytes of `frames` of `store` as a slice writes them. */
 const sliceBytes = (store, frames) => frames.reduce((n, f) => n + store.size(f), 0);
 
 /** Accuracy and timing, printed at the end. */
 const report = [];
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 /** A TCP packet between 10.0.0.1:1000 and 10.0.0.2:80 (`back`: the other way) with `flags`, and `data` bytes or `text` as payload. */
 const tcpFrame = (flags, { back = false, sport = 1000, data = 0, text } = {}) => {
@@ -1190,5 +1181,4 @@ try {
   rmSync(out, { recursive: true, force: true });
 }
 for (const line of report) console.log(`     ${line}`);
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

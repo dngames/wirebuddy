@@ -14,11 +14,11 @@ import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { apiFetch, serverUrl, sleep, spawnServer, suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const token = "live-smoke-test-token";
 const captureDir = mkdtempSync(join(tmpdir(), "wirebuddy-live-"));
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** The loopback interface by platform. */
 const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
 
@@ -29,25 +29,15 @@ const panelDir = join(home, ".local/share/wirebuddy/extensions/live/panel");
 mkdirSync(panelDir, { recursive: true, mode: 0o700 });
 writeFileSync(join(panelDir, "main.js"), "wb.ready();\n");
 writeFileSync(join(panelDir, "../extension.json"), JSON.stringify({ label: "live", version: "1", panel: true }));
-const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token, "--capture-dir", captureDir], {
-  stdio: ["ignore", "pipe", "inherit"],
+const server = spawnServer({
+  token,
+  args: ["--capture-dir", captureDir],
   env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: "" },
 });
-const base = await new Promise((resolve, reject) => {
-  server.stdout.setEncoding("utf8");
-  server.stdout.on("data", (d) => {
-    const m = /UI at (http:\/\/[^/]+)\//.exec(d);
-    if (m) resolve(m[1]);
-  });
-  server.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
-});
+const base = await serverUrl(server);
 
 async function api(path, body) {
-  const res = await fetch(base + path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "X-WireBuddy-Token": token, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const res = await apiFetch(base, token, path, body);
   const json = await res.json();
   if (!res.ok) throw new Error(`${path}: ${res.status} ${JSON.stringify(json)}`);
   return json;
@@ -110,22 +100,13 @@ async function agent(dir) {
   return { client, tool };
 }
 
-let failures = 0;
 /** The robot-arm example's fault is Linux's delayed ACK on the loopback; macOS acknowledges at once, so there is nothing to find. */
 function skipDelayedAck(what) {
   if (process.platform !== "darwin") return false;
   console.log(`skip ${what}: the fault needs Linux's delayed ACK on the loopback, macOS acknowledges at once`);
   return true;
 }
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 try {
   await check("invalid capture filter is refused", async () => {
@@ -521,7 +502,7 @@ try {
   server.kill();
   rmSync(captureDir, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-echoServer.close();
-echoClient.close();
-process.exit(failures ? 1 : 0);
+finish(() => {
+  echoServer.close();
+  echoClient.close();
+});
