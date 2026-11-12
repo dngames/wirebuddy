@@ -260,7 +260,8 @@ try {
     const out = join(captureDir, "odd.pcapng");
     const r = await api("/api/export", { path: out, which: "range", range: odd.join(",") });
     assert.equal(r.frames, odd.length);
-    const n = Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-c", out], { encoding: "utf8" }))[1]);
+    // -M: the plain number; without it capinfos groups the digits of a thousand and more as the locale does
+    const n = Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-M", "-c", out], { encoding: "utf8" }))[1]);
     assert.equal(n, odd.length);
     assert.equal(s.capture.error, null);
   });

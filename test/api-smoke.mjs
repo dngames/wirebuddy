@@ -327,7 +327,7 @@ try {
   await check("export specified packets", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-export-test-"));
     try {
-      const count = (f) => Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-c", f], { encoding: "utf8" }))[1]);
+      const count = (f) => Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-M", "-c", f], { encoding: "utf8" }))[1]);
       const out = join(dir, "range.pcapng");
       const r = await api("/api/export", { path: out, which: "range", range: "21,23-25" });
       assert.equal(r.status, 200, JSON.stringify(r.json));
