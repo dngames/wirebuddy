@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-12
+
 - Errors you run into in the viewer show there also while an agent is attached; the agent hears of them too
 - In a container with a memory limit, full reads of a live capture wait for the container's free memory, not the host's
 - The check that a panel runs in a process of its own no longer reads a busy page or a slow-starting panel as "not isolated": one page task inside the panel's busy window proves it, and only three empty rounds, spaced out, say no
@@ -114,7 +116,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/dngames/wirebuddy/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/dngames/wirebuddy/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/dngames/wirebuddy/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/dngames/wirebuddy/compare/v0.13.0...v0.14.0
