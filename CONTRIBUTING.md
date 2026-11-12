@@ -48,6 +48,8 @@ Chrome or Chromium (`CHROME=<path>` names one) the browser checks are skipped. C
 steps with both, and `npm run test:examples` and `npm run test:package` too; there a missing
 Chrome fails.
 
+The suites are plain Node scripts; `test/harness.mjs` holds what they share: `check` and the closing summary, `sleep`, starting the server, and headless Chrome.
+
 ## Guidelines
 
 - Keep the UI dependency-free and the server's dependencies minimal.

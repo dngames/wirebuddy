@@ -11,6 +11,7 @@ import { dirname, join, sep } from "node:path";
 import assert from "node:assert/strict";
 import { writeAcmeCapture } from "./acme.mjs";
 import { epb, idb, shb, udpFrame } from "./capgen.mjs";
+import { apiFetch, serverUrl, spawnServer, suite } from "./harness.mjs";
 import { Pcap } from "./media/pcap.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
@@ -23,10 +24,7 @@ const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
 // Shared extensions, outside the private home: what others may write there matters
 const team = mkdtempSync(join(tmpdir(), "wirebuddy-team-"));
 const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), WIREBUDDY_EXTENSIONS: team };
-const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token], {
-  stdio: ["ignore", "pipe", "inherit"],
-  env,
-});
+const server = spawnServer({ token, env });
 
 /** The loopback interface by platform. */
 const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
@@ -41,21 +39,10 @@ function canCapture() {
   }
 }
 const capture = canCapture();
-const base = await new Promise((resolve, reject) => {
-  server.stdout.setEncoding("utf8");
-  server.stdout.on("data", (d) => {
-    const m = /UI at (http:\/\/[^/]+)\//.exec(d);
-    if (m) resolve(m[1]);
-  });
-  server.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
-});
+const base = await serverUrl(server);
 
 async function api(path, body, at = base) {
-  const res = await fetch(at + path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "X-WireBuddy-Token": token, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const res = await apiFetch(at, token, path, body);
   const json = await res.json();
   return { status: res.status, json };
 }
@@ -63,18 +50,8 @@ async function api(path, body, at = base) {
 /** Another server, with a home of its own and `extra` in its environment. */
 async function startServer(extra) {
   const own = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
-  const proc = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token], {
-    stdio: ["ignore", "pipe", "inherit"],
-    env: { ...env, HOME: own, XDG_CONFIG_HOME: join(own, ".config"), XDG_DATA_HOME: join(own, ".local/share"), WIREBUDDY_EXTENSIONS: "", ...extra },
-  });
-  const at = await new Promise((resolve, reject) => {
-    proc.stdout.setEncoding("utf8");
-    proc.stdout.on("data", (d) => {
-      const m = /UI at (http:\/\/[^/]+)\//.exec(d);
-      if (m) resolve(m[1]);
-    });
-    proc.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
-  });
+  const proc = spawnServer({ token, env: { ...env, HOME: own, XDG_CONFIG_HOME: join(own, ".config"), XDG_DATA_HOME: join(own, ".local/share"), WIREBUDDY_EXTENSIONS: "", ...extra } });
+  const at = await serverUrl(proc);
   return {
     api: (path, body) => api(path, body, at),
     home: own,
@@ -85,20 +62,10 @@ async function startServer(extra) {
   };
 }
 
-let failures = 0;
+const { check, finish } = suite();
 async function checkCapture(name, fn) {
   if (capture) await check(name, fn);
   else console.log(`skip ${name}: dumpcap may not capture on ${LOOPBACK} here`);
-}
-
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
 }
 
 try {
@@ -1094,19 +1061,9 @@ try {
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "wireshark"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\n`, { mode: 0o755 });
     const t = "fake-wireshark-token";
-    const p = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", t], {
-      stdio: ["ignore", "pipe", "ignore"],
-      env: { ...env, PATH: `${bin}:${process.env.PATH}`, DISPLAY: ":wirebuddy-test" },
-    });
+    const p = spawnServer({ token: t, stdio: ["ignore", "pipe", "ignore"], env: { ...env, PATH: `${bin}:${process.env.PATH}`, DISPLAY: ":wirebuddy-test" } });
     try {
-      const url = await new Promise((resolve, reject) => {
-        p.stdout.setEncoding("utf8");
-        p.stdout.on("data", (d) => {
-          const m = /UI at (http:\/\/[^/]+)\//.exec(d);
-          if (m) resolve(m[1]);
-        });
-        p.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
-      });
+      const url = await serverUrl(p);
       const call = async (path, body) => {
         const res = await fetch(url + path, { method: body ? "POST" : "GET", headers: { "X-WireBuddy-Token": t, "content-type": "application/json" }, body: body && JSON.stringify(body) });
         const json = await res.json();
@@ -1414,16 +1371,9 @@ try {
     mkdirSync(profile, { recursive: true });
     writeFileSync(join(profile, "preferences"), `gui.column.format:\n\t"No.", "%m",\n\t"Length", "%L",\n\t"Bytes", "%B"\n`);
     const t = "cumbytes-test-token";
-    const p = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", t, "--profile", "cumbytes"], { stdio: ["ignore", "pipe", "ignore"], env });
+    const p = spawnServer({ token: t, args: ["--profile", "cumbytes"], stdio: ["ignore", "pipe", "ignore"], env });
     try {
-      const url = await new Promise((resolve, reject) => {
-        p.stdout.setEncoding("utf8");
-        p.stdout.on("data", (d) => {
-          const m = /UI at (http:\/\/[^/]+)\//.exec(d);
-          if (m) resolve(m[1]);
-        });
-        p.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
-      });
+      const url = await serverUrl(p);
       const call = async (path, body) => {
         const res = await fetch(url + path, { method: body ? "POST" : "GET", headers: { "X-WireBuddy-Token": t, "content-type": "application/json" }, body: body && JSON.stringify(body) });
         const json = await res.json();
@@ -1866,5 +1816,4 @@ DissectorTable.get("udp.port"):add(50000, acme)
   rmSync(home, { recursive: true, force: true });
   rmSync(team, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

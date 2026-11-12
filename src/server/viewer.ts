@@ -3248,16 +3248,58 @@ export function rssBytes(pid: number | null, source: RssSource = rssSource, now 
   return bytes;
 }
 
-/** Memory the system can still give out (Linux), or null; WIREBUDDY_MEM_AVAILABLE (bytes) stands in for it in tests. */
+/** Memory the process can still use (Linux), or null: the smaller of the system's figure and its cgroup's headroom; WIREBUDDY_MEM_AVAILABLE (bytes) stands in for both in tests. */
 function availableBytes(): number | null {
   const fake = Number(process.env.WIREBUDDY_MEM_AVAILABLE);
-  if (fake > 0) return fake;
-  try {
-    const kb = /^MemAvailable:\s+(\d+) kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
-    return kb ? Number(kb[1]) * 1024 : null;
-  } catch {
-    return null;
+  return fake > 0 ? fake : availableMemory();
+}
+
+/** Limits at or above this are the kernel's way of saying "none" (v1 reports 2^63 less a page). */
+const NO_LIMIT = 2 ** 62;
+
+/**
+ * Memory that is free for this process: /proc/meminfo's MemAvailable, cut down to the headroom of the
+ * tightest cgroup limit on its group or any ancestor, since in a container meminfo shows the host's
+ * memory. Reclaimable file cache counts as free. Unreadable or absent counts as no limit; null if
+ * nothing gives a figure.
+ */
+export function availableMemory(read: (file: string) => string = (f) => readFileSync(f, "utf8")): number | null {
+  const text = (file: string): string => {
+    try {
+      return read(file);
+    } catch {
+      return "";
+    }
+  };
+  const num = (file: string): number | null => {
+    const n = /^\s*(\d+)\s*$/.exec(text(file));
+    return n ? Number(n[1]) : null;
+  };
+  // Headroom under one group's limit, or null when it has none
+  const headroom = (dir: string, limit: string, usage: string, stat: string, inactive: string): number | null => {
+    const max = num(`${dir}/${limit}`);
+    const used = num(`${dir}/${usage}`);
+    if (max === null || max >= NO_LIMIT || used === null) return null;
+    const cache = new RegExp(`^${inactive} (\\d+)`, "m").exec(text(`${dir}/${stat}`));
+    return max - Math.max(0, used - (cache ? Number(cache[1]) : 0));
+  };
+  const figures: number[] = [];
+  const kb = /^MemAvailable:\s+(\d+) kB/m.exec(text("/proc/meminfo"));
+  if (kb) figures.push(Number(kb[1]) * 1024);
+  const groups = text("/proc/self/cgroup");
+  // v2: the group's own directory and every ancestor up to the root
+  const own = /^0::(\/.*)$/m.exec(groups)?.[1] ?? "/";
+  for (let dir = own.replace(/\/+$/, ""); ; dir = dir.slice(0, dir.lastIndexOf("/"))) {
+    const room = headroom(`/sys/fs/cgroup${dir}`, "memory.max", "memory.current", "memory.stat", "inactive_file");
+    if (room !== null) figures.push(room);
+    if (!dir) break;
   }
+  // v1: the group's folder when it exists, else the root one
+  const v1 = /^\d+:(?:[^:]*,)?memory(?:,[^:]*)?:(\/.*)$/m.exec(groups)?.[1].replace(/\/+$/, "") ?? "";
+  const folder = v1 && num(`/sys/fs/cgroup/memory${v1}/memory.limit_in_bytes`) !== null ? `/sys/fs/cgroup/memory${v1}` : "/sys/fs/cgroup/memory";
+  const room = headroom(folder, "memory.limit_in_bytes", "memory.usage_in_bytes", "memory.stat", "total_inactive_file");
+  if (room !== null) figures.push(room);
+  return figures.length ? Math.max(0, Math.min(...figures)) : null;
 }
 
 /** Names the file dialog lists: of the formats looksLikeCapture lets open() read. */

@@ -189,8 +189,8 @@ export interface ViewState {
   /** Last action the agent took in the UI, shown as a dismissable banner. */
   agentNotice: AgentNotice | null;
   /**
-   * An MCP agent is attached: problems go to it instead of the page, which
-   * only shows how many are waiting (`pending`). `name` labels it in the UI
+   * An MCP agent is attached: problems also go to it, and the page shows
+   * how many are waiting (`pending`). `name` labels it in the UI
    * ("Claude" for Claude clients, else "Agent"); `watching`: its `--watch`
    * waits, so a problem or question wakes it at once.
    */

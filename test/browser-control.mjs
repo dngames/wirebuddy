@@ -4,7 +4,7 @@
 // a packet, the export dialog writing marks as packet comments, time references set there and in
 // the Edit menu, and Decode As set there (its packet line on reassembled TCP too) and removed in the
 // status bar. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs, and
-// Now in one: N tapped and the toolbar button held.
+// Now in one: N tapped and the toolbar button held. Also errors in the page: shown there and heard by the agent once.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -14,14 +14,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { WebSocket } from "ws";
 import { chromeOrSkip } from "./chrome.mjs";
+import { chromePort, pageSocket, rawCdp, sleep, startChrome, suite } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const chromeBin = chromeOrSkip();
 if (!chromeBin) process.exit(0);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // CDP key modifiers: Alt 1, Ctrl 2, Meta 4, Shift 8. The page's shortcut key is Command on a Mac, Ctrl elsewhere
 const ALT = 1;
 const MOD = process.platform === "darwin" ? 4 : 2;
@@ -76,22 +75,9 @@ const token = ui.searchParams.get("token");
 const state = async () => (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": token } })).json();
 
 const profile = mkdtempSync(join(tmpdir(), "wirebuddy-chrome-"));
-const chrome = spawn(
-  chromeBin,
-  ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"],
-  { stdio: "ignore" },
-);
+const chrome = startChrome(chromeBin, profile, ["--window-size=1280,820", "--no-first-run", "--no-default-browser-check", "--disable-gpu"]);
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 const until = async (what, fn, ms = 10_000) => {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await fn()) return;
   throw new Error(`timed out waiting for ${what}`);
@@ -99,30 +85,15 @@ const until = async (what, fn, ms = 10_000) => {
 
 let ws;
 try {
-  let port;
-  await until("Chrome", () => {
-    const file = join(profile, "DevToolsActivePort");
-    if (existsSync(file)) port = readFileSync(file, "utf8").split("\n")[0];
-    return port;
-  }, 30_000);
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.once("open", resolve);
-    ws.once("error", reject);
-  });
-  let id = 0;
-  const pending = new Map();
-  ws.on("message", (m) => {
-    const d = JSON.parse(m);
-    pending.get(d.id)?.(d);
-    pending.delete(d.id);
-  });
-  const cdp = (method, params = {}) =>
-    new Promise((resolve, reject) => {
-      pending.set(++id, (d) => (d.error ? reject(new Error(`${method}: ${d.error.message}`)) : resolve(d.result)));
-      ws.send(JSON.stringify({ id, method, params }));
-    });
+  const port = await chromePort(profile);
+  if (!port) throw new Error("timed out waiting for Chrome");
+  ws = await pageSocket(port);
+  const answer = rawCdp(ws);
+  const cdp = async (method, params = {}) => {
+    const d = await answer(method, params);
+    if (d.error) throw new Error(`${method}: ${d.error.message}`);
+    return d.result;
+  };
   const evaluate = async (expression) => (await cdp("Runtime.evaluate", { expression, returnByValue: true })).result.value;
   const click = async (x, y) => {
     await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
@@ -458,6 +429,42 @@ try {
     await sleep(300);
     seen += await viewState();
     assert.doesNotMatch(seen, /ResizeObserver/);
+  });
+
+  await check("browser: with the agent attached, an error the user runs into shows in the page and the agent hears it once, whether the server refused the request or only the page knew", async () => {
+    const gone = join(home, "gone.pcapng");
+    copyFileSync(join(root, "test/fixtures/http.pcapng"), gone);
+    const events = async (after) => (await (await fetch(new URL(`/api/events?after=${after}`, ui.origin), { headers: { "X-WireBuddy-Token": token } })).json());
+    const { last } = await events(Number.MAX_SAFE_INTEGER);
+    try {
+      // A dialog left open would hold the menus back
+      await closeComment();
+      await until("no dialog", () => evaluate("!document.querySelector('.dlg-export, .dlg-comment')"));
+      // Only the page knows: the request for View › Reload doesn't reach the server
+      await evaluate("(() => { window.__realFetch = window.fetch; window.fetch = (u, ...a) => (String(u).includes('api/reload') ? Promise.reject(new TypeError('offline')) : window.__realFetch(u, ...a)); })()");
+      await fromMenuBar("View", "Reload");
+      await until("the page's toast", async () => /Reloading failed: Cannot reach/.test(await toasts()));
+      await evaluate("window.fetch = window.__realFetch");
+      // The server refuses it: File › Open Recent of a file that has stopped being a capture
+      assert.match((await call("open_capture", { path: gone })).text, /29 frames/);
+      assert.match((await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") })).text, /29 frames/);
+      writeFileSync(gone, "not a capture\n");
+      // The page lists the recent files when it starts
+      await cdp("Page.navigate", { url: ui.href });
+      await until("the viewer", () => evaluate("!!document.querySelector('.sb-conn.open')"), 30_000);
+      await fromMenuBar("File", "Open Recent", "gone.pcapng");
+      await until("the page's toast", async () => /Can't open gone\.pcapng/.test(await toasts()));
+      await sleep(500);
+      const heard = (await events(last)).events;
+      const count = (re) => heard.filter((e) => e.level === "ERROR" && re.test(e.text)).reduce((n, e) => n + (e.repeated ?? 1), 0);
+      assert.equal(count(/^Reloading failed: Cannot reach/), 1, JSON.stringify(heard));
+      assert.equal(count(/^Opening a file failed: .*gone\.pcapng/), 1, JSON.stringify(heard));
+    } finally {
+      rmSync(gone, { force: true });
+      if (await evaluate("!!document.querySelector('.menu-item')")) await key("Escape", "Escape", 27);
+      await evaluate("if (window.__realFetch) window.fetch = window.__realFetch");
+      await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
+    }
   });
 
   await check("browser: packet comments from the keyboard, the Edit menu, the packet list and the details; the row shows them", async () => {
@@ -1122,5 +1129,4 @@ try {
   rmSync(profile, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

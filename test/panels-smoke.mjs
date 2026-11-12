@@ -1,6 +1,5 @@
 // Panels over HTTP: validity and trust, the panel host's routes, headers and checks, reports, the capture's data.
 // Usage: node test/panels-smoke.mjs   (after npm run build)
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
@@ -11,6 +10,7 @@ import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 import * as g from "./capgen.mjs";
 import { writeAcmeCapture } from "./acme.mjs";
+import { apiFetch, sleep, startServer, suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "test/fixtures/http.pcapng");
@@ -37,23 +37,11 @@ writeFileSync(join(home, "outside.js"), "1;\n");
 symlinkSync(join(home, "outside.js"), join(extDir, "linked", "panel", "lib.js"));
 addPanel("badmanifest", { "main.js": "1;\n" }, { label: "x", panel: { permissions: ["everything"] } });
 
-const server = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", "--token", token], { stdio: ["ignore", "pipe", "inherit"], env });
-const base = await new Promise((resolve, reject) => {
-  server.stdout.setEncoding("utf8");
-  server.stdout.on("data", (d) => {
-    const m = /UI at (http:\/\/[^/]+)\//.exec(d);
-    if (m) resolve(m[1]);
-  });
-  server.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
-});
+const { proc: server, base } = await startServer({ token, env });
 const port = Number(new URL(base).port);
 
 async function api(path, body) {
-  const res = await fetch(base + path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "X-WireBuddy-Token": token, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const res = await apiFetch(base, token, path, body);
   return { status: res.status, json: await res.json().catch(() => null), headers: res.headers };
 }
 
@@ -127,16 +115,7 @@ function readEvents(host, doc, until, onOpen = () => {}) {
   });
 }
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 const frameHeaders = { "sec-fetch-site": "cross-site", "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate" };
 const sub = (dest) => ({ "sec-fetch-site": "same-origin", "sec-fetch-dest": dest, "sec-fetch-mode": "no-cors" });
@@ -659,7 +638,6 @@ try {
 
   // Control: what a panel may change in the user's view (relayed by the page after a click), what it keeps, offers
   await api("/api/open", { path: fixture });
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const events = async () => (await api("/api/events/take", {})).json.events.map((e) => `${e.level} ${e.text}`).join("\n");
   const until = async (what, fn) => {
     for (let i = 0; i < 100; i++, await sleep(100)) if (await fn()) return;
@@ -794,5 +772,4 @@ try {
   server.kill();
   rmSync(home, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

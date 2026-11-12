@@ -53,7 +53,7 @@ async function send(heldMs: number, at: number): Promise<void> {
     const reach = !r.agent ? "" : r.woken ? `, sent to ${name}` : `; ${name} gets it with its next step`;
     toast("info", `Now${span}: ${r.about}${reach}`);
   } catch (e) {
-    // Not an error toast: with an agent attached those go to it instead
+    // Info, not an error: the agent never got this Now, so there is nothing for it to hear
     toast("info", `Now didn't go through: ${errorText(e)}`);
   } finally {
     sending--;

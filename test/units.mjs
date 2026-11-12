@@ -12,13 +12,14 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import { suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n") + `\nexport { availableMemory } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`,
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -29,18 +30,9 @@ const { checkPanel } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
-const { machineTag, interfaceSignature } = await import(join(out, "units.mjs"));
+const { machineTag, interfaceSignature, availableMemory } = await import(join(out, "units.mjs"));
 
-let failures = 0;
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 const frames = (set, after = 0, limit = 1e6) => set.page(after, limit).frames;
 
@@ -1105,6 +1097,41 @@ try {
     assert.equal(interfaceSignature(join(net, "missing"), names), "awdl0,en0,lo0");
     assert.equal(interfaceSignature(join(net, "missing"), () => []), "");
   });
+  await check("available memory: the smaller of the system's figure and the cgroup's headroom (v2 on the group or an ancestor, v1), cache counted as free, nothing readable is no limit", () => {
+    const reader = (files) => (f) => {
+      if (f in files) return files[f];
+      throw new Error(`ENOENT ${f}`);
+    };
+    const GiB = 2 ** 30;
+    const host = { "/proc/meminfo": `MemTotal: 99999999 kB\nMemAvailable: ${8 * 1024 * 1024} kB\n` };
+    const v2 = { "/proc/self/cgroup": "0::/a/b\n" };
+    // v2: the limit on the group, usage less reclaimable cache
+    const group = { ...host, ...v2, "/sys/fs/cgroup/a/b/memory.max": `${4 * GiB}\n`, "/sys/fs/cgroup/a/b/memory.current": `${3 * GiB}\n`, "/sys/fs/cgroup/a/b/memory.stat": `anon 1\ninactive_file ${GiB / 2}\nactive_file 7\n` };
+    assert.equal(availableMemory(reader(group)), 1.5 * GiB);
+    // without memory.stat the cache isn't known: the usage counts whole
+    const { "/sys/fs/cgroup/a/b/memory.stat": _stat, ...noStat } = group;
+    assert.equal(availableMemory(reader(noStat)), 1 * GiB);
+    // cache bigger than the usage never makes headroom beyond the limit
+    assert.equal(availableMemory(reader({ ...group, "/sys/fs/cgroup/a/b/memory.stat": `inactive_file ${9 * GiB}\n` })), 4 * GiB);
+    // a limit on an ancestor, none on the group; the tightest one counts
+    const ancestor = { ...host, ...v2, "/sys/fs/cgroup/a/b/memory.max": "max\n", "/sys/fs/cgroup/a/b/memory.current": "1\n", "/sys/fs/cgroup/a/memory.max": `${2 * GiB}\n`, "/sys/fs/cgroup/a/memory.current": `${GiB}\n`, "/sys/fs/cgroup/memory.max": `${3 * GiB}\n`, "/sys/fs/cgroup/memory.current": `${GiB}\n` };
+    assert.equal(availableMemory(reader(ancestor)), 1 * GiB);
+    // max everywhere: the system's figure
+    const none = { ...host, ...v2, "/sys/fs/cgroup/a/b/memory.max": "max\n", "/sys/fs/cgroup/a/memory.max": "max\n", "/sys/fs/cgroup/memory.max": "max\n" };
+    assert.equal(availableMemory(reader(none)), 8 * GiB);
+    // the host figure smaller than the headroom
+    assert.equal(availableMemory(reader({ ...group, "/proc/meminfo": `MemAvailable: ${1024 * 1024} kB\n` })), 1 * GiB);
+    // v1, with a limit (own group's folder, else the root one) and the cache from memory.stat
+    const v1 = { ...host, "/proc/self/cgroup": "4:memory:/docker/x\n3:cpu:/\n", "/sys/fs/cgroup/memory/memory.limit_in_bytes": `${2 * GiB}\n`, "/sys/fs/cgroup/memory/memory.usage_in_bytes": `${GiB}\n`, "/sys/fs/cgroup/memory/memory.stat": `total_inactive_file ${GiB / 4}\n` };
+    assert.equal(availableMemory(reader(v1)), 1.25 * GiB);
+    const own = "/sys/fs/cgroup/memory/docker/x";
+    assert.equal(availableMemory(reader({ ...v1, [`${own}/memory.limit_in_bytes`]: `${GiB}\n`, [`${own}/memory.usage_in_bytes`]: `${GiB / 2}\n` })), 0.5 * GiB);
+    // v1 without a limit
+    assert.equal(availableMemory(reader({ ...v1, "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712\n" })), 8 * GiB);
+    // nothing readable: no figure; only a limit: its headroom
+    assert.equal(availableMemory(reader({})), null);
+    assert.equal(availableMemory(reader({ "/proc/self/cgroup": "0::/\n", "/sys/fs/cgroup/memory.max": `${GiB}\n`, "/sys/fs/cgroup/memory.current": "0\n" })), GiB);
+  });
   await check("instance file: written for the user alone, never through a link, in a folder that is the user's own and not a link", () => {
     const base = mkdtempSync(join(out, "instance-"));
     const mode = (path) => statSync(path).mode & 0o777;
@@ -1209,5 +1236,4 @@ try {
 } finally {
   rmSync(out, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();

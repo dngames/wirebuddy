@@ -107,7 +107,8 @@ function init(): void {
 
   let lastLoadError: string | null = null;
   bus.on("state", (s) => {
-    // With an agent attached the server has told it already
+    // The state can't tell who asked for an open. One the user started in the page shows its own failure (act.openFile's
+    // callers); one nobody started there, such as the agent's, is shown only when no agent is attached to hear of it.
     if (s.loadError && s.loadError !== lastLoadError && !s.agent.attached) toast("error", `Loading failed: ${s.loadError}`);
     lastLoadError = s.loadError;
   });

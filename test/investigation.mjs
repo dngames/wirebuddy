@@ -12,27 +12,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import { sleep, suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const example = join(root, "examples/investigations/robot-arm");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-let failures = 0;
 /** The robot-arm example's fault is Linux's delayed ACK on the loopback; macOS acknowledges at once, so there is nothing to find. */
 function skipDelayedAck(what) {
   if (process.platform !== "darwin") return false;
   console.log(`skip ${what}: the fault needs Linux's delayed ACK on the loopback, macOS acknowledges at once`);
   return true;
 }
-async function check(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (err) {
-    failures++;
-    console.log(`FAIL ${name}: ${err.message}`);
-  }
-}
+const { check, finish } = suite();
 
 /** A loopback port nothing listens on right now. */
 async function freePort(udp) {
@@ -662,5 +653,4 @@ try {
   fresh?.p.kill();
   rmSync(ctWork, { recursive: true, force: true });
 }
-console.log(failures ? `${failures} check(s) failed` : "all checks passed");
-process.exit(failures ? 1 : 0);
+finish();
