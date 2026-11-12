@@ -22,9 +22,12 @@
  * few seconds after a request for the list's newest rows, the provisional
  * rows it gains are read before the list shows them.
  *
- * Packet comments edited in the viewer (`/api/comments*`) stay in the
- * viewer, by frame number, until the capture is closed or another one
- * opened; only an export to pcapng writes them ({@link PacketRow.cm}). A
+ * Packet comments edited in the viewer (`/api/comments*`) are kept by frame
+ * number with the capture, like its marks and time references: in
+ * WireBuddy's data folder, under a hash of the capture's first 4096 bytes,
+ * they come back when that capture (or a copy) is opened again, also after
+ * a restart, and an info toast says what came back. Only an export to
+ * pcapng writes them to a capture file ({@link PacketRow.cm}). A
  * comment holds at most 2000 characters; newlines are kept, other control
  * characters become "?". `/api/comments` adds `comment` to `frames`, else to
  * the rows `rows` (or the frame `frame`) of the list `view` showed (409 once
@@ -33,7 +36,10 @@
  * `index` one of `frame`'s. Edits and deletes by `index` name the comment's
  * text as `old` and get 409 once it changed; `comment` "" deletes it.
  * `/api/comments/clear` deletes every comment in the capture, the file's too.
- * Edits of a capture closed meanwhile get 409.
+ * Edits of a capture closed meanwhile get 409. `/api/forget` (File › Forget
+ * Kept Marks and Comments…) drops the open capture's marks, time
+ * references and every comment edit, so that its packets read as the
+ * capture file has them, and removes what was kept of them.
  *
  * Endpoints:
  *
@@ -75,6 +81,7 @@
  * | POST   | /api/comments/edit            | { frame, index, old, comment }       | CommentResult          |
  * | POST   | /api/comments/delete          | { frames? } or { frame, index, old } | CommentResult          |
  * | POST   | /api/comments/clear           |                                      | CommentResult          |
+ * | POST   | /api/forget                   | (drops marks, time references and comment edits of the open capture, and what is kept of them) | ForgetResult |
  * | GET    | /api/find                     | ?filter=&from=<frame>&dir=1\|-1      | FindResult             |
  * | POST   | /api/wireshark                | { frame? }                           | { ok: true, note: string \| null } |
  * | GET    | /api/extensions               |                                      | ExtensionList          |
@@ -162,7 +169,7 @@ export interface ViewState {
    * tell more), not when it only grows.
    */
   rowsSince: number;
-  /** Frames the agent (or the user) marked, keyed by frame number. */
+  /** Frames the agent (or the user) marked, keyed by frame number; kept with the capture like its packet comments. */
   marks: Mark[];
   /**
    * Time references (Edit › Set/Unset Time Reference), ascending frame
@@ -171,18 +178,31 @@ export interface ViewState {
    * {@link generation} (rows read again, rowsSince stays unless a display
    * filter on frame.ref_time lists other frames now); the shown packet's
    * details are read again too. A display filter that hides a reference
-   * keeps it hidden, and packets after it still count from it.
+   * keeps it hidden, and packets after it still count from it. Kept with
+   * the capture like its packet comments.
    */
   timeRefs: number[];
   /** Grows with every change to the time references, also one undone before the next state: rows and details read differently. */
   timeRefsRevision: number;
   /**
    * Packets whose comments were added, edited or deleted in the viewer and
-   * not exported since: an export of every packet to pcapng keeps them,
-   * closing or opening another capture discards them, and so does a live
-   * capture going on in a new file (a WARNING event and a toast say so).
+   * not exported since: an export of every packet to pcapng writes them to a
+   * capture file. They are kept with the capture (see the comments above),
+   * and stay with the earlier file when a live capture goes on in a new one
+   * (a WARNING event and a toast say so).
    */
   commentEdits: number;
+  /** Packets whose comments read otherwise than the capture file's, as edited in the viewer, exported or not. */
+  commentsEdited: number;
+  /**
+   * The open capture's marks, time references and comment edits are kept on
+   * disk as they are now, so closing it or opening another loses nothing.
+   * False right after any change to them until it is written (about a
+   * second later), and while it can't be: no capture open, keeping off, a
+   * live capture's first 4096 bytes not written yet, more than 4 MiB, or the
+   * last write failed.
+   */
+  kept: boolean;
   /** Grows with every change to packet comments: rows and details read differently. */
   commentRevision: number;
   capture: CaptureState;
@@ -643,6 +663,13 @@ export interface ExportRequest {
 }
 
 /** Packets whose comments an edit changed. */
+/** What `/api/forget` dropped: marks, time references, and packets whose comments were edited. */
+export interface ForgetResult {
+  marks: number;
+  timeRefs: number;
+  comments: number;
+}
+
 export interface CommentResult {
   /** Their frame numbers, the first 10000. */
   frames: number[];

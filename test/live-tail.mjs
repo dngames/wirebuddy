@@ -182,7 +182,7 @@ try {
     assert.equal(end.totalFrames, s.capture.packets);
   });
 
-  await check("a capture going on in a new file: comments edited in the last one and not exported are gone, and the user and the agent hear so", async () => {
+  await check("a capture going on in a new file: comments edited in the last one and not exported stay with that file, the user and the agent hear so, and they are back when it is opened again", async () => {
     const toasts = [];
     const ws = new WebSocket(`${wb.ui.origin.replace("http", "ws")}/ws?token=${wb.ui.searchParams.get("token")}`);
     ws.on("message", (m) => {
@@ -196,14 +196,24 @@ try {
       await api("/api/comments", { frames: [5], comment: "important" });
       const next = await until("the next file", 30_000, (s) => s.file === s.capture.files[1] && s.totalFrames > 0);
       assert.equal(next.commentEdits, 0);
-      const text = `The packet comments edited in 1 packet of ${basename(first.file)} weren't exported and are gone: the capture went on in ${basename(next.file)}`;
+      const text = `The packet comments edited in 1 packet of ${basename(first.file)} weren't exported and are kept with ${basename(first.file)}, not carried over to ${basename(next.file)}, where the capture went on`;
       const events = (await api("/api/events?after=0")).events.map((e) => `${e.level} ${e.text}`);
       assert.ok(events.includes(`WARNING ${text}`), events.join("\n"));
       for (const end = Date.now() + 5000; !toasts.includes(text) && Date.now() < end; ) await sleep(100);
       assert.ok(toasts.includes(text), toasts.join("\n"));
+      await api("/api/capture/stop", {});
+      await until("the capture to stop", 15_000, (s) => s.capture.status === "idle");
+      // The ring keeps the last two files: the first one is still there, with what was edited in it
+      await api("/api/open", { path: first.file });
+      const again = await until("the first file again", 15_000, (s) => s.file === first.file && !s.loading && s.totalFrames > 0);
+      assert.equal(again.commentEdits, 1);
+      const restored = "Restored the edited comments of 1 packet kept for this capture";
+      for (const end = Date.now() + 5000; !toasts.includes(restored) && Date.now() < end; ) await sleep(100);
+      assert.ok(toasts.includes(restored), toasts.join("\n"));
+      await api("/api/forget", {});
     } finally {
       ws.close();
-      await api("/api/capture/stop", {});
+      await api("/api/capture/stop", {}).catch(() => {});
       await until("the capture to stop", 15_000, (s) => s.capture.status === "idle");
     }
   });

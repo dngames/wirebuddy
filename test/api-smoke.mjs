@@ -768,19 +768,22 @@ try {
     }
   });
 
-  await check("packet comments: a reload keeps them, opening a file or closing it drops them", async () => {
+  await check("packet comments: a reload keeps them, and so do opening the capture again and closing it", async () => {
     await api("/api/comments", { frames: [10], comment: "kept" });
     await api("/api/reload", {});
     assert.deepEqual(await commentsOf(10), ["kept"]);
     assert.equal((await state()).commentEdits, 1);
     assert.equal((await api("/api/frame?num=10")).json.tree[0].n[0].l, "kept");
     await api("/api/open", { path: fixture });
-    assert.equal(await commentsOf(10), undefined);
-    assert.equal((await state()).commentEdits, 0);
-    await api("/api/comments", { frames: [10], comment: "gone" });
+    assert.deepEqual(await commentsOf(10), ["kept"]);
+    assert.equal((await state()).commentEdits, 1);
+    await api("/api/comments", { frames: [10], comment: "also" });
     await api("/api/close", {});
     assert.equal((await state()).commentEdits, 0);
     await api("/api/open", { path: fixture });
+    assert.deepEqual(await commentsOf(10), ["kept", "also"]);
+    // Deleted again: the fixture is as it was for the checks after this one
+    await api("/api/comments/delete", { frames: [10] });
     assert.equal(await commentsOf(10), undefined);
     await api("/api/events/take", {});
   });
@@ -791,7 +794,10 @@ try {
     assert.deepEqual((await rowsOf(11, 1))[0].cm, texts.slice(0, 5).map((c) => `${c.slice(0, 299)}…`));
     const f = (await api("/api/frame?num=12")).json;
     assert.deepEqual([f.row.cm, f.tree[0].n.length], [texts, 7]);
+    // Kept with the capture otherwise, for the checks after this one
+    await api("/api/comments/delete", { frames: [12] });
     await api("/api/open", { path: fixture });
+    assert.equal(await commentsOf(12), undefined);
     await api("/api/events/take", {});
   });
 
@@ -999,7 +1005,7 @@ try {
     assert.deepEqual([s.filter, s.displayedFrames, s.timeRefs], ["frame.ref_time", 0, []]);
     await api("/api/filter", { filter: "" });
   });
-  await check("time references: a reload keeps them, opening a file clears them; bad requests change nothing", async () => {
+  await check("time references: a reload keeps them, and so does opening the capture again; bad requests change nothing", async () => {
     await api("/api/filter", { filter: "" });
     await api("/api/timerefs/clear", {});
     await api("/api/timerefs", { frames: [3, 20], on: true });
@@ -1010,14 +1016,14 @@ try {
     assert.deepEqual((await api("/api/timerefs", { frames: [20, 21], on: false })).json, { set: [], unset: [20] });
     assert.deepEqual((await api("/api/timerefs", { frames: [3], on: true })).json, { set: [], unset: [] });
     assert.equal((await api("/api/open", { path: fixture })).status, 200);
-    assert.deepEqual((await state()).timeRefs, []);
-    await api("/api/timerefs", { frames: [3], on: true });
+    assert.deepEqual((await state()).timeRefs, [3]);
     await api("/api/close", {});
     assert.deepEqual((await state()).timeRefs, []);
     assert.equal((await api("/api/timerefs", { frames: [3], on: true })).status, 400);
     assert.equal((await api("/api/timerefs/toggle", {})).status, 400);
     assert.deepEqual((await api("/api/timerefs/clear", {})).json, { set: [], unset: [] });
     assert.equal((await api("/api/open", { path: fixture })).status, 200);
+    assert.deepEqual((await api("/api/timerefs/clear", {})).json, { set: [], unset: [3] });
   });
   await check("time references: a page whose references don't fit in one request with a long filter still counts from each", async () => {
     const all = Array.from({ length: 29 }, (_, i) => i + 1);
@@ -1071,6 +1077,8 @@ try {
         return json;
       };
       await call("/api/open", { path: fixture });
+      // On the same home: what the fixture keeps from other checks doesn't count here
+      await call("/api/timerefs/clear", {});
       await call("/api/timerefs", { frames: [4, 8], on: true });
       await call("/api/filter", { filter: "frame.ref_time || frame.number == 1" });
       await call("/api/wireshark", {});
@@ -1080,6 +1088,321 @@ try {
       p.kill();
     }
   });
+  // A server on a home that outlives it, so that the next one finds what it kept
+  const keptServer = async (own, extra = {}) => {
+    const proc = spawnServer({ token, env: { ...env, HOME: own, XDG_CONFIG_HOME: join(own, ".config"), XDG_DATA_HOME: join(own, ".local/share"), WIREBUDDY_EXTENSIONS: "", ...extra } });
+    const at = await serverUrl(proc);
+    const exited = new Promise((done) => proc.on("exit", done));
+    return {
+      api: (path, body) => api(path, body, at),
+      stop: async () => {
+        proc.kill("SIGTERM");
+        await exited;
+      },
+    };
+  };
+  const waitFor = async (what, ok, ms = 10_000) => {
+    for (const end = Date.now() + ms; !(await ok()); ) {
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+  /** A capture of `n` UDP packets to `port`: two of them with the same port share their first packets, and so their first 4096 bytes. */
+  const udpCapture = (n, port) => Buffer.concat([shb(), idb(1), ...Array.from({ length: n }, (_, i) => epb(0, 1_700_000_000_000_000n + BigInt(i) * 1000n, udpFrame(i, { dport: port })))]);
+  /** What a server shows of its capture's marks, time references and comments. */
+  const investigationOf = async (s) => {
+    const st = (await s.api("/api/state")).json;
+    const rows = (await s.api(`/api/rows?gen=${st.generation}&start=0&count=${st.totalFrames}`)).json.rows;
+    const frame4 = (await s.api("/api/frame?num=4")).json;
+    return { marks: st.marks, timeRefs: st.timeRefs, commentEdits: st.commentEdits, comments: rows.filter((r) => r.cm).map((r) => [r.num, r.cm]), times: rows.slice(8, 12).map((r) => r.c[1]), node: frame4.tree[0].n?.map((n) => n.l) };
+  };
+  const eventsSince = async (s, after) => (await s.api(`/api/events?after=${after}`)).json.events.map((e) => `${e.level} ${e.text}`);
+  const lastEvent = async (s) => (await s.api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json.last;
+
+  await check("investigation: marks, time references and comments come back when the capture opens again, after another one and after a restart; clearing them removes its file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const kept = join(own, ".local/share/wirebuddy/investigations");
+    const [a, b] = [join(dir, "a.pcapng"), join(dir, "b.pcapng")];
+    writeFileSync(a, udpCapture(200, 7502));
+    writeFileSync(b, udpCapture(50, 7600));
+    let s = await keptServer(own);
+    try {
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      await s.api("/api/marks", { frames: [3, 5], note: "slow reply" });
+      await s.api("/api/marks", { frames: [150], note: "" });
+      await s.api("/api/timerefs", { frames: [10], on: true });
+      await s.api("/api/comments", { frames: [4, 6], comment: "first" });
+      await s.api("/api/comments/edit", { frame: 4, index: 0, old: "first", comment: "edited\nover two lines" });
+      await s.api("/api/comments", { frames: [8], comment: "deleted again" });
+      await s.api("/api/comments/delete", { frames: [8] });
+      // Not kept until written, about a second after the change
+      assert.equal((await s.api("/api/state")).json.kept, false);
+      const want = await investigationOf(s);
+      assert.deepEqual(want.comments, [[4, ["edited\nover two lines"]], [6, ["first"]]]);
+      assert.deepEqual([want.marks.length, want.timeRefs, want.commentEdits, want.times[1]], [3, [10], 3, "*REF*"]);
+      // Kept within about a second, for the user alone
+      await waitFor("the investigation file", () => existsSync(kept) && readdirSync(kept).length === 1);
+      await waitFor("the view to say it is kept", async () => (await s.api("/api/state")).json.kept);
+      assert.equal((await s.api("/api/state")).json.commentsEdited, 3);
+      const [name] = readdirSync(kept);
+      assert.match(name, /^[0-9a-f]{64}\.json$/);
+      assert.deepEqual([statSync(kept).mode & 0o777, statSync(join(kept, name)).mode & 0o777], [0o700, 0o600]);
+      const file = JSON.parse(readFileSync(join(kept, name), "utf8"));
+      assert.deepEqual([file.version, file.capture.path, file.capture.frames], [1, a, 200]);
+      // Another capture shows none of it
+      assert.equal((await s.api("/api/open", { path: b })).status, 200);
+      const other = await investigationOf(s);
+      assert.deepEqual([other.marks, other.timeRefs, other.commentEdits, other.comments], [[], [], 0, []]);
+      // Back to the first: as it was, and the user and the agent hear so
+      const since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.deepEqual(await investigationOf(s), want);
+      assert.ok((await eventsSince(s, since)).includes("INFO Restored 3 marks, 1 time reference and the edited comments of 3 packets kept for this capture"), (await eventsSince(s, since)).join("\n"));
+      // Another server on the same home, after this one stopped
+      await s.api("/api/marks", { frames: [7], note: "just before the stop" });
+      await s.stop();
+      s = await keptServer(own);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      const after = await investigationOf(s);
+      assert.deepEqual(after, { ...want, marks: [...want.marks, { frame: 7, note: "just before the stop", by: "user" }].sort((x, y) => x.frame - y.frame) });
+      // Nothing left to keep: the file goes, and an empty capture opens without a word
+      await s.api("/api/marks/clear", {});
+      await s.api("/api/timerefs/clear", {});
+      await s.api("/api/comments/delete", { frames: [4, 6] });
+      assert.equal((await s.api("/api/state")).json.commentEdits, 3, "edited and not exported, though as the file has them");
+      await waitFor("the investigation file to go", () => readdirSync(kept).length === 0);
+      const quiet = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.deepEqual((await eventsSince(s, quiet)).filter((t) => /Restored|not restored/.test(t)), []);
+      assert.equal((await s.api("/api/state")).json.commentEdits, 0);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("investigation: a copy under another name gets the capture's; a shorter one drops what is past its packets; a tampered file is ignored whole and left alone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const kept = join(own, ".local/share/wirebuddy/investigations");
+    const [a, copy, short] = [join(dir, "a.pcapng"), join(dir, "copy of a.pcapng"), join(dir, "short.pcapng")];
+    writeFileSync(a, udpCapture(200, 7502));
+    copyFileSync(a, copy);
+    writeFileSync(short, udpCapture(100, 7502));
+    let s = await keptServer(own);
+    try {
+      await s.api("/api/open", { path: a });
+      await s.api("/api/marks", { frames: [3, 150], note: "m" });
+      await s.api("/api/timerefs", { frames: [10, 120], on: true });
+      await s.api("/api/comments", { frames: [4, 160], comment: "c" });
+      await s.api("/api/close", {});
+      assert.equal(readdirSync(kept).length, 1, "kept as the capture closed");
+      // A copy: all of it
+      await s.api("/api/open", { path: copy });
+      let st = (await s.api("/api/state")).json;
+      assert.deepEqual([st.marks.map((m) => m.frame), st.timeRefs, st.commentEdits], [[3, 150], [10, 120], 2]);
+      // The first 100 packets of it: what is past them goes, the file stays as it was
+      const since = await lastEvent(s);
+      await s.api("/api/open", { path: short });
+      st = (await s.api("/api/state")).json;
+      assert.deepEqual([st.totalFrames, st.marks.map((m) => m.frame), st.timeRefs, st.commentEdits], [100, [3], [10], 1]);
+      assert.ok((await eventsSince(s, since)).includes("INFO Restored 1 mark, 1 time reference and the edited comments of 1 packet kept for this capture"));
+      await s.stop();
+      const [name] = readdirSync(kept);
+      const text = JSON.parse(readFileSync(join(kept, name), "utf8"));
+      assert.deepEqual(text.marks.map((m) => m.frame), [3, 150]);
+      // Tampered: a frame 0, or an unknown version; nothing of it comes back, the agent hears why, the file stays
+      for (const [bad, why] of [
+        [{ ...text, marks: [{ frame: 0, note: "x", by: "agent" }] }, "marks[0].frame is not a frame number"],
+        [{ ...text, version: 99 }, "it is of another version (99), not 1"],
+        ["{ not json", "it is not JSON"],
+      ]) {
+        const written = typeof bad === "string" ? bad : JSON.stringify(bad);
+        writeFileSync(join(kept, name), written, { mode: 0o600 });
+        s = await keptServer(own);
+        assert.equal((await s.api("/api/open", { path: a })).status, 200);
+        st = (await s.api("/api/state")).json;
+        assert.deepEqual([st.marks, st.timeRefs, st.commentEdits], [[], [], 0], why);
+        const texts = await eventsSince(s, 0);
+        const aside = join(kept, name.replace(/\.json$/, ".unreadable"));
+        assert.ok(texts.some((t) => t.startsWith("WARNING The marks, time references and packet comments kept for a.pcapng were not restored: ") && t.includes(why) && t.endsWith(`then it is moved to ${aside}`)), texts.join("\n"));
+        assert.ok(!texts.some((t) => t.startsWith("INFO Restored")), texts.join("\n"));
+        // A newer version's file, as after a downgrade: the next change sets it aside, it isn't lost
+        if (why.includes("version")) {
+          await s.api("/api/marks", { frames: [2], note: "after the downgrade" });
+          await s.stop();
+          assert.equal(readFileSync(aside, "utf8"), written, "set aside");
+          assert.deepEqual(JSON.parse(readFileSync(join(kept, name), "utf8")).marks, [{ frame: 2, note: "after the downgrade", by: "user" }]);
+          continue;
+        }
+        await s.stop();
+        assert.equal(readFileSync(join(kept, name), "utf8"), written, "left alone");
+      }
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("investigation: with a data folder that can't hold one, the view says nothing is kept and the agent hears it once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    // A path under a regular file: no folder can be made there, also not by root
+    const data = join(dir, "data-is-a-file");
+    writeFileSync(data, "");
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(40, 7502));
+    const s = await keptServer(own, { XDG_DATA_HOME: data });
+    try {
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal((await s.api("/api/state")).json.kept, true, "nothing to keep yet");
+      await s.api("/api/comments", { frames: [3], comment: "can't be kept" });
+      const warned = async () => (await eventsSince(s, 0)).filter((t) => t.startsWith("WARNING Could not keep the marks, time references and packet comments of a.pcapng in "));
+      await waitFor("the warning", async () => (await warned()).length > 0);
+      await s.api("/api/marks", { frames: [4], note: "nor this" });
+      await new Promise((r) => setTimeout(r, 1500));
+      const st = (await s.api("/api/state")).json;
+      // The page asks before Open, Close and Start Capture again: edits not exported and not kept
+      assert.deepEqual([st.kept, st.commentEdits], [false, 1]);
+      assert.equal((await warned()).length, 1, (await eventsSince(s, 0)).join("\n"));
+      const events = (await s.api(`/api/events?after=0`)).json.events.filter((e) => e.text.startsWith("Could not keep"));
+      assert.deepEqual(events.map((e) => e.repeated ?? 1), [1]);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("investigation: Forget unsets marks, time references and comment edits, re-reads rows and details, removes what was kept and leaves nothing to restore", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const kept = join(own, ".local/share/wirebuddy/investigations");
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(40, 7502));
+    const s = await keptServer(own);
+    try {
+      await s.api("/api/open", { path: a });
+      await s.api("/api/comments", { frames: [2, 4], comment: "gone soon" });
+      await s.api("/api/comments/clear", {});
+      await s.api("/api/comments", { frames: [6], comment: "after" });
+      await s.api("/api/marks", { frames: [3], note: "m" });
+      await s.api("/api/timerefs", { frames: [5], on: true });
+      // A display filter on the references is matched again once they go
+      assert.equal((await s.api("/api/filter", { filter: "frame.ref_time || frame.number == 1" })).json.ok, true);
+      assert.equal((await s.api("/api/state")).json.displayedFrames, 2);
+      await waitFor("the investigation file", () => existsSync(kept) && readdirSync(kept).length === 1);
+      const before = (await s.api("/api/state")).json;
+      assert.deepEqual([before.commentsEdited, before.commentEdits], [1, 3]);
+      const since = await lastEvent(s);
+      const r = await s.api("/api/forget", {});
+      assert.deepEqual([r.status, r.json], [200, { marks: 1, timeRefs: 1, comments: 1 }]);
+      const st = (await s.api("/api/state")).json;
+      assert.deepEqual([st.marks, st.timeRefs, st.commentEdits, st.commentsEdited, st.kept, st.displayedFrames], [[], [], 0, 0, true, 1]);
+      assert.ok(st.commentRevision > before.commentRevision && st.timeRefsRevision > before.timeRefsRevision && st.generation > before.generation);
+      await s.api("/api/filter", { filter: "" });
+      const g = (await s.api("/api/state")).json.generation;
+      const rows = (await s.api(`/api/rows?gen=${g}&start=0&count=40`)).json.rows;
+      assert.deepEqual([rows.filter((x) => x.cm).map((x) => x.num), rows[4].c[1] === "*REF*"], [[], false]);
+      assert.ok(!(await s.api("/api/frame?num=6")).json.tree.some((n) => n.fn === "pkt_comment"));
+      assert.deepEqual(readdirSync(kept), []);
+      assert.ok((await eventsSince(s, since)).includes("INFO The user had WireBuddy forget 1 mark, 1 time reference and the edited comments of 1 packet of this capture: its packets read as the capture file has them"), (await eventsSince(s, since)).join("\n"));
+      const quiet = await lastEvent(s);
+      await s.api("/api/open", { path: a });
+      const again = (await s.api("/api/state")).json;
+      assert.deepEqual([again.marks, again.timeRefs, again.commentEdits], [[], [], 0]);
+      assert.deepEqual((await eventsSince(s, quiet)).filter((t) => /Restored|not restored/.test(t)), []);
+      await s.api("/api/close", {});
+      assert.equal((await s.api("/api/forget", {})).status, 400);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("investigation: Forget brings back the capture file's own comments after they were edited and deleted with Delete All", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const kept = join(own, ".local/share/wirebuddy/investigations");
+    const source = join(dir, "own.pcapng");
+    execFileSync("editcap", ["-a", "2:file one", "-a", "4:file four", fixture, source]);
+    const s = await keptServer(own);
+    const cm = async () => {
+      const st = (await s.api("/api/state")).json;
+      return (await s.api(`/api/rows?gen=${st.generation}&start=0&count=29`)).json.rows.filter((r) => r.cm).map((r) => [r.num, r.cm]);
+    };
+    try {
+      await s.api("/api/open", { path: source });
+      assert.deepEqual(await cm(), [[2, ["file one"]], [4, ["file four"]]]);
+      await s.api("/api/comments/edit", { frame: 4, index: 0, old: "file four", comment: "four edited" });
+      await s.api("/api/comments/clear", {});
+      await s.api("/api/comments", { frames: [6], comment: "after" });
+      await s.api("/api/marks", { frames: [3], note: "m" });
+      await s.api("/api/timerefs", { frames: [5], on: true });
+      await waitFor("the investigation file", () => existsSync(kept) && readdirSync(kept).length === 1);
+      // Reopened, the file's own comments stay deleted: only Forget brings them back
+      await s.api("/api/open", { path: source });
+      assert.deepEqual(await cm(), [[6, ["after"]]]);
+      const before = (await s.api("/api/state")).json;
+      assert.equal(before.commentsEdited, 3);
+      const since = await lastEvent(s);
+      const r = await s.api("/api/forget", {});
+      assert.deepEqual([r.status, r.json], [200, { marks: 1, timeRefs: 1, comments: 3 }]);
+      const st = (await s.api("/api/state")).json;
+      assert.deepEqual([st.marks, st.timeRefs, st.commentEdits, st.commentsEdited, st.kept], [[], [], 0, 0, true]);
+      assert.ok(st.commentRevision > before.commentRevision && st.timeRefsRevision > before.timeRefsRevision && st.generation > before.generation);
+      assert.deepEqual(await cm(), [[2, ["file one"]], [4, ["file four"]]]);
+      assert.equal((await s.api("/api/frame?num=4")).json.tree[0].n[0].l, "file four");
+      const rows = (await s.api(`/api/rows?gen=${st.generation}&start=4&count=1`)).json.rows;
+      assert.notEqual(rows[0].c[1], "*REF*");
+      assert.deepEqual(readdirSync(kept), []);
+      assert.ok((await eventsSince(s, since)).includes("INFO The user had WireBuddy forget 1 mark, 1 time reference and the edited comments of 3 packets of this capture: its packets read as the capture file has them"), (await eventsSince(s, since)).join("\n"));
+      // Nothing comes back
+      const quiet = await lastEvent(s);
+      await s.api("/api/open", { path: source });
+      assert.deepEqual(await cm(), [[2, ["file one"]], [4, ["file four"]]]);
+      assert.deepEqual((await eventsSince(s, quiet)).filter((t) => /Restored|not restored/.test(t)), []);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("investigation: comments restored after a restart go along in an export to pcapng as edited", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(60, 7502));
+    let s = await keptServer(own);
+    try {
+      await s.api("/api/open", { path: a });
+      await s.api("/api/comments", { frames: [2, 5], comment: "kept" });
+      await s.api("/api/comments", { frames: [5], comment: "and more" });
+      await s.api("/api/marks", { frames: [9], note: "n" });
+      await s.stop();
+      s = await keptServer(own);
+      await s.api("/api/open", { path: a });
+      const out = join(dir, "out.pcapng");
+      const r = await s.api("/api/export", { path: out, which: "all", markComments: true });
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.deepEqual([r.json.edited, r.json.comments], [2, 1]);
+      const want = Array.from({ length: 60 }, () => []);
+      Object.assign(want, { 1: ["kept"], 4: ["kept", "and more"], 8: ["WireBuddy mark (user): n"] });
+      assert.deepEqual(packetComments(out), want);
+      assert.equal((await s.api("/api/state")).json.commentEdits, 0);
+      // Exported: kept as such, so a restart doesn't count them as not exported again
+      await s.stop();
+      s = await keptServer(own);
+      await s.api("/api/open", { path: a });
+      const st = (await s.api("/api/state")).json;
+      assert.deepEqual([st.commentEdits, st.marks.length], [0, 1]);
+      assert.deepEqual((await s.api(`/api/rows?gen=${st.generation}&start=4&count=1`)).json.rows[0].cm, ["kept", "and more"]);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   await check("events: problems and user activity for the agent, long-poll for watchers", async () => {
     const start = (await api(`/api/events?after=${Number.MAX_SAFE_INTEGER}`)).json;
     assert.equal((await state()).agent.attached, false);

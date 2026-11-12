@@ -101,6 +101,7 @@ const MENUS: TopMenu[] = [
       { label: "Open Recent", sub: recentItems() },
       SEP,
       item("close"),
+      item("forgetKept"),
       SEP,
       item("saveAs"),
       SEP,

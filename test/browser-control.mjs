@@ -323,7 +323,8 @@ try {
       throw new Error(`${err.message}; toasts: ${await toasts()}; dialog: ${await evaluate("document.querySelector('.dlg-export')?.textContent")}`);
     });
     assert.ok(existsSync(join(home, "selected.pcapng")));
-  });
+    // The mark is kept with the capture otherwise, and back each time a later check opens it
+  }).finally(() => call("clear_marks", {}));
 
   await check("browser: Set/Unset Time Reference in a packet's menu and in the Edit menu, Ctrl+Alt+T unsets all: the rows show *REF* and count from them", async () => {
     const time = (frame) => evaluate(`${row(frame)}?.querySelectorAll('.pl-cell')[1]?.textContent`);
@@ -524,7 +525,7 @@ try {
     assert.match(await viewState(), /INFO The user deleted comment 1 of frame 6/);
   }).finally(closeComment);
 
-  await check("browser: the agent's comments show with a notice; editing one the agent changed meanwhile is refused; Delete All asks first; closing with unsaved comments asks too", async () => {
+  await check("browser: the agent's comments show with a notice; editing one the agent changed meanwhile is refused; Delete All asks first; closing keeps comments with the capture, opening it again says so, and File › Forget asks, then drops them", async () => {
     const r = await call("packet_comments", { action: "add", frames: [2, 3], comment: "from the agent" });
     assert.match(r.text, /^Added the comment to 2 frame\(s\)/);
     assert.match((await state()).agentNotice.text, /^Added a packet comment to 2 frames: from the agent$/);
@@ -548,13 +549,28 @@ try {
     await click(...center(await box("document.querySelector('.dlg button.primary')")));
     await until("no comments", () => evaluate(`!document.querySelector('.pl-row.commented')`));
     assert.match(await viewState(), /^ {2}1-29: all comments deleted \(Delete All Packet Comments\)/m);
-    // Unexported edits: File › Close asks, and Cancel keeps the capture
-    assert.ok((await state()).commentEdits > 0);
-    await fromMenuBar("File", "Close");
-    await until("the warning", () => evaluate("/weren't exported: closing the capture discards them/.test(document.querySelector('.confirm-text')?.textContent ?? '')"));
-    await key("Escape", "Escape", 27);
+    // Unexported edits kept with the capture: File › Close closes without asking, and they come back with it
+    await call("packet_comments", { action: "add", frames: [2], comment: "kept" });
+    await until("the comment kept", async () => (await state()).kept);
+    // The page has the state that says so
     await sleep(300);
-    assert.ok((await state()).file, "the capture stays open");
+    await fromMenuBar("File", "Close");
+    await until("the capture to close", async () => !(await state()).file);
+    assert.equal(await evaluate("!!document.querySelector('.confirm-text')"), false);
+    await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
+    await until("the restored toast", async () => /Restored the edited comments of 1 packet kept for this capture/.test(await toasts()));
+    await until("the kept comment", () => evaluate(`${row(2)}?.classList.contains('commented') === true`));
+    // File › Forget Kept Marks and Comments… asks, then the packets read as the file has them
+    await call("mark_frames", { frames: [3], note: "to forget" });
+    await sleep(300);
+    await fromMenuBar("File", "Forget Kept Marks and Comments…");
+    await until("the question", () => evaluate("/forgets the marks, time references and packet comments edited for this capture/.test(document.querySelector('.confirm-text')?.textContent ?? '')"));
+    await click(...center(await box("document.querySelector('.dlg button.primary')")));
+    await until("nothing edited", async () => {
+      const s = await state();
+      return !s.marks.length && !s.commentsEdited;
+    });
+    await until("no commented row", () => evaluate("!document.querySelector('.pl-row.commented')"));
   }).finally(closeComment);
 
   await check("browser: Decode As in a packet's menu decodes its port; the status bar lists the entries and removes them", async () => {

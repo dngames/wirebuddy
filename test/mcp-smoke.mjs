@@ -195,7 +195,7 @@ try {
     assert.match(t, /INFO The user added the packet comment "the user's" to frame 4/);
   });
   await call("get_view_state", {}, (t) => {
-    assert.match(t, /^Packet comments edited in the viewer \(3 packets, 3 not exported yet; only export_packets to pcapng keeps them/m);
+    assert.match(t, /^Packet comments edited in the viewer \(3 packets, 3 not exported yet; (?:kept with the capture|not kept with the capture on disk yet); only export_packets to pcapng writes them to a capture file/m);
     assert.match(t, /^ {2}3: "agent note second line"$/m);
     assert.match(t, /^ {2}4: "agent note second line" \| "the user's"$/m);
   });
@@ -403,9 +403,12 @@ try {
   const acmeFile = join(out, "acme.pcap");
   writeAcmeCapture(acmeFile);
   const extDir = join(home, ".local/share/wirebuddy/extensions");
-  // Comments edited and not exported: the agent hears they are gone
+  // Comments edited and not exported stay with their capture: opening another one discards nothing
   await call("packet_comments", { action: "add", frames: [3, 4, 5, 7], comment: "left behind" });
-  await call("open_capture", { path: acmeFile }, (t) => assert.match(t, /20 frames.*; the comments edited in 4 packets and not exported were discarded$/m));
+  await call("open_capture", { path: acmeFile }, (t) => {
+    assert.match(t, /20 frames/);
+    assert.doesNotMatch(t, /discarded/);
+  });
   await call("capture_summary", {}, (t) => {
     assert.match(t, /Undecoded payload \("data"\): 20 frames\. A protocol Wireshark knows on an unexpected port: decode_as decodes it in one call/);
     assert.match(t, /UDP 10\.0\.0\.1:40000 <-> 10\.0\.0\.2:50000: 20 frames/);
