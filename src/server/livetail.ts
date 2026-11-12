@@ -20,6 +20,7 @@
  * frames from 1: rows and details are renumbered to the file's frame numbers.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { unlink } from "node:fs/promises";
@@ -1024,12 +1025,23 @@ function runs(xs: number[]): [number, number][] {
   return out;
 }
 
+/** What identifies this machine's processes: where each part comes from. */
+export type MachineReaders = { host: () => string; boot: () => string; pids: () => string; bootSession: () => string };
+
+const machineReaders: MachineReaders = {
+  host: () => hostname(),
+  boot: () => readFileSync("/proc/sys/kernel/random/boot_id", "utf8"),
+  pids: () => readlinkSync("/proc/self/ns/pid"),
+  bootSession: () => execFileSync("sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }),
+};
+
 /**
  * Tells the processes a pid can be checked against: the same host, boot and
  * pid namespace. Another container, or another host sharing the folder, has
- * pids of its own.
+ * pids of its own. On macOS the boot session alone: the host name there
+ * changes with the network, and there are no pid namespaces.
  */
-function machineTag(): string {
+export function machineTag(platform: string = process.platform, readers: MachineReaders = machineReaders): string {
   const read = (get: () => string): string => {
     try {
       return get().trim();
@@ -1037,9 +1049,10 @@ function machineTag(): string {
       return "";
     }
   };
-  const boot = read(() => readFileSync("/proc/sys/kernel/random/boot_id", "utf8"));
-  const pids = read(() => readlinkSync("/proc/self/ns/pid"));
-  return createHash("sha256").update([hostname(), boot, pids].join("\0")).digest("hex").slice(0, 8);
+  // A Mac whose boot session can't be read is told apart by its host name after all
+  const session = platform === "darwin" ? read(readers.bootSession) : "";
+  const parts = platform === "darwin" ? [session || read(readers.host)] : [read(readers.host), read(readers.boot), read(readers.pids)];
+  return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 8);
 }
 const MACHINE = machineTag();
 

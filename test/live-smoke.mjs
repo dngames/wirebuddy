@@ -1,11 +1,12 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
-// Generates its own ICMP traffic with ping, and TCP with the robot-arm and ct-archive examples.
+// Generates its own UDP traffic from Node (an echo pair on the loopback), and TCP with the robot-arm and ct-archive examples.
 // test/live-tail.mjs covers captures big enough for provisional packets.
 // Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
+import { Agent as HttpsAgent, createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const token = "live-smoke-test-token";
 const captureDir = mkdtempSync(join(tmpdir(), "wirebuddy-live-"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** The loopback interface by platform. */
+const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
 
 // A home of its own: the tester's Wireshark preferences, profiles and plugins don't apply
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
@@ -50,9 +53,32 @@ async function api(path, body) {
   return json;
 }
 const state = () => api("/api/state");
-// Only echo request/reply: other loopback ICMP (e.g. port unreachable) may be around
-const ECHO = "icmp[icmptype] == icmp-echo or icmp[icmptype] == icmp-echoreply";
-const ping = (seconds) => spawn("ping", ["-i", "0.2", "-c", String(seconds * 5), "127.0.0.1"], { stdio: "ignore" });
+// UDP echo on the loopback: the server sends each datagram back to its sender, so every datagram gives two
+// packets, there and back, like an echo request and its reply. Ephemeral ports keep the pair clear of other traffic.
+const echoServer = createSocket("udp4");
+echoServer.on("message", (msg, rinfo) => echoServer.send(msg, rinfo.port, rinfo.address));
+await new Promise((resolve) => echoServer.bind(0, "127.0.0.1", resolve));
+const ECHO_PORT = echoServer.address().port;
+const echoClient = createSocket("udp4");
+// Read and dropped, so the answers don't pile up in the socket
+echoClient.on("message", () => {});
+const ECHO = `udp port ${ECHO_PORT}`;
+// Started after the capture's start returned, and for the capture's whole duration plus a few seconds: a
+// capture can take that long to begin, and its auto-stop counts from its own start.
+// Sends 1 / interval datagrams a second for `seconds`, paced by the clock: timers may fire late, so each tick
+// sends what is due by now rather than one step. It stops by itself, so an aborted test leaves no traffic behind.
+const echo = (seconds, interval = 0.2) => {
+  const started = Date.now();
+  let sent = 0;
+  const tick = () => {
+    const elapsed = Math.min(Date.now() - started, seconds * 1000);
+    for (const due = Math.ceil(elapsed / (interval * 1000)); sent < due; sent++) echoClient.send("wirebuddy", ECHO_PORT, "127.0.0.1");
+    if (elapsed >= seconds * 1000) clearInterval(timer);
+  };
+  const timer = setInterval(tick, 5);
+  tick();
+  return { kill: () => clearInterval(timer) };
+};
 
 async function waitIdle(timeoutMs) {
   const end = Date.now() + timeoutMs;
@@ -85,6 +111,12 @@ async function agent(dir) {
 }
 
 let failures = 0;
+/** The robot-arm example's fault is Linux's delayed ACK on the loopback; macOS acknowledges at once, so there is nothing to find. */
+function skipDelayedAck(what) {
+  if (process.platform !== "darwin") return false;
+  console.log(`skip ${what}: the fault needs Linux's delayed ACK on the loopback, macOS acknowledges at once`);
+  return true;
+}
 async function check(name, fn) {
   try {
     await fn();
@@ -97,15 +129,15 @@ async function check(name, fn) {
 
 try {
   await check("invalid capture filter is refused", async () => {
-    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "icmpp", autostop: {}, ring: null }), /capture filter/);
+    await assert.rejects(api("/api/capture/start", { iface: LOOPBACK, filter: "icmpp", autostop: {}, ring: null }), /capture filter/);
   });
   await check("unknown interface is refused", async () => {
     await assert.rejects(api("/api/capture/start", { iface: "-w/etc/passwd", filter: "", autostop: {}, ring: null }), /unknown interface/);
   });
 
   await check("live view grows, filter survives reloads, autostop", async () => {
-    const pinger = ping(6);
-    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 4 }, ring: null });
+    await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 4 }, ring: null });
+    const sender = echo(9);
     const seen = new Set();
     const gens = new Set();
     let filtered = false;
@@ -119,32 +151,32 @@ try {
       // Full reads of a small capture are quick: nothing is provisional
       assert.equal(s.tail, null);
       if (!filtered && s.totalFrames > 4) {
-        const r = await api("/api/filter", { filter: "icmp.type == 8" });
+        const r = await api("/api/filter", { filter: `udp.dstport == ${ECHO_PORT}` });
         assert.equal(r.ok, true);
         filtered = true;
       }
     }
     const s = await waitIdle(6000);
-    pinger.kill();
+    sender.kill();
     assert.equal(s.capture.status, "idle", s.capture.error ?? "");
     assert.ok(seen.size >= 3, `frame count should grow during capture, saw ${[...seen]}`);
     assert.ok(gens.size >= 3, "generation should bump on each live reload");
     await sleep(1200); // final reload after stop
     const end = await state();
-    assert.equal(end.filter, "icmp.type == 8");
+    assert.equal(end.filter, `udp.dstport == ${ECHO_PORT}`);
     assert.equal(end.tail, null);
     assert.ok(end.totalFrames >= 30, `expected ~40 frames, got ${end.totalFrames}`);
     assert.ok(Math.abs(end.displayedFrames * 2 - end.totalFrames) <= 2, `requests should be half: ${end.displayedFrames}/${end.totalFrames}`);
     assert.ok(Math.abs(end.capture.packets - end.totalFrames) <= 2, `dumpcap count ${end.capture.packets} vs frames ${end.totalFrames}`);
     const rows = await api(`/api/rows?gen=${end.generation}&start=0&count=3`);
     const info = end.columns.indexOf("Info");
-    assert.ok(rows.rows.every((r) => /Echo \(ping\) request/.test(r.c[info])), JSON.stringify(rows.rows[0]));
+    assert.ok(rows.rows.every((r) => r.c[info].endsWith(`→ ${ECHO_PORT} Len=9`)), JSON.stringify(rows.rows[0]));
     await api("/api/filter", { filter: "" });
   });
 
   await check("ring buffer rotates files and keeps only N", async () => {
-    const pinger = ping(8);
-    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 7 }, ring: { files: 2, durationSec: 2 } });
+    await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 7 }, ring: { files: 2, durationSec: 2 } });
+    const sender = echo(12);
     let files = new Set();
     for (let i = 0; i < 30; i++) {
       await sleep(300);
@@ -153,7 +185,7 @@ try {
       if (s.capture.status === "idle") break;
     }
     const s = await waitIdle(5000);
-    pinger.kill();
+    sender.kill();
     assert.ok(s.capture.files.length >= 3, `expected >= 3 ring files, got ${s.capture.files.length}`);
     assert.ok(files.size >= 2, "the viewer should follow the current ring file");
     const onDisk = readdirSync(captureDir).filter((f) => f.includes("_0000"));
@@ -162,7 +194,7 @@ try {
   });
 
   await check("two simultaneous starts run only one dumpcap", async () => {
-    const req = { iface: "lo", filter: ECHO, autostop: { durationSec: 3 }, ring: null };
+    const req = { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 3 }, ring: null };
     const results = await Promise.allSettled([api("/api/capture/start", req), api("/api/capture/start", req)]);
     assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(results.map((r) => r.status)));
     await api("/api/capture/stop", {});
@@ -177,22 +209,22 @@ try {
   });
   await check("ring buffer with auto-stop by size is refused", async () => {
     await assert.rejects(
-      api("/api/capture/start", { iface: "lo", filter: "", autostop: { filesizeKB: 100 }, ring: { files: 2, durationSec: 2 } }),
+      api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: { filesizeKB: 100 }, ring: { files: 2, durationSec: 2 } }),
       /cannot be combined/,
     );
   });
   await check("new files without a ring keep every file, stop after N files", async () => {
     const before = new Set(readdirSync(captureDir));
-    const pinger = ping(8);
-    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { files: 3, durationSec: 20 }, ring: { durationSec: 1 } });
+    await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { files: 3, durationSec: 20 }, ring: { durationSec: 1 } });
+    const sender = echo(12);
     const s = await waitIdle(15000);
-    pinger.kill();
+    sender.kill();
     assert.equal(s.capture.files.length, 3, JSON.stringify(s.capture.files));
     const written = readdirSync(captureDir).filter((f) => !before.has(f));
     assert.equal(written.length, 3, `all 3 files stay on disk: ${written}`);
   });
   await check("promiscuous mode off passes -p to dumpcap", async () => {
-    await api("/api/capture/start", { iface: "lo", filter: ECHO, promiscuous: false, autostop: { durationSec: 3 }, ring: null });
+    await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, promiscuous: false, autostop: { durationSec: 3 }, ring: null });
     try {
       const s = await state();
       assert.equal(s.capture.promiscuous, false);
@@ -203,23 +235,23 @@ try {
         ps.on("exit", () => resolve(out.trim().split("\n")[0]));
       });
       assert.ok(pid, "dumpcap runs");
-      assert.ok(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").includes("-p"));
+      assert.ok(execFileSync("ps", ["-o", "command=", "-p", pid], { encoding: "utf8" }).trim().split(/\s+/).includes("-p"));
     } finally {
       await api("/api/capture/stop", {});
       await waitIdle(6000);
     }
   });
   await check("capture options that don't fit together are refused", async () => {
-    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: { files: 2 }, ring: null }), /needs new files/);
-    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: { files: 1, durationSec: 2 } }), /at least 2 files/);
-    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: { files: 2 } }), /a new file needs/);
+    await assert.rejects(api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: { files: 2 }, ring: null }), /needs new files/);
+    await assert.rejects(api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: {}, ring: { files: 1, durationSec: 2 } }), /at least 2 files/);
+    await assert.rejects(api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: {}, ring: { files: 2 } }), /a new file needs/);
   });
 
   await check("export with more selections than one editcap run allows", async () => {
-    const pinger = spawn("ping", ["-i", "0.005", "-c", "700", "127.0.0.1"], { stdio: "ignore" });
-    await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 5 }, ring: null });
+    await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 5 }, ring: null });
+    const sender = echo(9, 0.005);
     const s = await waitIdle(10000);
-    pinger.kill();
+    sender.kill();
     await sleep(1200);
     const total = (await state()).totalFrames;
     assert.ok(total >= 1100, `need >1000 frames, got ${total}`);
@@ -228,31 +260,42 @@ try {
     const out = join(captureDir, "odd.pcapng");
     const r = await api("/api/export", { path: out, which: "range", range: odd.join(",") });
     assert.equal(r.frames, odd.length);
-    const n = Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-c", out], { encoding: "utf8" }))[1]);
+    // -M: the plain number; without it capinfos groups the digits of a thousand and more as the locale does
+    const n = Number(/Number of packets:\s+(\d+)/.exec(execFileSync("capinfos", ["-M", "-c", out], { encoding: "utf8" }))[1]);
     assert.equal(n, odd.length);
     assert.equal(s.capture.error, null);
   });
 
   await check("TLS decryption with a key log file", async () => {
-    // Local HTTPS server with a throwaway certificate; curl writes its session keys
+    // Local HTTPS server with a throwaway certificate; the client's TLS socket hands over the session keys
     const dir = join(captureDir, "tls");
     mkdirSync(dir);
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
       "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem")], { stdio: "ignore" });
-    const serverPy = [
-      "import http.server, ssl, sys",
-      "s = http.server.HTTPServer(('127.0.0.1', 18443), http.server.SimpleHTTPRequestHandler)",
-      "c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain(sys.argv[1], sys.argv[2])",
-      "s.socket = c.wrap_socket(s.socket, server_side=True); s.serve_forever()",
-    ].join("\n");
-    const https = spawn("python3", ["-c", serverPy, join(dir, "cert.pem"), join(dir, "key.pem")], { cwd: dir, stdio: "ignore" });
+    const cert = readFileSync(join(dir, "cert.pem"));
+    const https = createHttpsServer({ key: readFileSync(join(dir, "key.pem")), cert }, (req, res) => res.end(cert));
+    await new Promise((r) => https.listen(0, "127.0.0.1", r));
+    const port = https.address().port;
     try {
-      await sleep(700);
-      await api("/api/capture/start", { iface: "lo", filter: "tcp port 18443", autostop: { durationSec: 3 }, ring: null });
-      await sleep(800);
+      await api("/api/capture/start", { iface: LOOPBACK, filter: `tcp port ${port}`, autostop: { durationSec: 4 }, ring: null });
+      // The request goes out once dumpcap is capturing; a start can take seconds to get there
+      for (let i = 0; i < 100 && (await state()).capture.status !== "running"; i++) await sleep(150);
+      assert.equal((await state()).capture.status, "running", "dumpcap should be capturing");
       const keylog = join(dir, "keys.log");
-      execFileSync("curl", ["-sk", "--http1.1", "-o", "/dev/null", "https://127.0.0.1:18443/cert.pem"], { env: { ...process.env, SSLKEYLOGFILE: keylog } });
-      await waitIdle(8000);
+      const lines = [];
+      // A connection of its own, no session reuse: every secret of this handshake goes to the log
+      await new Promise((resolve, reject) => {
+        const req = httpsRequest({ host: "127.0.0.1", port, path: "/cert.pem", rejectUnauthorized: false, agent: new HttpsAgent({ maxCachedSessions: 0, keepAlive: false }) }, (res) => {
+          res.resume();
+          res.on("end", resolve);
+        });
+        req.on("socket", (socket) => socket.on("keylog", (line) => lines.push(line.toString("latin1"))));
+        req.on("error", reject);
+        req.end();
+      });
+      assert.ok(lines.length > 0, "the TLS socket gave no key log lines");
+      writeFileSync(keylog, lines.join(""));
+      await waitIdle(10000);
       await sleep(1200);
       const http = () => api("/api/filter", { filter: "http" }).then(() => state()).then((s) => s.displayedFrames);
       assert.equal(await http(), 0, "without keys the HTTP inside TLS stays hidden");
@@ -261,19 +304,20 @@ try {
       await api("/api/tls", { keylog: null });
       await api("/api/filter", { filter: "" });
     } finally {
-      https.kill();
+      https.close();
+      https.closeAllConnections();
     }
   });
 
   await check("stop", async () => {
-    const pinger = ping(5);
-    await api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: null });
+    await api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: {}, ring: null });
+    const sender = echo(9);
     await sleep(1500);
     assert.equal((await state()).capture.status, "running");
-    await assert.rejects(api("/api/capture/start", { iface: "lo", filter: "", autostop: {}, ring: null }), /already running/);
+    await assert.rejects(api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: {}, ring: null }), /already running/);
     await api("/api/capture/stop", {});
     const s = await waitIdle(5000);
-    pinger.kill();
+    sender.kill();
     assert.equal(s.capture.status, "idle");
     assert.equal(s.capture.error, null);
     assert.ok(s.totalFrames > 0);
@@ -301,9 +345,10 @@ try {
       const h = r.raw.readUInt32LE(4);
       return JSON.parse(r.raw.subarray(8, 8 + h).toString());
     };
-    const pinger = ping(5);
+    let sender;
     try {
-      await api("/api/capture/start", { iface: "lo", filter: ECHO, autostop: { durationSec: 5 }, ring: null });
+      await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 5 }, ring: null });
+      sender = echo(10);
       // The event stream tells the panel when packets come
       let seen = "";
       await panelReq(`/_wb/events?doc=${doc}`, { headers: { "sec-fetch-dest": "empty" } }, (text, req) => {
@@ -313,22 +358,22 @@ try {
       assert.match(seen, /event: packets/);
       // A capture that grows is the same capture: no reset once it is open
       assert.doesNotMatch(seen.slice(seen.indexOf("event: packets")), /event: reset/);
-      const early = await packets({ filter: "icmp" });
+      const early = await packets({ filter: "udp" });
       assert.ok(early.n > 0 && early.live, JSON.stringify(early));
       await sleep(2000);
-      const later = await packets({ filter: "icmp" });
+      const later = await packets({ filter: "udp" });
       assert.ok(later.n > early.n, `${early.n} then ${later.n}`);
       const s = await waitIdle(10000);
       const end = await packets({});
       assert.equal(end.live, false);
       assert.equal(end.total, s.totalFrames);
     } finally {
-      pinger.kill();
+      sender?.kill();
       await api("/api/panels/close", { name: "live" });
     }
   });
 
-  await check("robot-arm example: a MOVE's payload waits for the ACK of its header, not after the fix", async () => {
+  if (!skipDelayedAck("the robot-arm example")) await check("robot-arm example: a MOVE's payload waits for the ACK of its header, not after the fix", async () => {
     const example = join(root, "examples/investigations/robot-arm");
     const probe = createServer();
     await new Promise((r) => probe.listen(0, "127.0.0.1", r));
@@ -359,7 +404,7 @@ try {
         });
       /** Segments with data toward the controller while `app` runs, in capture order. */
       const toDevice = async (app) => {
-        await api("/api/capture/start", { iface: "lo", filter: `tcp port ${port}`, autostop: { durationSec: 20 }, ring: null });
+        await api("/api/capture/start", { iface: LOOPBACK, filter: `tcp port ${port}`, autostop: { durationSec: 20 }, ring: null });
         await sleep(800);
         await runApp(app);
         await sleep(300);
@@ -422,7 +467,7 @@ try {
         archive.stdout.setEncoding("utf8").on("data", (d) => /listening on/.test(d) && resolve());
         archive.on("exit", (code) => reject(new Error(`archive exited with ${code}`)));
       });
-      await tool("start_capture", { interface: "lo", filter: `tcp port ${port}`, stop_after_seconds: 30 });
+      await tool("start_capture", { interface: LOOPBACK, filter: `tcp port ${port}`, stop_after_seconds: 30 });
       await sleep(800);
       await new Promise((resolve, reject) => {
         const p = spawn(process.execPath, [join(example, "app.mjs"), "--port", String(port)], { stdio: "ignore" });
@@ -450,12 +495,13 @@ try {
   await check("the agent starts a capture over MCP", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-live-mcp-"));
     const { client, tool } = await agent(dir);
-    const pinger = ping(4);
+    let sender;
     try {
-      const started = await tool("start_capture", { interface: "lo", filter: ECHO, stop_after_seconds: 3 });
-      assert.match(started, /^Capturing on lo with the capture filter .* into .*\.pcapng\. The view follows it live/);
+      const started = await tool("start_capture", { interface: LOOPBACK, filter: ECHO, stop_after_seconds: 3 });
+      sender = echo(8);
+      assert.match(started, new RegExp(`^Capturing on ${LOOPBACK} with the capture filter .* into .*\\.pcapng\\. The view follows it live`));
       assert.match(await tool("get_view_state", {}), /Capture \(started by agent\): running/);
-      await assert.rejects(tool("start_capture", { interface: "lo" }), /already running/);
+      await assert.rejects(tool("start_capture", { interface: LOOPBACK }), /already running/);
       let view = "";
       for (let i = 0; i < 40 && !/Capture \(started by agent\): idle/.test(view); i++) {
         await sleep(250);
@@ -466,7 +512,7 @@ try {
       assert.ok(frames > 0, view);
       assert.ok(readdirSync(dir).some((f) => f.endsWith(".pcapng")), "written into the capture folder");
     } finally {
-      pinger.kill();
+      sender?.kill();
       await client.close();
       rmSync(dir, { recursive: true, force: true });
     }
@@ -476,4 +522,6 @@ try {
   rmSync(captureDir, { recursive: true, force: true });
 }
 console.log(failures ? `${failures} check(s) failed` : "all checks passed");
+echoServer.close();
+echoClient.close();
 process.exit(failures ? 1 : 0);

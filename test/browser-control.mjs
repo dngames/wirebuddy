@@ -22,6 +22,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const chromeBin = chromeOrSkip();
 if (!chromeBin) process.exit(0);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// CDP key modifiers: Alt 1, Ctrl 2, Meta 4, Shift 8. The page's shortcut key is Command on a Mac, Ctrl elsewhere
+const ALT = 1;
+const MOD = process.platform === "darwin" ? 4 : 2;
 
 const home = mkdtempSync(join(tmpdir(), "wirebuddy-home-"));
 const panel = join(home, ".local/share/wirebuddy/extensions/clicker/panel");
@@ -142,11 +145,39 @@ try {
     assert.match(opened.text, /WARNING Panel "clicker" called wb\.select, which was refused: the user hadn't just clicked/);
   });
 
-  const rect = await evaluate("JSON.stringify(document.querySelector('.panel-frame').getBoundingClientRect())").then(JSON.parse);
+  const frameRect = () => evaluate("JSON.stringify(document.querySelector('.panel-frame').getBoundingClientRect())").then(JSON.parse);
+  const panelAndSelection = async () => `the panel's status: ${JSON.stringify(await statusText())}, the page's selection: ${(await state()).selected}`;
+  await evaluate("addEventListener('pointerdown', (e) => { if (e.isTrusted) window.pageClickAt = performance.now(); }, true)");
+  /**
+   * Clicks (`dx`, `dy`) into the panel's frame until the panel says it got the click: its status then starts with
+   * `answer`, which its click handlers set whether the page allowed the action or not. A click into the frame a
+   * moment after it opened can go to this page instead, while Chrome has not yet routed hits to the out-of-process
+   * frame; the panel hears nothing then. Only a click the panel did not get is repeated. One this page got counts
+   * as its own input for 5 s (a panel can take the focus right after the user clicked elsewhere), so the repeat
+   * waits that out. A click the panel got and was refused for stays a failure.
+   */
+  const clickPanel = async (dx, dy, answer) => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await evaluate("window.pageClickAt = 0");
+      const r = await frameRect();
+      await click(r.left + dx, r.top + dy);
+      try {
+        await until(`the panel to get the click (${attempt + 1})`, async () => (await statusText())?.startsWith(`${answer}:`), 1500);
+        return;
+      } catch {}
+      const age = await evaluate("window.pageClickAt ? performance.now() - window.pageClickAt : -1");
+      if (age >= 0) await sleep(Math.max(0, 5200 - age));
+    }
+    throw new Error(`timed out waiting for the panel to get a click; ${await panelAndSelection()}`);
+  };
   await check("browser: after a click in the panel, select works", async () => {
-    await click(rect.left + 100, rect.top + 40);
-    await until("the selection", async () => (await state()).selected === 3);
-    await until("the panel's status", async () => (await statusText()) === "click: ok");
+    await clickPanel(100, 40, "click");
+    await until("the selection", async () => (await state()).selected === 3).catch(async (err) => {
+      throw new Error(`${err.message}; ${await panelAndSelection()}`);
+    });
+    await until("the panel's status", async () => (await statusText()) === "click: ok").catch(async (err) => {
+      throw new Error(`${err.message}; ${await panelAndSelection()}`);
+    });
     const s = await state();
     assert.match(s.agentNotice.text, /^Panel "Clicker" selected frame 3$/);
   });
@@ -160,7 +191,7 @@ try {
   });
 
   await check("browser: setFilter after a click still needs control", async () => {
-    await click(rect.left + 100, rect.top + 140);
+    await clickPanel(100, 140, "filter");
     await until("the refusal", async () => (await statusText()) === "filter: denied");
     assert.equal((await state()).filter, "");
   });
@@ -206,8 +237,18 @@ try {
   const row = (frame) => `[...document.querySelectorAll('.pl-row')].find((r) => !r.hidden && r.querySelector('.pl-cell')?.textContent === '${frame}')`;
   const menuItem = (label) => `[...document.querySelectorAll('.menu-item')].find((m) => m.textContent.includes(${JSON.stringify(label)}))`;
   const toasts = () => evaluate("[...document.querySelectorAll('.toast-text')].map((t) => t.textContent).join('\\n')");
+  /** What the packet list holds: its rows' numbers, where it is scrolled to, what covers it, and the view's state. */
+  const listed = async () => {
+    const page = await evaluate(
+      `(() => { const s = document.querySelector('.pl-scroll'), o = document.querySelector('.pl-overlay'); return JSON.stringify({ rows: [...document.querySelectorAll('.pl-row')].filter((r) => !r.hidden).map((r) => r.querySelector('.pl-cell')?.textContent).join(' '), scrollTop: s.scrollTop, height: s.clientHeight, overlay: o && !o.hidden ? o.textContent : null, dialogs: [...document.querySelectorAll('.dlg-title-text')].map((d) => d.textContent), menu: document.querySelectorAll('.menu-item').length }); })()`,
+    );
+    const { selected, filter, generation, totalFrames, displayedFrames, loading } = await state();
+    return `the list: ${page}; the view: ${JSON.stringify({ selected, filter, generation, totalFrames, displayedFrames, loading })}`;
+  };
   const fromMenu = async (frame, label) => {
-    await until(`frame ${frame}'s row`, async () => !!(await box(row(frame))));
+    await until(`frame ${frame}'s row`, async () => !!(await box(row(frame)))).catch(async (err) => {
+      throw new Error(`${err.message}; ${await listed()}`);
+    });
     await rightClick(center(await box(row(frame))));
     await until(`"${label}"`, async () => !!(await box(menuItem(label)))).catch(async (err) => {
       throw new Error(`${err.message}; the menu: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ')")}`);
@@ -330,9 +371,9 @@ try {
     assert.deepEqual((await state()).timeRefs, [6, 9]);
     // Its details, shown already, are read again
     const details = () => evaluate("[...document.querySelectorAll('.dt-label')].map((l) => l.textContent).join('\\n')");
-    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39, modifiers: 2 });
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39, modifiers: MOD });
     await until("frame 9's details as a reference", async () => /Time since reference or first frame: 0\.000000000 seconds/.test(await details()));
-    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "t", code: "KeyT", windowsVirtualKeyCode: 84, modifiers: 3 });
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "t", code: "KeyT", windowsVirtualKeyCode: 84, modifiers: MOD | ALT });
     await until("no time references", async () => (await state()).timeRefs.length === 0);
     await until("frame 9's time from the first packet", async () => (await time(9)) === before);
     await until("frame 9's details from the first packet", async () => /Time since reference or first frame: (?!0\.000000000 )/.test(await details()));
@@ -386,19 +427,23 @@ try {
   });
 
   const key = (k, code, keyCode, modifiers = 0) => cdp("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: keyCode, modifiers });
-  // Ctrl is 2, Alt 1
-  const saveComment = () => key("Enter", "Enter", 13, 2);
+  const saveComment = () => key("Enter", "Enter", 13, MOD);
   const commentBox = (title) => evaluate(`document.querySelector('.dlg-comment .dlg-title-text')?.textContent === ${JSON.stringify(title)} && document.activeElement?.closest('.dlg-comment') !== null`);
   const viewState = async () => (await call("get_view_state")).text;
   const closeComment = async () => {
     if (await evaluate("!!document.querySelector('.dlg-comment, .dlg-export')")) await key("Escape", "Escape", 27);
   };
-  /** Clicks `label` in the open menus; on failure names what they hold. */
-  const pick = async (label) => {
+  /** What is at a point of the page: the element's tag, classes and text. */
+  const elementAt = (x, y) =>
+    evaluate(`(() => { const e = document.elementFromPoint(${x}, ${y}); return e ? e.tagName + "." + e.className + " " + JSON.stringify(e.textContent.slice(0, 80)) : "nothing"; })()`);
+  /** Clicks `label` in the open menus; on failure names what they hold. A `seen` object gets the point clicked, what was there and the toasts then. */
+  const pick = async (label, seen) => {
     await until(`"${label}"`, async () => !!(await box(menuItem(label)))).catch(async (err) => {
       throw new Error(`${err.message}; the menus: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ')")}`);
     });
-    await click(...center(await box(menuItem(label))));
+    const at = center(await box(menuItem(label)));
+    if (seen) Object.assign(seen, { point: at.map(Math.round), hit: await elementAt(...at), toasts: await toasts() });
+    await click(...at);
   };
   const fromMenuBar = async (title, ...labels) => {
     await click(...center(await box(`[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === ${JSON.stringify(title)})`)));
@@ -418,7 +463,7 @@ try {
   await check("browser: packet comments from the keyboard, the Edit menu, the packet list and the details; the row shows them", async () => {
     await click(...center(await box(row(6))));
     await until("frame 6 selected", async () => (await state()).selected === 6);
-    await key("c", "KeyC", 67, 3);
+    await key("c", "KeyC", 67, MOD | ALT);
     await until("Add Packet Comment", () => commentBox("Add Packet Comment"));
     await cdp("Input.insertText", { text: "first line\nsecond line" });
     await saveComment();
@@ -523,8 +568,23 @@ try {
       assert.match(await toasts(), /UDP port 50000 now decodes as RTP \(5 packets\)/);
       assert.equal(await evaluate(`${seg}.hidden ? "" : ${seg}.textContent`), "Decode As: 1");
       await click(...center(await box(seg)));
-      await pick("Remove udp.port 50000 → rtp");
-      await until("frame 5 as UDP again", async () => (await protocol(5)) === "UDP");
+      const clicked = {};
+      await pick("Remove udp.port 50000 → rtp", clicked);
+      // What the page held when the removal did not show, and what the click met
+      const found = async () => {
+        const view = (await viewState()).split("\n").filter((l) => /Decode As|ERROR|WARNING/.test(l)).join(" / ");
+        return [
+          `frame 5's protocol cell: ${JSON.stringify(await protocol(5))}`,
+          `the status segment: ${await evaluate(`${seg}.hidden ? "hidden" : JSON.stringify(${seg}.textContent)`)}`,
+          `toasts now: ${JSON.stringify(await toasts())}`,
+          `the view state: ${view}`,
+          `menu items open: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ') || 'none'")}`,
+          `the click at ${clicked.point} met ${clicked.hit}, toasts then: ${JSON.stringify(clicked.toasts)}`,
+        ].join("; ");
+      };
+      await until("frame 5 as UDP again", async () => (await protocol(5)) === "UDP").catch(async (err) => {
+        throw new Error(`${err.message}; ${await found()}`);
+      });
       await until("the segment to go", () => evaluate(`${seg}.hidden`));
     } finally {
       if (await evaluate("!!document.querySelector('.dlg-decodeas')")) await key("Escape", "Escape", 27);
@@ -638,7 +698,7 @@ try {
       // A menu left open by an earlier check would take the keys
       if (await evaluate("!!document.querySelector('.menu-item')")) await key("Escape", "Escape", 27);
       await evaluate("document.querySelector('.pl-scroll').focus()");
-      await key("g", "KeyG", 71, 2);
+      await key("g", "KeyG", 71, MOD);
       await until("the dialog", () => inDialog("dlg-goto"));
       for (let n = 1; n <= 9; n++) {
         await tab();
@@ -686,7 +746,7 @@ try {
       await until("its details", () => evaluate(`document.querySelector('.dt-label')?.textContent.startsWith('Frame ${frame}:') === true`));
       await evaluate("document.querySelector('.vl.dt').focus()");
       // Ctrl+Right expands everything
-      await key("ArrowRight", "ArrowRight", 39, 2);
+      await key("ArrowRight", "ArrowRight", 39, MOD);
       const url = "document.querySelector('.dt-link[title^=\"Double-click to open\"]')";
       await click(...(await findLink(url)));
       await sleep(300);
@@ -715,6 +775,9 @@ try {
       await post("/api/select", { frame: 4 });
       await until("frame 4 selected", async () => (await state()).selected === 4);
       await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      // The page shows the selection before the row's menu is asked for: a right-click on a row it doesn't show as
+      // selected selects it, and that selection would still be on its way when the filter changes below
+      await until("frame 4's row selected in the page", () => evaluate(`${row(4)}?.classList.contains('sel') === true`));
       await fromMenu(4, "Export Selected Packet");
       await until("the export dialog", () => evaluate("!!document.querySelector('.dlg-export')"));
     };

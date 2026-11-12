@@ -1,6 +1,7 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { closeSync, createReadStream, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import type { Transform } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -3210,15 +3211,41 @@ export function memoryShort(m: { activeBytes: number; frames: number; standbyByt
   return SHARKD_BASE_BYTES + perFrame * m.next - m.standbyBytes > m.available - MEMORY_MARGIN;
 }
 
-/** Resident memory of a process (Linux), or null. */
-function rssBytes(pid: number | null): number | null {
+/** Where a process's resident memory comes from: /proc where there is one, else ps. */
+export type RssSource = { hasProc: boolean; proc: (pid: number) => string; ps: (pid: number) => string };
+
+const rssSource: RssSource = {
+  hasProc: existsSync("/proc/self/status"),
+  proc: (pid) => readFileSync(`/proc/${pid}/status`, "utf8"),
+  ps: (pid) => execFileSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }),
+};
+/** ps is asked again for a pid after this long. */
+const RSS_CACHE_MS = 2000;
+const rssCache = new Map<number, { at: number; bytes: number | null }>();
+
+/** Resident memory of a process, or null: from /proc (Linux), else from `ps -o rss=` (KiB), cached for a moment. */
+export function rssBytes(pid: number | null, source: RssSource = rssSource, now = Date.now()): number | null {
   if (!pid) return null;
-  try {
-    const kb = /^VmRSS:\s+(\d+) kB/m.exec(readFileSync(`/proc/${pid}/status`, "utf8"));
-    return kb ? Number(kb[1]) * 1024 : null;
-  } catch {
-    return null;
+  if (source.hasProc) {
+    try {
+      const kb = /^VmRSS:\s+(\d+) kB/m.exec(source.proc(pid));
+      return kb ? Number(kb[1]) * 1024 : null;
+    } catch {
+      return null;
+    }
   }
+  const cached = rssCache.get(pid);
+  if (cached && now - cached.at < RSS_CACHE_MS) return cached.bytes;
+  let bytes: number | null = null;
+  try {
+    const kb = /^\s*(\d+)\s*$/.exec(source.ps(pid));
+    bytes = kb ? Number(kb[1]) * 1024 : null;
+  } catch {
+    // the process is gone, or ps is
+  }
+  for (const [p, c] of rssCache) if (now - c.at >= RSS_CACHE_MS) rssCache.delete(p);
+  rssCache.set(pid, { at: now, bytes });
+  return bytes;
 }
 
 /** Memory the system can still give out (Linux), or null; WIREBUDDY_MEM_AVAILABLE (bytes) stands in for it in tests. */

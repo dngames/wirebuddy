@@ -32,7 +32,7 @@ const transport = new StdioClientTransport({
 const LOOPBACK = process.platform === "darwin" ? "lo0" : "lo";
 let capture = true;
 try {
-  execFileSync("dumpcap", ["-L", "-i", "lo"], { stdio: "ignore", timeout: 10000 });
+  execFileSync("dumpcap", ["-L", "-i", LOOPBACK], { stdio: "ignore", timeout: 10000 });
 } catch {
   capture = false;
 }
@@ -365,7 +365,7 @@ try {
   });
   assert.equal((await agentState()).watching, false);
   if (capture) await call("list_interfaces", {}, (t) => assert.match(t, new RegExp(`^${LOOPBACK}\\b.*\\[loopback\\]`, "m")));
-  else console.log("skip list_interfaces: dumpcap may not capture on lo here");
+  else console.log(`skip list_interfaces: dumpcap may not capture on ${LOOPBACK} here`);
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));
   await call("start_capture", { interface: "-w/etc/passwd" }, (t, r) => {
     assert.ok(r.isError);
