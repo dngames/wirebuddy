@@ -1652,7 +1652,8 @@ input[type="checkbox"] {
 
 .menu {
   position: fixed;
-  z-index: 5000;
+  /* Above the toasts: a menu of the status bar opens where they show */
+  z-index: 6500;
   min-width: 180px;
   max-width: 480px;
   max-height: calc(100vh - 8px);
