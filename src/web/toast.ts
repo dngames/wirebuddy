@@ -1,6 +1,8 @@
 /**
- * Transient notifications in the lower right corner. With an agent attached,
- * errors go to the agent instead, which helps in the chat.
+ * Transient notifications in the lower right corner. An error always shows
+ * here. With an agent attached it also goes to the agent, exactly once: the
+ * server already logs a request it refused (toastError, toastRefused), so only
+ * what the page alone knows about is reported by the page (toast).
  */
 
 import { errorText, HttpError, post } from "./api.ts";
@@ -20,7 +22,7 @@ export interface ToastAction {
   run: () => void;
 }
 
-function agentTakesErrors(): boolean {
+function agentAttached(): boolean {
   return !!app.state?.agent.attached;
 }
 
@@ -31,11 +33,18 @@ export function reportProblem(text: string, details?: Record<string, unknown>): 
   });
 }
 
+/** Shows `text`; an error without an action also goes to an attached agent, as only the page knows of it. */
 export function toast(level: "info" | "error", text: string, action?: ToastAction): void {
-  if (level === "error" && !action && agentTakesErrors()) {
-    reportProblem(text);
-    return;
-  }
+  if (level === "error" && !action && agentAttached()) reportProblem(text);
+  show(level, text, action);
+}
+
+/** An error the server already logged for the agent (it refused the request): shown, not reported again. */
+export function toastRefused(text: string): void {
+  show("error", text);
+}
+
+function show(level: "info" | "error", text: string, action?: ToastAction): void {
   if (!host) {
     console.log(`[${level}] ${text}`);
     return;
@@ -70,7 +79,8 @@ export function toast(level: "info" | "error", text: string, action?: ToastActio
 }
 
 export function toastError(e: unknown, prefix?: string): void {
-  // The server already told the agent about a request it refused
-  if (agentTakesErrors() && e instanceof HttpError && e.status >= 400) return;
-  toast("error", prefix ? `${prefix}: ${errorText(e)}` : errorText(e));
+  const text = prefix ? `${prefix}: ${errorText(e)}` : errorText(e);
+  // The server logs every request it refused except an unauthorized one
+  if (e instanceof HttpError && e.status >= 400 && e.status !== 401 && e.status !== 403) toastRefused(text);
+  else toast("error", text);
 }

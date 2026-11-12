@@ -132,9 +132,9 @@ async function openBrowser(url, name) {
     async goTo(n) {
       await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
       const open = () => evaluate("!!document.querySelector('.goto-in')");
-      // Its own toast, not another notice that came meanwhile
-      const own = "[...document.querySelectorAll('.toast .toast-text')].map((t) => t.textContent).find((t) => t.startsWith('Packet ')) ?? null";
-      // A busy page may miss the shortcut, or not know packet n yet (its refusal goes to the agent): asked again
+      // Its own toast, not another notice that came meanwhile, nor the refusal of a packet the page doesn't know yet
+      const own = "[...document.querySelectorAll('.toast .toast-text')].map((t) => t.textContent).find((t) => t.startsWith('Packet ') && !t.includes(\"doesn't exist\")) ?? null";
+      // A busy page may miss the shortcut, or not know packet n yet (its refusal is a toast too): asked again
       for (let tries = 0; tries < 10; tries++) {
         if (!(await open())) {
           await key("g", "KeyG", 71, MOD);

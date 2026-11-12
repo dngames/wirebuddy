@@ -13,7 +13,7 @@ import { conversationFilters } from "./frame.ts";
 import { closeMenus, menuOpen, menuOwner, SEP, showMenu, toggleMenuAt, type MenuItem } from "./menu.ts";
 import { packetCopyItems } from "./packetlist.ts";
 import { panelItems } from "./panels.ts";
-import { toast } from "./toast.ts";
+import { toastRefused } from "./toast.ts";
 import { baseName, h, IS_MAC, isTextInput, keyLetter } from "./util.ts";
 
 interface TopMenu {
@@ -48,7 +48,7 @@ function recentItems(): MenuItem[] {
     label: f.path,
     action: async () => {
       const err = await act.openFile(f.path);
-      if (err) toast("error", `Can't open ${baseName(f.path)}: ${err}`);
+      if (err) toastRefused(`Can't open ${baseName(f.path)}: ${err}`);
     },
   }));
 }

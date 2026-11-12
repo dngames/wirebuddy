@@ -6,7 +6,7 @@ import * as act from "../actions.ts";
 import { app, bus, captureActive } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import { icon } from "../icons.ts";
-import { toast } from "../toast.ts";
+import { toast, toastError } from "../toast.ts";
 import { clamp, debounce, fmtInt, h } from "../util.ts";
 
 type Metric = IoGraphSpec["metric"];
@@ -398,7 +398,7 @@ export function openIoGraphDialog(): void {
       }
       act.jumpToFrame(r.frame);
     } catch (err) {
-      toast("error", `Finding the packet at ${t0.toFixed(dec)} s failed: ${errorText(err)}`);
+      toastError(err, `Finding the packet at ${t0.toFixed(dec)} s failed`);
     }
   });
 

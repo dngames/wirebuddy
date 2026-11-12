@@ -4,7 +4,7 @@
 // a packet, the export dialog writing marks as packet comments, time references set there and in
 // the Edit menu, and Decode As set there (its packet line on reassembled TCP too) and removed in the
 // status bar. Last, File › Export Objects, also on a live capture from test/fake-dumpcap.mjs, and
-// Now in one: N tapped and the toolbar button held.
+// Now in one: N tapped and the toolbar button held. Also errors in the page: shown there and heard by the agent once.
 // Usage: node test/browser-control.mjs   (after npm run build; skipped without Chrome)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -458,6 +458,42 @@ try {
     await sleep(300);
     seen += await viewState();
     assert.doesNotMatch(seen, /ResizeObserver/);
+  });
+
+  await check("browser: with the agent attached, an error the user runs into shows in the page and the agent hears it once, whether the server refused the request or only the page knew", async () => {
+    const gone = join(home, "gone.pcapng");
+    copyFileSync(join(root, "test/fixtures/http.pcapng"), gone);
+    const events = async (after) => (await (await fetch(new URL(`/api/events?after=${after}`, ui.origin), { headers: { "X-WireBuddy-Token": token } })).json());
+    const { last } = await events(Number.MAX_SAFE_INTEGER);
+    try {
+      // A dialog left open would hold the menus back
+      await closeComment();
+      await until("no dialog", () => evaluate("!document.querySelector('.dlg-export, .dlg-comment')"));
+      // Only the page knows: the request for View › Reload doesn't reach the server
+      await evaluate("(() => { window.__realFetch = window.fetch; window.fetch = (u, ...a) => (String(u).includes('api/reload') ? Promise.reject(new TypeError('offline')) : window.__realFetch(u, ...a)); })()");
+      await fromMenuBar("View", "Reload");
+      await until("the page's toast", async () => /Reloading failed: Cannot reach/.test(await toasts()));
+      await evaluate("window.fetch = window.__realFetch");
+      // The server refuses it: File › Open Recent of a file that has stopped being a capture
+      assert.match((await call("open_capture", { path: gone })).text, /29 frames/);
+      assert.match((await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") })).text, /29 frames/);
+      writeFileSync(gone, "not a capture\n");
+      // The page lists the recent files when it starts
+      await cdp("Page.navigate", { url: ui.href });
+      await until("the viewer", () => evaluate("!!document.querySelector('.sb-conn.open')"), 30_000);
+      await fromMenuBar("File", "Open Recent", "gone.pcapng");
+      await until("the page's toast", async () => /Can't open gone\.pcapng/.test(await toasts()));
+      await sleep(500);
+      const heard = (await events(last)).events;
+      const count = (re) => heard.filter((e) => e.level === "ERROR" && re.test(e.text)).reduce((n, e) => n + (e.repeated ?? 1), 0);
+      assert.equal(count(/^Reloading failed: Cannot reach/), 1, JSON.stringify(heard));
+      assert.equal(count(/^Opening a file failed: .*gone\.pcapng/), 1, JSON.stringify(heard));
+    } finally {
+      rmSync(gone, { force: true });
+      if (await evaluate("!!document.querySelector('.menu-item')")) await key("Escape", "Escape", 27);
+      await evaluate("if (window.__realFetch) window.fetch = window.__realFetch");
+      await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
+    }
   });
 
   await check("browser: packet comments from the keyboard, the Edit menu, the packet list and the details; the row shows them", async () => {

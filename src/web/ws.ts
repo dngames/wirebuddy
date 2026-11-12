@@ -4,7 +4,7 @@ import type { ServerEvent } from "../shared/api.ts";
 import { wsUrl } from "./api.ts";
 import { applyState, markResync, noteWsState, refreshState } from "./actions.ts";
 import { app, bus, type ConnState } from "./app.ts";
-import { toast } from "./toast.ts";
+import { toast, toastRefused } from "./toast.ts";
 
 let ws: WebSocket | null = null;
 let attempt = 0;
@@ -45,7 +45,9 @@ function open(): void {
       noteWsState();
       applyState(msg.state);
     } else if (msg.type === "toast") {
-      toast(msg.level === "error" ? "error" : "info", msg.text);
+      // The server logs an error it sends here for the agent itself
+      if (msg.level === "error") toastRefused(msg.text);
+      else toast("info", msg.text);
     }
   };
   sock.onclose = () => {

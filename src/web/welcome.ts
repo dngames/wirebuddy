@@ -8,7 +8,7 @@ import { app, bus, captureActive } from "./app.ts";
 import { cap, capBus, capOpts, captureStatusText, loadInterfaces, paintFilterInput, setOpts, startCaptureClicked } from "./capture.ts";
 import { openFileDialog } from "./dialogs/openfile.ts";
 import { icon } from "./icons.ts";
-import { toast } from "./toast.ts";
+import { toastRefused } from "./toast.ts";
 import { baseName, dirName, fmtDateTime, fmtSize, h, setText } from "./util.ts";
 
 export function createWelcome(): HTMLElement {
@@ -55,7 +55,7 @@ export function createWelcome(): HTMLElement {
             title: f.path,
             onclick: async () => {
               const err = await act.openFile(f.path);
-              if (err) toast("error", `Can't open ${baseName(f.path)}: ${err}`);
+              if (err) toastRefused(`Can't open ${baseName(f.path)}: ${err}`);
             },
           },
           icon("file"),

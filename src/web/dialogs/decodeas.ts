@@ -8,7 +8,7 @@ import { app } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import { decodeAsPorts } from "../frame.ts";
 import { SEP, type MenuItem } from "../menu.ts";
-import { toast } from "../toast.ts";
+import { toast, toastRefused } from "../toast.ts";
 import { debounce, fmtInt, h } from "../util.ts";
 
 let current: Dialog | null = null;
@@ -35,7 +35,7 @@ export function decodeAsMenu(): MenuItem[] {
 /** Removes an entry, or without one all of them. */
 async function removeDecodeAs(e?: DecodeAsEntry): Promise<void> {
   const r = await act.changeDecodeAs(e ? { action: "clear", table: e.table, value: e.value } : { action: "clear" });
-  if (typeof r === "string") toast("error", `Removing Decode As failed: ${r}`);
+  if (typeof r === "string") toastRefused(`Removing Decode As failed: ${r}`);
 }
 
 /** Decode <transport> Port <port> As: every packet on that port, as one protocol. */

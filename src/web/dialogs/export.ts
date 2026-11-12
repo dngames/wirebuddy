@@ -6,7 +6,7 @@ import { errorText, HttpError } from "../api.ts";
 import * as act from "../actions.ts";
 import { app, knownFrames } from "../app.ts";
 import { confirmDialog, Dialog } from "../dialog.ts";
-import { toast } from "../toast.ts";
+import { toast, toastRefused } from "../toast.ts";
 import { baseName, dirName, fmtInt, fmtSize, h } from "../util.ts";
 import { openFilePicker } from "./openfile.ts";
 
@@ -155,7 +155,7 @@ export function openExportDialog(initial: Which = "displayed"): void {
         label: "Open",
         run: () =>
           void act.openFile(r.path).then((e) => {
-            if (e) toast("error", `Can't open ${baseName(r.path)}: ${e}`);
+            if (e) toastRefused(`Can't open ${baseName(r.path)}: ${e}`);
           }),
       });
     } catch (e) {

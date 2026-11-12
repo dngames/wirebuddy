@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Errors you run into in the viewer show there also while an agent is attached; the agent hears of them too
 - In a container with a memory limit, full reads of a live capture wait for the container's free memory, not the host's
 - The check that a panel runs in a process of its own no longer reads a busy page or a slow-starting panel as "not isolated": one page task inside the panel's busy window proves it, and only three empty rounds, spaced out, say no
 - A menu that opens where a notification shows is no longer covered by it: its items take the click

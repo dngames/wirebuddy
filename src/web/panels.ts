@@ -13,7 +13,7 @@ import { errorText, get, HttpError, post } from "./api.ts";
 import { agentName, app, bus } from "./app.ts";
 import { Dialog } from "./dialog.ts";
 import type { MenuItem } from "./menu.ts";
-import { toast } from "./toast.ts";
+import { toastError } from "./toast.ts";
 import { h, load, save, setText } from "./util.ts";
 
 const PING_MS = 2000;
@@ -106,7 +106,7 @@ export async function openPanel(name: string): Promise<void> {
   try {
     await post("api/panels/open", { name });
   } catch (e) {
-    toast("error", `Opening the panel failed: ${errorText(e)}`);
+    toastError(e, "Opening the panel failed");
   }
 }
 
@@ -115,7 +115,7 @@ export async function dismissOffer(name: string): Promise<void> {
   try {
     await post("api/panels/offers/dismiss", { name });
   } catch (e) {
-    toast("error", errorText(e));
+    toastError(e);
   }
 }
 
@@ -156,7 +156,7 @@ function open(p: PanelState): void {
   const footer = h("span", { class: "pn-status" });
   dialog.footerLeft.append(footer);
   const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, probeRun: 0, probeRound: 0, footer, maximized: false, pointerIn: 0 };
-  dialog.button("Reload", () => void post("api/panels/reload", { name: p.name }).catch((e) => toast("error", errorText(e))), { title: "Read the panel's files again and restart it" });
+  dialog.button("Reload", () => void post("api/panels/reload", { name: p.name }).catch((e) => toastError(e)), { title: "Read the panel's files again and restart it" });
   const maxBtn = dialog.button("Maximize", () => {
     w.maximized = !w.maximized;
     dialog.win.classList.toggle("pn-max", w.maximized);
