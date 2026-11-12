@@ -986,6 +986,33 @@ try {
     }
   });
 
+  await check("browser: File › Write Findings Report… writes the file at the chosen path and says so in a toast", async () => {
+    const out = mkdtempSync("/tmp/wirebuddy-findings-");
+    const file = join(out, "report.md");
+    try {
+      await fromMenuBar("File", "Write Findings Report…");
+      await until("the dialog", async () => (await evaluate("!!document.querySelector('.dlg-findings .ex-path')")) === true);
+      // The default is next to the capture, named after it
+      assert.match(await evaluate("document.querySelector('.dlg-findings .ex-path').value"), /\/http-findings\.md$/);
+      await evaluate(`(() => { const i = document.querySelector('.dlg-findings .ex-path'); i.value = ${JSON.stringify(file)}; i.dispatchEvent(new Event('input')); })()`);
+      await evaluate(`(() => { const t = document.querySelector('.dlg-findings textarea'); t.value = "## Found\\n\\nA summary."; t.dispatchEvent(new Event('input')); })()`);
+      // Toasts may cover the button
+      await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
+      await click(...center(await box("[...document.querySelectorAll('.dlg-findings .dlg-footer button')].find((b) => b.textContent === 'Write')")));
+      await until("the file", () => existsSync(file)).catch(async (err) => {
+        throw new Error(`${err.message}; dialog: ${await evaluate("document.querySelector('.dlg-findings')?.textContent")}; toasts: ${await toasts()}`);
+      });
+      await until("the toast", async () => /Wrote the findings report report\.md/.test(await toasts()));
+      assert.match(readFileSync(file, "utf8"), /^# Findings: `http\.pcapng`\n\n## Found\n\nA summary\.\n\n## Capture\n/);
+      assert.equal(await evaluate("!!document.querySelector('.dlg-findings')"), false, "the dialog closes");
+    } finally {
+      // A click on File within 300 ms of the menu closing counts as the one that closed it
+      await sleep(400);
+      await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
   await check("browser: Export Objects fits long names, names at most 10,000 objects in a save, and lists nothing itself when a save is stale", async () => {
     // 10,001 objects with long names listed and every save refused as stale, each request noted
     await evaluate(`(() => {

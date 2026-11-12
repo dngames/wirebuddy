@@ -67,6 +67,8 @@
  * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
  * | POST   | /api/decode-as                | DecodeAsChange                       | DecodeAsResult         |
  * | POST   | /api/export                   | ExportRequest                        | ExportResult (400 with code "exists": the file is there, ask before `overwrite`) |
+ * | GET    | /api/findings                 |                                      | FindingsSummary        |
+ * | POST   | /api/findings                 | FindingsRequest                      | FindingsResult (400 with code "exists": the file is there, ask before `overwrite`) |
  * | GET    | /api/objects                  | ?kind=http\|imf\|smb\|tftp\|dicom\|ftp-data | ObjectList      |
  * | POST   | /api/objects/save             | { kind, dir, file, keys? } (409 if another capture is open) | ObjectSaveResult |
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
@@ -732,6 +734,33 @@ export interface ExportResult {
   leftOut?: number;
   /** Of `frames`, packets of a live capture that weren't read in full yet (written as captured). */
   provisional?: number;
+}
+
+/** File > Write Findings Report: a Markdown file with the marks and their notes, the packet comments and the capture's facts. */
+export interface FindingsRequest {
+  /** Absolute path ending in .md, in a directory that exists. */
+  path: string;
+  /** The caller's own Markdown, written into the report as given: at most 16 KiB, no control characters but newline and tab. */
+  summary?: string;
+  /** Replace an existing file. */
+  overwrite?: boolean;
+}
+
+/** What a report would list now. */
+export interface FindingsSummary {
+  /** Marked packets. */
+  marks: number;
+  /** Packets with comments, as the viewer shows them: edited here, else the file's (packets read in full). */
+  commented: number;
+}
+
+export interface FindingsResult {
+  path: string;
+  /** Marked packets of the capture (the report lists at most 2,000). */
+  marks: number;
+  /** Packets with comments written out. */
+  commented: number;
+  size: number;
 }
 
 /** File > Export Objects: what carries the files. */

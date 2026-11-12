@@ -11,6 +11,8 @@ import { Capture } from "./capture.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
+import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
+import { checkSummary } from "./markdown.ts";
 import { Extensions } from "./extensions.ts";
 import {
   INVESTIGATION_HEAD,
@@ -37,6 +39,7 @@ import { printable } from "./text.ts";
 import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
 import { launchWireshark } from "./wireshark.ts";
 import { entryText } from "../shared/decodeas.ts";
+import { VERSION } from "../shared/version.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   AskResult,
@@ -51,6 +54,9 @@ import type {
   ExpertSeverity,
   ExportRequest,
   ExportResult,
+  FindingsRequest,
+  FindingsResult,
+  FindingsSummary,
   FilterCheck,
   ForgetResult,
   FindResult,
@@ -229,7 +235,7 @@ const DECODE_AS_STATUS = "wirebuddy.decode_as_status";
  */
 export class Viewer extends EventEmitter {
   private engines: [Sharkd, Sharkd];
-  /** Files the agent exported in this session: the only ones it may overwrite. */
+  /** Files the agent exported or wrote as findings reports in this session: the only ones it may overwrite. */
   private readonly agentExports = new Set<string>();
   private wiresharkAt = 0;
   /** Lua dissector extensions sharkd and Wireshark load. */
@@ -2774,6 +2780,91 @@ export class Viewer extends EventEmitter {
       this.notice(`Exported ${frames} packet${frames === 1 ? "" : "s"} to ${req.path}`);
     }
     return { path: req.path, frames, size, comments: marks, ...(edited ? { edited } : {}), ...(leftOut ? { leftOut } : {}), ...(provisional ? { provisional } : {}) };
+  }
+
+  /**
+   * The packets a findings report lists: the marked ones, and the ones with
+   * comments as the viewer shows them (edited here, else the file's, of
+   * packets read in full), each in frame order.
+   */
+  private async findingsFrames(): Promise<{ marks: Mark[]; commented: number[] }> {
+    const marks = [...this.state.marks].sort((a, b) => a.frame - b.frame);
+    const frames = new Set<number>();
+    for (const [f, e] of this.comments) if (e.list.length) frames.add(f);
+    for (const f of await this.fileCommented()) if (f > this.cleared && !this.comments.has(f)) frames.add(f);
+    return { marks, commented: [...frames].sort((a, b) => a - b) };
+  }
+
+  /** What a findings report would list now: marked packets and packets with comments. */
+  async findingsSummary(): Promise<FindingsSummary> {
+    this.requireFile();
+    const { marks, commented } = await this.findingsFrames();
+    return { marks: marks.length, commented: commented.length };
+  }
+
+  /** What the packet list shows of frame `num`: its time, source, destination, protocol and info. */
+  private async rowSummary(num: number): Promise<RowSummary | null> {
+    const row = await this.row(num);
+    if (!row) return null;
+    const at = (name: string): string => row.c[this.state.columns.indexOf(name)] ?? "";
+    return { time: at("Time"), source: at("Source"), destination: at("Destination"), protocol: at("Protocol"), info: at("Info") };
+  }
+
+  /**
+   * Writes the findings report of the open capture, a Markdown file with the
+   * caller's summary, the capture's facts, the marks with their notes and the
+   * packet comments, to a new file (see checkReportTarget).
+   */
+  async writeFindings(req: FindingsRequest, by: "user" | "agent"): Promise<FindingsResult> {
+    this.requireFile();
+    const path = String(req.path ?? "");
+    // The agent must not destroy the user's files: it may only replace its own reports and exports
+    if (by === "agent" && req.overwrite && !this.agentExports.has(resolve(path))) {
+      throw new Error("the agent can only replace files it wrote itself in this session; choose a new file name");
+    }
+    const summary = req.summary === undefined ? "" : checkSummary(String(req.summary));
+    const input = this.state.file!;
+    checkReportTarget(path, [input, ...this.capture.state.files], !!req.overwrite);
+    const file = this.commentsFile;
+    const { marks, commented } = await this.findingsFrames();
+    const read = this.state.totalFrames;
+    const markedOut: MarkedPacket[] = [];
+    for (const m of marks.slice(0, MAX_LISTED)) markedOut.push({ frame: m.frame, note: m.note, by: m.by, provisional: m.frame > read, row: await this.rowSummary(m.frame) });
+    const listed = commented.slice(0, MAX_LISTED);
+    const texts = await this.commentsOf(listed);
+    const commentedOut: CommentedPacket[] = [];
+    for (const f of listed) {
+      const comments = texts.get(f)?.list ?? [];
+      if (comments.length) commentedOut.push({ frame: f, comments, provisional: f > read, row: await this.rowSummary(f) });
+    }
+    // The capture the report is about must still be the one open
+    this.sameCapture(file);
+    if (this.state.file !== input) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
+    const s = this.state;
+    const text = buildFindings({
+      name: basename(input),
+      path: input,
+      packets: s.totalFrames,
+      bytes: s.fileSize,
+      duration: s.duration,
+      live: this.capture.running && this.followingCapture(),
+      filter: s.filter,
+      decodeAs: s.decodeAs.entries.map(entryText),
+      timeRefs: s.timeRefs,
+      version: VERSION,
+      at: new Date(),
+      summary,
+      marks: markedOut,
+      commented: commentedOut,
+      moreMarks: marks.length - markedOut.length,
+      moreCommented: commented.length - listed.length,
+    });
+    const size = writeReport(path, text, !!req.overwrite);
+    if (by === "agent") {
+      this.agentExports.add(resolve(path));
+      this.notice(`Wrote a findings report to ${path}`);
+    }
+    return { path, marks: marks.length, commented: commentedOut.length, size };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {

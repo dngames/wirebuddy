@@ -106,6 +106,7 @@ const MENUS: TopMenu[] = [
       item("saveAs"),
       SEP,
       item("exportSpecified"),
+      item("writeFindings"),
       { label: "Export Objects", sub: objectItems(), disabled: !commands.exportSpecified.enabled() },
     ],
   },

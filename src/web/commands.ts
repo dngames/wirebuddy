@@ -9,6 +9,7 @@ import { openCommentDialog } from "./dialogs/comment.ts";
 import { openConvDialog } from "./dialogs/conv.ts";
 import { openExpertDialog } from "./dialogs/expert.ts";
 import { openExportDialog } from "./dialogs/export.ts";
+import { openFindingsDialog } from "./dialogs/findings.ts";
 import { openExtensionsDialog } from "./dialogs/extensions.ts";
 import { FOLLOW, openFollowDialog } from "./dialogs/follow.ts";
 import { openGotoDialog } from "./dialogs/goto.ts";
@@ -90,6 +91,7 @@ export const commands = {
   },
   saveAs: { label: "Save As…", tip: "Save this capture file as…", shortcut: "Ctrl+Shift+S", anywhere: true, enabled: hasFile, run: () => openExportDialog("all") },
   exportSpecified: { label: "Export Specified Packets…", shortcut: "Ctrl+Shift+X", anywhere: true, enabled: hasFile, run: () => openExportDialog() },
+  writeFindings: { label: "Write Findings Report…", tip: "Write the marks, packet comments and your summary as a Markdown report", enabled: hasFile, run: openFindingsDialog },
 
   // Edit
   find: { label: "Find Packet…", tip: "Find a packet", shortcut: "Ctrl+F", anywhere: true, enabled: hasFile, run: openFindBar },

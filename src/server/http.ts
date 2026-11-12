@@ -13,7 +13,7 @@ import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, ForgetResult, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, FindingsResult, ForgetResult, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
@@ -75,6 +75,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/follow": (q) => viewer.follow(q.get("proto") || "TCP", q.get("filter") ?? ""),
     "/api/find": (q) => viewer.find(q.get("filter") ?? "", num(q, "from"), num(q, "dir")),
     // Download tokens stay here: a save names objects by frame and sha1
+    "/api/findings": () => viewer.findingsSummary(),
     "/api/objects": async (q): Promise<ObjectList> => ({ objects: (await viewer.capturedObjects(objectKind(q.get("kind")))).map(({ token, ...row }) => row), dir: objectsDefaultDir(viewer) }),
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
@@ -123,6 +124,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
     "/api/decode-as": (_q, b) => viewer.decodeAs(b, "user"),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
+    "/api/findings": (_q, b) => viewer.writeFindings({ path: String(b.path ?? ""), summary: b.summary === undefined ? undefined : String(b.summary), overwrite: !!b.overwrite }, "user"),
     "/api/objects/save": async (_q, b): Promise<ObjectSaveResult> => {
       const kind = objectKind(b.kind);
       const dir = text(b.dir, "dir");
@@ -336,6 +338,7 @@ const ACTIONS: Record<string, string> = {
   "/api/tls": "Setting the TLS key log",
   "/api/decode-as": "Changing Decode As",
   "/api/export": "Exporting packets",
+  "/api/findings": "Writing the findings report",
   "/api/objects": "Listing export objects",
   "/api/objects/save": "Saving export objects",
   "/api/agent/ask": "Asking the agent",
@@ -422,6 +425,8 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       const r = result as ExportResult;
       return { level: "INFO", text: `The user exported ${r.frames} packets to ${r.path}` };
     }
+    case "/api/findings":
+      return { level: "INFO", text: `The user wrote a findings report to ${(result as FindingsResult).path}` };
     case "/api/objects/save": {
       const { saved: n, folder, skipped } = result as ObjectSaveResult;
       const k = skipped.length;
