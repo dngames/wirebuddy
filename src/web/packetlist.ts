@@ -132,19 +132,27 @@ function setVirtTop(v: number): void {
   render();
 }
 
+/**
+ * Moves the view to where the list was scrolled to. A scroll's event comes
+ * with the next frame, so a state that arrives before it takes the scroll in
+ * first: syncing the scroll bar from the old position would undo it.
+ */
+function takeScroll(): void {
+  const st = scroller.scrollTop;
+  if (Math.abs(st - lastSetScroll) < 1) return;
+  const m = metrics();
+  const before = virtTop;
+  virtTop = m.maxScroll > 0 ? (st * m.maxVirt) / m.maxScroll : 0;
+  lastSetScroll = st;
+  if (performance.now() - userInputAt < 800) {
+    followPending = false;
+    scrolledBy(virtTop - before);
+  }
+}
+
 function onScroll(): void {
   headerInner.style.transform = `translateX(${-scroller.scrollLeft}px)`;
-  const st = scroller.scrollTop;
-  if (Math.abs(st - lastSetScroll) >= 1) {
-    const m = metrics();
-    const before = virtTop;
-    virtTop = m.maxScroll > 0 ? (st * m.maxVirt) / m.maxScroll : 0;
-    lastSetScroll = st;
-    if (performance.now() - userInputAt < 800) {
-      followPending = false;
-      scrolledBy(virtTop - before);
-    }
-  }
+  takeScroll();
   render();
 }
 
@@ -911,6 +919,8 @@ export function createPacketList(): HTMLElement {
   hooks.focusMain = focusPacketList;
 
   bus.on("state", (s, prev) => {
+    // Measured with the row count the scroll was made in
+    takeScroll();
     const cols = s.columns ?? [];
     const key = `${cols.join("\u0001")}\u0002${(s.customColumns ?? []).map((c) => c.field).join("\u0001")}`;
     if (key !== headerKey) {
