@@ -7,7 +7,7 @@ Thanks for your interest! Bug reports, ideas and pull requests are welcome.
 You need Node.js ≥ 22 and Wireshark 4.6 (`sharkd`, `dumpcap`, `editcap`, `mergecap`; on
 Debian/Ubuntu they come with `wireshark-common`, see the README for the PPA). For the capture
 tests your user must be allowed to run `dumpcap` (member of the `wireshark` group). The live
-test also uses `ping` and `openssl`. On macOS, `dumpcap` needs read access to `/dev/bpf*`
+test also uses `openssl`. On macOS, `dumpcap` needs read access to `/dev/bpf*`
 (Wireshark's ChmodBPF sets it up), and the robot-arm checks are skipped: they need Linux's
 delayed ACK on the loopback.
 

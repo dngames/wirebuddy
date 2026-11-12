@@ -1,5 +1,5 @@
 // Live capture on the loopback interface: live reload, autostop, ring buffer, stop.
-// Generates its own ICMP traffic with ping, and TCP with the robot-arm and ct-archive examples.
+// Generates its own UDP traffic from Node (an echo pair on the loopback), and TCP with the robot-arm and ct-archive examples.
 // test/live-tail.mjs covers captures big enough for provisional packets.
 // Usage: node test/live-smoke.mjs   (after npm run build)
 import { spawn, execFileSync } from "node:child_process";
@@ -53,12 +53,32 @@ async function api(path, body) {
   return json;
 }
 const state = () => api("/api/state");
-// Only echo request/reply: other loopback ICMP (e.g. port unreachable) may be around
-const ECHO = "icmp[icmptype] == icmp-echo or icmp[icmptype] == icmp-echoreply";
+// UDP echo on the loopback: the server sends each datagram back to its sender, so every datagram gives two
+// packets, there and back, like an echo request and its reply. Ephemeral ports keep the pair clear of other traffic.
+const echoServer = createSocket("udp4");
+echoServer.on("message", (msg, rinfo) => echoServer.send(msg, rinfo.port, rinfo.address));
+await new Promise((resolve) => echoServer.bind(0, "127.0.0.1", resolve));
+const ECHO_PORT = echoServer.address().port;
+const echoClient = createSocket("udp4");
+// Read and dropped, so the answers don't pile up in the socket
+echoClient.on("message", () => {});
+const ECHO = `udp port ${ECHO_PORT}`;
 // Started after the capture's start returned, and for the capture's whole duration plus a few seconds: a
 // capture can take that long to begin, and its auto-stop counts from its own start.
-// A count keeps an aborted test from leaving an endless ping behind.
-const ping = (seconds, interval = 0.2) => spawn("ping", ["-i", String(interval), "-c", String(Math.round(seconds / interval)), "127.0.0.1"], { stdio: "ignore" });
+// Sends 1 / interval datagrams a second for `seconds`, paced by the clock: timers may fire late, so each tick
+// sends what is due by now rather than one step. It stops by itself, so an aborted test leaves no traffic behind.
+const echo = (seconds, interval = 0.2) => {
+  const started = Date.now();
+  let sent = 0;
+  const tick = () => {
+    const elapsed = Math.min(Date.now() - started, seconds * 1000);
+    for (const due = Math.ceil(elapsed / (interval * 1000)); sent < due; sent++) echoClient.send("wirebuddy", ECHO_PORT, "127.0.0.1");
+    if (elapsed >= seconds * 1000) clearInterval(timer);
+  };
+  const timer = setInterval(tick, 5);
+  tick();
+  return { kill: () => clearInterval(timer) };
+};
 
 async function waitIdle(timeoutMs) {
   const end = Date.now() + timeoutMs;
@@ -117,7 +137,7 @@ try {
 
   await check("live view grows, filter survives reloads, autostop", async () => {
     await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 4 }, ring: null });
-    const pinger = ping(9);
+    const sender = echo(9);
     const seen = new Set();
     const gens = new Set();
     let filtered = false;
@@ -131,32 +151,32 @@ try {
       // Full reads of a small capture are quick: nothing is provisional
       assert.equal(s.tail, null);
       if (!filtered && s.totalFrames > 4) {
-        const r = await api("/api/filter", { filter: "icmp.type == 8" });
+        const r = await api("/api/filter", { filter: `udp.dstport == ${ECHO_PORT}` });
         assert.equal(r.ok, true);
         filtered = true;
       }
     }
     const s = await waitIdle(6000);
-    pinger.kill();
+    sender.kill();
     assert.equal(s.capture.status, "idle", s.capture.error ?? "");
     assert.ok(seen.size >= 3, `frame count should grow during capture, saw ${[...seen]}`);
     assert.ok(gens.size >= 3, "generation should bump on each live reload");
     await sleep(1200); // final reload after stop
     const end = await state();
-    assert.equal(end.filter, "icmp.type == 8");
+    assert.equal(end.filter, `udp.dstport == ${ECHO_PORT}`);
     assert.equal(end.tail, null);
     assert.ok(end.totalFrames >= 30, `expected ~40 frames, got ${end.totalFrames}`);
     assert.ok(Math.abs(end.displayedFrames * 2 - end.totalFrames) <= 2, `requests should be half: ${end.displayedFrames}/${end.totalFrames}`);
     assert.ok(Math.abs(end.capture.packets - end.totalFrames) <= 2, `dumpcap count ${end.capture.packets} vs frames ${end.totalFrames}`);
     const rows = await api(`/api/rows?gen=${end.generation}&start=0&count=3`);
     const info = end.columns.indexOf("Info");
-    assert.ok(rows.rows.every((r) => /Echo \(ping\) request/.test(r.c[info])), JSON.stringify(rows.rows[0]));
+    assert.ok(rows.rows.every((r) => r.c[info].endsWith(`→ ${ECHO_PORT} Len=9`)), JSON.stringify(rows.rows[0]));
     await api("/api/filter", { filter: "" });
   });
 
   await check("ring buffer rotates files and keeps only N", async () => {
     await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 7 }, ring: { files: 2, durationSec: 2 } });
-    const pinger = ping(12);
+    const sender = echo(12);
     let files = new Set();
     for (let i = 0; i < 30; i++) {
       await sleep(300);
@@ -165,7 +185,7 @@ try {
       if (s.capture.status === "idle") break;
     }
     const s = await waitIdle(5000);
-    pinger.kill();
+    sender.kill();
     assert.ok(s.capture.files.length >= 3, `expected >= 3 ring files, got ${s.capture.files.length}`);
     assert.ok(files.size >= 2, "the viewer should follow the current ring file");
     const onDisk = readdirSync(captureDir).filter((f) => f.includes("_0000"));
@@ -196,9 +216,9 @@ try {
   await check("new files without a ring keep every file, stop after N files", async () => {
     const before = new Set(readdirSync(captureDir));
     await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { files: 3, durationSec: 20 }, ring: { durationSec: 1 } });
-    const pinger = ping(12);
+    const sender = echo(12);
     const s = await waitIdle(15000);
-    pinger.kill();
+    sender.kill();
     assert.equal(s.capture.files.length, 3, JSON.stringify(s.capture.files));
     const written = readdirSync(captureDir).filter((f) => !before.has(f));
     assert.equal(written.length, 3, `all 3 files stay on disk: ${written}`);
@@ -229,9 +249,9 @@ try {
 
   await check("export with more selections than one editcap run allows", async () => {
     await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 5 }, ring: null });
-    const pinger = ping(9, 0.005);
+    const sender = echo(9, 0.005);
     const s = await waitIdle(10000);
-    pinger.kill();
+    sender.kill();
     await sleep(1200);
     const total = (await state()).totalFrames;
     assert.ok(total >= 1100, `need >1000 frames, got ${total}`);
@@ -290,13 +310,13 @@ try {
 
   await check("stop", async () => {
     await api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: {}, ring: null });
-    const pinger = ping(9);
+    const sender = echo(9);
     await sleep(1500);
     assert.equal((await state()).capture.status, "running");
     await assert.rejects(api("/api/capture/start", { iface: LOOPBACK, filter: "", autostop: {}, ring: null }), /already running/);
     await api("/api/capture/stop", {});
     const s = await waitIdle(5000);
-    pinger.kill();
+    sender.kill();
     assert.equal(s.capture.status, "idle");
     assert.equal(s.capture.error, null);
     assert.ok(s.totalFrames > 0);
@@ -324,10 +344,10 @@ try {
       const h = r.raw.readUInt32LE(4);
       return JSON.parse(r.raw.subarray(8, 8 + h).toString());
     };
-    let pinger;
+    let sender;
     try {
       await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 5 }, ring: null });
-      pinger = ping(10);
+      sender = echo(10);
       // The event stream tells the panel when packets come
       let seen = "";
       await panelReq(`/_wb/events?doc=${doc}`, { headers: { "sec-fetch-dest": "empty" } }, (text, req) => {
@@ -337,17 +357,17 @@ try {
       assert.match(seen, /event: packets/);
       // A capture that grows is the same capture: no reset once it is open
       assert.doesNotMatch(seen.slice(seen.indexOf("event: packets")), /event: reset/);
-      const early = await packets({ filter: "icmp" });
+      const early = await packets({ filter: "udp" });
       assert.ok(early.n > 0 && early.live, JSON.stringify(early));
       await sleep(2000);
-      const later = await packets({ filter: "icmp" });
+      const later = await packets({ filter: "udp" });
       assert.ok(later.n > early.n, `${early.n} then ${later.n}`);
       const s = await waitIdle(10000);
       const end = await packets({});
       assert.equal(end.live, false);
       assert.equal(end.total, s.totalFrames);
     } finally {
-      pinger?.kill();
+      sender?.kill();
       await api("/api/panels/close", { name: "live" });
     }
   });
@@ -474,10 +494,10 @@ try {
   await check("the agent starts a capture over MCP", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-live-mcp-"));
     const { client, tool } = await agent(dir);
-    let pinger;
+    let sender;
     try {
       const started = await tool("start_capture", { interface: LOOPBACK, filter: ECHO, stop_after_seconds: 3 });
-      pinger = ping(8);
+      sender = echo(8);
       assert.match(started, new RegExp(`^Capturing on ${LOOPBACK} with the capture filter .* into .*\\.pcapng\\. The view follows it live`));
       assert.match(await tool("get_view_state", {}), /Capture \(started by agent\): running/);
       await assert.rejects(tool("start_capture", { interface: LOOPBACK }), /already running/);
@@ -491,7 +511,7 @@ try {
       assert.ok(frames > 0, view);
       assert.ok(readdirSync(dir).some((f) => f.endsWith(".pcapng")), "written into the capture folder");
     } finally {
-      pinger?.kill();
+      sender?.kill();
       await client.close();
       rmSync(dir, { recursive: true, force: true });
     }
@@ -501,4 +521,6 @@ try {
   rmSync(captureDir, { recursive: true, force: true });
 }
 console.log(failures ? `${failures} check(s) failed` : "all checks passed");
+echoServer.close();
+echoClient.close();
 process.exit(failures ? 1 : 0);
