@@ -145,11 +145,39 @@ try {
     assert.match(opened.text, /WARNING Panel "clicker" called wb\.select, which was refused: the user hadn't just clicked/);
   });
 
-  const rect = await evaluate("JSON.stringify(document.querySelector('.panel-frame').getBoundingClientRect())").then(JSON.parse);
+  const frameRect = () => evaluate("JSON.stringify(document.querySelector('.panel-frame').getBoundingClientRect())").then(JSON.parse);
+  const panelAndSelection = async () => `the panel's status: ${JSON.stringify(await statusText())}, the page's selection: ${(await state()).selected}`;
+  await evaluate("addEventListener('pointerdown', (e) => { if (e.isTrusted) window.pageClickAt = performance.now(); }, true)");
+  /**
+   * Clicks (`dx`, `dy`) into the panel's frame until the panel says it got the click: its status then starts with
+   * `answer`, which its click handlers set whether the page allowed the action or not. A click into the frame a
+   * moment after it opened can go to this page instead, while Chrome has not yet routed hits to the out-of-process
+   * frame; the panel hears nothing then. Only a click the panel did not get is repeated. One this page got counts
+   * as its own input for 5 s (a panel can take the focus right after the user clicked elsewhere), so the repeat
+   * waits that out. A click the panel got and was refused for stays a failure.
+   */
+  const clickPanel = async (dx, dy, answer) => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await evaluate("window.pageClickAt = 0");
+      const r = await frameRect();
+      await click(r.left + dx, r.top + dy);
+      try {
+        await until(`the panel to get the click (${attempt + 1})`, async () => (await statusText())?.startsWith(`${answer}:`), 1500);
+        return;
+      } catch {}
+      const age = await evaluate("window.pageClickAt ? performance.now() - window.pageClickAt : -1");
+      if (age >= 0) await sleep(Math.max(0, 5200 - age));
+    }
+    throw new Error(`timed out waiting for the panel to get a click; ${await panelAndSelection()}`);
+  };
   await check("browser: after a click in the panel, select works", async () => {
-    await click(rect.left + 100, rect.top + 40);
-    await until("the selection", async () => (await state()).selected === 3);
-    await until("the panel's status", async () => (await statusText()) === "click: ok");
+    await clickPanel(100, 40, "click");
+    await until("the selection", async () => (await state()).selected === 3).catch(async (err) => {
+      throw new Error(`${err.message}; ${await panelAndSelection()}`);
+    });
+    await until("the panel's status", async () => (await statusText()) === "click: ok").catch(async (err) => {
+      throw new Error(`${err.message}; ${await panelAndSelection()}`);
+    });
     const s = await state();
     assert.match(s.agentNotice.text, /^Panel "Clicker" selected frame 3$/);
   });
@@ -163,7 +191,7 @@ try {
   });
 
   await check("browser: setFilter after a click still needs control", async () => {
-    await click(rect.left + 100, rect.top + 140);
+    await clickPanel(100, 140, "filter");
     await until("the refusal", async () => (await statusText()) === "filter: denied");
     assert.equal((await state()).filter, "");
   });
@@ -395,12 +423,17 @@ try {
   const closeComment = async () => {
     if (await evaluate("!!document.querySelector('.dlg-comment, .dlg-export')")) await key("Escape", "Escape", 27);
   };
-  /** Clicks `label` in the open menus; on failure names what they hold. */
-  const pick = async (label) => {
+  /** What is at a point of the page: the element's tag, classes and text. */
+  const elementAt = (x, y) =>
+    evaluate(`(() => { const e = document.elementFromPoint(${x}, ${y}); return e ? e.tagName + "." + e.className + " " + JSON.stringify(e.textContent.slice(0, 80)) : "nothing"; })()`);
+  /** Clicks `label` in the open menus; on failure names what they hold. A `seen` object gets the point clicked, what was there and the toasts then. */
+  const pick = async (label, seen) => {
     await until(`"${label}"`, async () => !!(await box(menuItem(label)))).catch(async (err) => {
       throw new Error(`${err.message}; the menus: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ')")}`);
     });
-    await click(...center(await box(menuItem(label))));
+    const at = center(await box(menuItem(label)));
+    if (seen) Object.assign(seen, { point: at.map(Math.round), hit: await elementAt(...at), toasts: await toasts() });
+    await click(...at);
   };
   const fromMenuBar = async (title, ...labels) => {
     await click(...center(await box(`[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === ${JSON.stringify(title)})`)));
@@ -525,8 +558,23 @@ try {
       assert.match(await toasts(), /UDP port 50000 now decodes as RTP \(5 packets\)/);
       assert.equal(await evaluate(`${seg}.hidden ? "" : ${seg}.textContent`), "Decode As: 1");
       await click(...center(await box(seg)));
-      await pick("Remove udp.port 50000 → rtp");
-      await until("frame 5 as UDP again", async () => (await protocol(5)) === "UDP");
+      const clicked = {};
+      await pick("Remove udp.port 50000 → rtp", clicked);
+      // What the page held when the removal did not show, and what the click met
+      const found = async () => {
+        const view = (await viewState()).split("\n").filter((l) => /Decode As|ERROR|WARNING/.test(l)).join(" / ");
+        return [
+          `frame 5's protocol cell: ${JSON.stringify(await protocol(5))}`,
+          `the status segment: ${await evaluate(`${seg}.hidden ? "hidden" : JSON.stringify(${seg}.textContent)`)}`,
+          `toasts now: ${JSON.stringify(await toasts())}`,
+          `the view state: ${view}`,
+          `menu items open: ${await evaluate("[...document.querySelectorAll('.menu-item')].map((m) => m.textContent).join(' | ') || 'none'")}`,
+          `the click at ${clicked.point} met ${clicked.hit}, toasts then: ${JSON.stringify(clicked.toasts)}`,
+        ].join("; ");
+      };
+      await until("frame 5 as UDP again", async () => (await protocol(5)) === "UDP").catch(async (err) => {
+        throw new Error(`${err.message}; ${await found()}`);
+      });
       await until("the segment to go", () => evaluate(`${seg}.hidden`));
     } finally {
       if (await evaluate("!!document.querySelector('.dlg-decodeas')")) await key("Escape", "Escape", 27);

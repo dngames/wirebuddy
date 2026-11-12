@@ -18,6 +18,12 @@ const example = join(root, "examples/investigations/robot-arm");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let failures = 0;
+/** The robot-arm example's fault is Linux's delayed ACK on the loopback; macOS acknowledges at once, so there is nothing to find. */
+function skipDelayedAck(what) {
+  if (process.platform !== "darwin") return false;
+  console.log(`skip ${what}: the fault needs Linux's delayed ACK on the loopback, macOS acknowledges at once`);
+  return true;
+}
 async function check(name, fn) {
   try {
     await fn();
@@ -231,7 +237,7 @@ try {
   });
 
   let buggy;
-  await check("the app as shipped: ACKs take over 30 ms, under 35 commands/s", async () => {
+  if (!skipDelayedAck("the app as shipped")) await check("the app as shipped: ACKs take over 30 ms, under 35 commands/s", async () => {
     buggy = await runApp(join(example, "app.mjs"), port, telemetry, 3);
     console.log(`     ${summary(buggy)}`);
     assert.ok(buggy.p50 > 30, `p50 ${buggy.p50} ms`);
@@ -260,7 +266,9 @@ try {
     assert.ok(fixed.p50 < 5, `p50 ${fixed.p50} ms`);
     assert.ok(fixed.rate > 45, `${fixed.rate}/s`);
     assert.doesNotMatch(fixed.out, /WARNING/);
+    // Without the app as shipped there is nothing to compare with
     if (buggy) assert.ok(fixed.tracking < buggy.tracking, `tracking error ${fixed.tracking}° vs ${buggy.tracking}° before`);
+    else skipDelayedAck("the tracking comparison with the app as shipped");
   });
 } finally {
   device.kill();
