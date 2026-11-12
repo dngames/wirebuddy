@@ -46,15 +46,18 @@ jobs:
       - run: npm run build
 
       # Capturing reads /dev/bpf*, which are root-only by default. The hosted runner is a throwaway VM, so
-      # they are opened to everyone. macOS may add devices while captures run (libpcap takes the first free
-      # one), so a loop keeps the mode on those too until the job ends; the first chmod is done in the
-      # foreground, so the checks below start with it in place. Wireshark's ChmodBPF needs a group the
-      # running shell wouldn't have joined yet.
+      # they are opened to everyone. macOS makes the next device only when the last one is opened (by root
+      # alone), and dumpcap -S opens every interface at once, so it could open only as many as exist: the
+      # devices are forced into existence first, the way Wireshark's ChmodBPF does (reading zero bytes opens
+      # each one). macOS may still add devices while captures run (libpcap takes the first free one), so a
+      # loop keeps the mode on those too until the job ends; the first chmod is done in the foreground, so
+      # the checks below start with it in place. Wireshark's ChmodBPF needs a group the running shell
+      # wouldn't have joined yet.
       - name: Give the job's user access to the BPF devices
         shell: bash
         run: |
           echo "bpf devices before: $(ls /dev/bpf* 2>/dev/null | wc -l | tr -d ' ')"
-          sudo chmod o+rw /dev/bpf*
+          sudo bash -c 'for N in $(seq 0 127); do { read -n 0 < /dev/bpf$N; } 2>/dev/null || true; done; chmod o+rw /dev/bpf*'
           sudo nohup bash -c 'while :; do chmod o+rw /dev/bpf* 2>/dev/null; sleep 1; done' >/dev/null 2>&1 &
           disown
           echo "bpf devices after: $(ls /dev/bpf* | wc -l | tr -d ' ')"
@@ -68,6 +71,9 @@ jobs:
           id -un
           ping -i 0.2 -c 2 127.0.0.1 || echo "ping -i 0.2: exit $?"
           ping -i 0.005 -c 2 127.0.0.1 || echo "ping -i 0.005: exit $?"
+          echo "--- what a capture start prepares (the app's dumpcap -D -M, then the filter check)"
+          time dumpcap -D -M >/dev/null || true
+          time dumpcap -i lo0 -f icmp -d >/dev/null || true
           echo "--- tools"
           /usr/bin/curl --version | head -1 || true
           command -v curl || true
