@@ -82,6 +82,12 @@ export const commands = {
   // File
   open: { label: "Open…", tip: "Open a capture file", shortcut: "Ctrl+O", anywhere: true, run: () => openFileDialog() },
   close: { label: "Close", tip: "Close this capture file", enabled: () => !!app.state?.file, run: () => void act.closeFile() },
+  forgetKept: {
+    label: "Forget Kept Marks and Comments…",
+    tip: "Drop the marks, time references and packet comments edited for this capture, here and in what WireBuddy keeps",
+    enabled: () => hasFile() && !!(app.state!.marks.length || app.state!.timeRefs.length || app.state!.commentsEdited || app.state!.commentEdits),
+    run: () => void act.forgetKept(),
+  },
   saveAs: { label: "Save As…", tip: "Save this capture file as…", shortcut: "Ctrl+Shift+S", anywhere: true, enabled: hasFile, run: () => openExportDialog("all") },
   exportSpecified: { label: "Export Specified Packets…", shortcut: "Ctrl+Shift+X", anywhere: true, enabled: hasFile, run: () => openExportDialog() },
 

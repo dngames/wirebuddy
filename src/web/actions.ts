@@ -417,10 +417,13 @@ export async function deleteAllComments(): Promise<void> {
   }
 }
 
-/** Before the capture goes (`what` makes it go): whether comments edited and not exported may go with it. */
+/**
+ * Before the capture goes (`what` makes it go): whether comments edited and
+ * not exported may go with it. Kept with the capture, they don't go.
+ */
 export async function discardComments(what: string): Promise<boolean> {
   const n = app.state?.commentEdits ?? 0;
-  if (!n) return true;
+  if (!n || app.state?.kept) return true;
   const text = `The comments edited in ${fmtInt(n)} packet${n === 1 ? "" : "s"} weren't exported: ${what} discards them. File › Save As keeps them in a new pcapng file.`;
   return confirmDialog("Unsaved Packet Comments", text, "Discard Them");
 }
@@ -470,6 +473,18 @@ export function gotoTimeRef(dir: 1 | -1): void {
 }
 
 // -------------------------------------------------------------- files, misc
+
+/** File › Forget Kept Marks and Comments…: the open capture's packets read as its file has them again. */
+export async function forgetKept(): Promise<void> {
+  const text = "WireBuddy forgets the marks, time references and packet comments edited for this capture, in the view and in what it keeps of them, so its packets read as the capture file has them. This can't be undone.";
+  if (!(await confirmDialog("Forget Kept Marks and Comments", text, "Forget Them"))) return;
+  try {
+    await post("api/forget", {});
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Forgetting failed");
+  }
+}
 
 /** Returns an error message, or null on success or when the user keeps the capture. */
 export async function openFile(path: string): Promise<string | null> {

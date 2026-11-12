@@ -1,8 +1,8 @@
 // Unit checks of the panel data's parts (frame sets, the layer finder, raw matches, the page format, sharkd's answer limit),
-// export runs, saved objects, the event log, the cleanup of slice folders and Decode As entries.
+// export runs, saved objects, the event log, the cleanup of slice folders, Decode As entries and investigations kept per capture.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -19,7 +19,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n") + `\nexport { availableMemory } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`,
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n") + `\nexport { availableMemory } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`,
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -31,6 +31,7 @@ const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory } = await import(join(out, "units.mjs"));
+const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { check, finish } = suite();
 
@@ -1184,6 +1185,195 @@ try {
       else process.env.XDG_RUNTIME_DIR = saved;
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  const limits = { marks: 3, note: 10, timeRefs: 2, commented: 2, comment: 20 };
+  const investigation = () => ({
+    marks: [{ frame: 2, note: "slow reply", by: "agent" }, { frame: 5, note: "", by: "user" }],
+    timeRefs: [3],
+    comments: { edited: [{ frame: 4, list: ["file's own\twith a tab", "added"], own: 1 }, { frame: 7, list: [], own: -1 }], cleared: 6, clearedFrames: [1, 6], unexported: [4, 9], clearedUnexported: true },
+  });
+  const captureInfo = { path: "/captures/a.pcapng", size: 1234, frames: 29 };
+
+  await check("investigation: keyed by a SHA-256 of the capture's first bytes, in the data folder", () => {
+    const head = Buffer.from("first bytes of a capture");
+    assert.equal(investigationKey(head), createHash("sha256").update(head).digest("hex"));
+    assert.notEqual(investigationKey(head), investigationKey(Buffer.from("first bytes of another")));
+    assert.equal(investigationDir({ XDG_DATA_HOME: "/data" }), "/data/wirebuddy/investigations");
+    assert.equal(investigationDir({}), join(userInfo().homedir, ".local/share/wirebuddy/investigations"));
+  });
+
+  await check("investigation: a round trip gives back what was kept, in a private folder and file", () => {
+    const dir = join(mkdtempSync(join(out, "inv-")), "wirebuddy/investigations");
+    const key = investigationKey(Buffer.from("a"));
+    assert.equal(readInvestigation(dir, key, limits), null, "nothing kept, no folder");
+    const text = serializeInvestigation(investigation(), captureInfo, new Date("2026-01-02T03:04:05Z"));
+    const file = JSON.parse(text);
+    assert.deepEqual([file.version, file.capture, file.saved], [1, captureInfo, "2026-01-02T03:04:05.000Z"]);
+    writeInvestigation(dir, key, text);
+    assert.deepEqual(readInvestigation(dir, key, limits), investigation());
+    assert.deepEqual([statSync(dir).mode & 0o777, statSync(join(dir, `${key}.json`)).mode & 0o777], [0o700, 0o600]);
+    assert.deepEqual(readdirSync(dir), [`${key}.json`], "no temp file left");
+    // Written again: replaced whole, also a link left under its name, whose target stays
+    const victim = join(dirname(dir), "victim");
+    writeFileSync(victim, "keep");
+    rmSync(join(dir, `${key}.json`));
+    symlinkSync(victim, join(dir, `${key}.json`));
+    writeInvestigation(dir, key, text);
+    assert.equal(readFileSync(victim, "utf8"), "keep");
+    assert.equal(lstatSync(join(dir, `${key}.json`)).isSymbolicLink(), false);
+    assert.equal(investigationContent(readInvestigation(dir, key, limits)), investigationContent(investigation()));
+  });
+
+  await check("investigation: a file with anything wrong is refused whole and left alone", () => {
+    const dir = mkdtempSync(join(out, "inv-bad-"));
+    const key = investigationKey(Buffer.from("bad"));
+    const good = JSON.parse(serializeInvestigation(investigation(), captureInfo));
+    const variants = {
+      "not JSON": "{ marks: [",
+      "another version": { ...good, version: 2 },
+      "no version": (({ version, ...rest }) => rest)(good),
+      "a field more": { ...good, extra: 1 },
+      "marks not a list": { ...good, marks: {} },
+      "frame 0": { ...good, marks: [{ frame: 0, note: "", by: "user" }] },
+      "a fractional frame": { ...good, timeRefs: [1.5] },
+      "a frame as text": { ...good, timeRefs: ["3"] },
+      "frames out of order": { ...good, timeRefs: [3, 2] },
+      "a frame twice": { ...good, marks: [{ frame: 2, note: "", by: "user" }, { frame: 2, note: "", by: "user" }] },
+      "too many marks": { ...good, marks: [1, 2, 3, 4].map((frame) => ({ frame, note: "", by: "user" })) },
+      "too many time references": { ...good, timeRefs: [1, 2, 3] },
+      "too long a note": { ...good, marks: [{ frame: 1, note: "x".repeat(11), by: "user" }] },
+      "a note over two lines": { ...good, marks: [{ frame: 1, note: "a\nb", by: "user" }] },
+      "another author": { ...good, marks: [{ frame: 1, note: "", by: "root" }] },
+      "a mark field more": { ...good, marks: [{ frame: 1, note: "", by: "user", html: "<b>" }] },
+      "too long a comment": { ...good, comments: { ...good.comments, edited: [{ frame: 1, list: ["y".repeat(21)], own: 0 }] } },
+      "a written comment with a control character": { ...good, comments: { ...good.comments, edited: [{ frame: 1, list: ["a\u001bb"], own: 0 }] } },
+      "too many commented packets": { ...good, comments: { ...good.comments, edited: [1, 2, 3].map((frame) => ({ frame, list: ["c"], own: 0 })) } },
+      "own past the list": { ...good, comments: { ...good.comments, edited: [{ frame: 1, list: ["c"], own: 2 }] } },
+      "a comment not text": { ...good, comments: { ...good.comments, edited: [{ frame: 1, list: [7], own: -1 }] } },
+      "cleared frames past cleared": { ...good, comments: { ...good.comments, clearedFrames: [7] } },
+      "cleared negative": { ...good, comments: { ...good.comments, cleared: -1 } },
+      "unexported frame 0": { ...good, comments: { ...good.comments, unexported: [0] } },
+      "clearedUnexported not a boolean": { ...good, comments: { ...good.comments, clearedUnexported: 1 } },
+      "no capture": { ...good, capture: null },
+    };
+    for (const [why, v] of Object.entries(variants)) {
+      writeFileSync(join(dir, `${key}.json`), typeof v === "string" ? v : JSON.stringify(v), { mode: 0o600 });
+      assert.throws(() => readInvestigation(dir, key, limits), InvalidInvestigation, why);
+      assert.ok(existsSync(join(dir, `${key}.json`)), `${why}: left alone`);
+    }
+    // A file over the size cap is refused unread
+    writeFileSync(join(dir, `${key}.json`), " ".repeat(MAX_INVESTIGATION_BYTES + 1));
+    assert.throws(() => readInvestigation(dir, key, limits), /bigger than 4 MiB/);
+    // A link under the name is refused, not followed
+    rmSync(join(dir, `${key}.json`));
+    const elsewhere = join(out, "inv-elsewhere.json");
+    writeFileSync(elsewhere, serializeInvestigation(investigation(), captureInfo));
+    symlinkSync(elsewhere, join(dir, `${key}.json`));
+    assert.throws(() => readInvestigation(dir, key, limits), /link/);
+    // A folder that is a link is refused, read and write, and nothing is written there
+    const real = mkdtempSync(join(out, "inv-real-"));
+    writeFileSync(join(real, `${key}.json`), serializeInvestigation(investigation(), captureInfo));
+    const linked = join(out, "inv-linked");
+    symlinkSync(real, linked);
+    assert.throws(() => readInvestigation(linked, key, limits), /not a folder/);
+    assert.throws(() => writeInvestigation(linked, investigationKey(Buffer.from("x")), "{}"), /not a folder/);
+    assert.deepEqual(readdirSync(real), [`${key}.json`]);
+    // Another user's folder is refused (only root can make one here)
+    if (process.getuid?.() === 0) {
+      const theirs = mkdtempSync(join(out, "inv-theirs-"));
+      writeFileSync(join(theirs, `${key}.json`), serializeInvestigation(investigation(), captureInfo));
+      execFileSync("chown", ["-R", "65534", theirs]);
+      assert.throws(() => readInvestigation(theirs, key, limits), /belongs to another user/);
+      assert.throws(() => writeInvestigation(theirs, key, "{}"), /belongs to another user/);
+    }
+  });
+
+  await check("investigation: nothing to keep without marks, time references and comments that differ from the file's; removing it", () => {
+    const none = { marks: [], timeRefs: [], comments: { edited: [], cleared: 0, clearedFrames: [], unexported: [], clearedUnexported: false } };
+    assert.equal(nothingToKeep(none), true);
+    // Comments added and deleted again, or Delete All on a file without any: as the file has them
+    assert.equal(nothingToKeep({ ...none, comments: { edited: [{ frame: 2, list: [], own: 0 }, { frame: 3, list: ["file's"], own: 1 }], cleared: 9, clearedFrames: [], unexported: [2], clearedUnexported: true } }), true);
+    assert.equal(nothingToKeep({ ...none, marks: [{ frame: 1, note: "", by: "user" }] }), false);
+    assert.equal(nothingToKeep({ ...none, timeRefs: [1] }), false);
+    assert.equal(nothingToKeep({ ...none, comments: { ...none.comments, edited: [{ frame: 2, list: ["new"], own: 0 }] } }), false);
+    assert.equal(nothingToKeep({ ...none, comments: { ...none.comments, cleared: 4, clearedFrames: [4] } }), false);
+    const dir = mkdtempSync(join(out, "inv-rm-"));
+    const key = investigationKey(Buffer.from("rm"));
+    writeInvestigation(dir, key, serializeInvestigation(investigation(), captureInfo));
+    removeInvestigation(dir, key);
+    assert.deepEqual(readdirSync(dir), []);
+    removeInvestigation(dir, key);
+    removeInvestigation(join(dir, "missing"), key);
+  });
+
+  await check("investigation: a refused file set aside before the next write keeps its bytes, and the new file reads", () => {
+    const dir = mkdtempSync(join(out, "inv-aside-"));
+    const key = investigationKey(Buffer.from("aside"));
+    const newer = JSON.stringify({ ...JSON.parse(serializeInvestigation(investigation(), captureInfo)), version: 2 });
+    writeFileSync(join(dir, `${key}.json`), newer, { mode: 0o600 });
+    assert.throws(() => readInvestigation(dir, key, limits), InvalidInvestigation);
+    // An older one set aside before is replaced
+    writeFileSync(join(dir, `${key}.unreadable`), "older");
+    assert.equal(setAsideInvestigation(dir, key), join(dir, `${key}.unreadable`));
+    writeInvestigation(dir, key, serializeInvestigation(investigation(), captureInfo));
+    assert.equal(readFileSync(join(dir, `${key}.unreadable`), "utf8"), newer);
+    assert.deepEqual(readInvestigation(dir, key, limits), investigation());
+    assert.deepEqual(readdirSync(dir).sort(), [`${key}.json`, `${key}.unreadable`]);
+    // Nothing to set aside: nothing happens
+    assert.equal(setAsideInvestigation(dir, investigationKey(Buffer.from("none"))), null);
+    assert.equal(setAsideInvestigation(join(dir, "missing"), key), null);
+  });
+
+  await check("investigation: what was kept, in words", () => {
+    assert.equal(keptSummary(12, 1, 3), "12 marks, 1 time reference and the edited comments of 3 packets");
+    assert.equal(keptSummary(1, 0, 1), "1 mark and the edited comments of 1 packet");
+    assert.equal(keptSummary(0, 2, 0), "2 time references");
+    assert.equal(keptSummary(0, 0, 0), "");
+  });
+
+  await check("investigation: a path under a regular file holds no folder: nothing is read, writing throws", () => {
+    const plain = join(out, "inv-plain-file");
+    writeFileSync(plain, "not a folder");
+    const dir = join(plain, "wirebuddy/investigations");
+    const key = investigationKey(Buffer.from("plain"));
+    assert.equal(readInvestigation(dir, key, limits), null);
+    assert.throws(() => writeInvestigation(dir, key, "{}"), /ENOTDIR|EEXIST/);
+    assert.equal(pruneInvestigations(dir), 0);
+    removeInvestigation(dir, key);
+  });
+
+  await check("investigation: over the size cap nothing is written", () => {
+    const dir = mkdtempSync(join(out, "inv-big-"));
+    const key = investigationKey(Buffer.from("big"));
+    const big = { ...investigation(), comments: { ...investigation().comments, edited: Array.from({ length: 3000 }, (_, i) => ({ frame: i + 1, list: ["z".repeat(2000)], own: 0 })) } };
+    const text = serializeInvestigation(big, captureInfo);
+    assert.ok(Buffer.byteLength(text) > MAX_INVESTIGATION_BYTES);
+    assert.throws(() => writeInvestigation(dir, key, text), /bigger than 4 MiB/);
+    assert.deepEqual(readdirSync(dir), []);
+  });
+
+  await check("investigation: pruning keeps the newest by modification time, set-aside files among them, and removes temp files a write left long ago", () => {
+    const dir = mkdtempSync(join(out, "inv-prune-"));
+    const now = Date.now();
+    const keys = Array.from({ length: 5 }, (_, i) => investigationKey(Buffer.from(`capture ${i}`)));
+    keys.forEach((k, i) => {
+      writeInvestigation(dir, k, "{}");
+      const t = new Date(now - (5 - i) * 60_000);
+      utimesSync(join(dir, `${k}.json`), t, t);
+    });
+    const stale = join(dir, `.${keys[0]}.123.tmp`);
+    writeFileSync(stale, "half");
+    utimesSync(stale, new Date(now - 3_600_000), new Date(now - 3_600_000));
+    const fresh = join(dir, `.${keys[1]}.124.tmp`);
+    writeFileSync(fresh, "being written");
+    writeFileSync(join(dir, "notes.txt"), "not ours");
+    // A set-aside file counts like the others, by its age: the newest here
+    const aside = join(dir, `${keys[0]}.unreadable`);
+    writeFileSync(aside, "set aside");
+    assert.equal(pruneInvestigations(dir, 3, now), 4);
+    assert.deepEqual(readdirSync(dir).sort(), [...keys.slice(3).map((k) => `${k}.json`), `${keys[0]}.unreadable`, `.${keys[1]}.124.tmp`, "notes.txt"].sort());
+    assert.equal(pruneInvestigations(join(dir, "missing"), 3), 0);
   });
 
   await check("loopback: one port on every address, a taken port gives way to a free one, an address the machine lacks is left out", async () => {

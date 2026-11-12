@@ -6,13 +6,14 @@ import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
+import { keptSummary } from "./investigation.ts";
 import { listenLoopback } from "./loopback.ts";
 import { TargetExists, toRanges } from "./export.ts";
 import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
 import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, ForgetResult, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
@@ -116,6 +117,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
           : await viewer.deleteComments(b.frames !== undefined ? toRanges(numbers(b.frames)) : viewer.selectedOrCurrent(), "user"),
       ),
     "/api/comments/clear": async () => commentResult(await viewer.clearComments("user")),
+    "/api/forget": () => viewer.forgetKept(),
     "/api/wireshark": async (_q, b) => ({ ok: true, note: await viewer.openInWireshark(b.frame ?? null) }),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
@@ -397,6 +399,11 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
     case "/api/comments/clear": {
       const r = result as CommentResult;
       return r.count ? { level: "INFO", text: `The user deleted all packet comments (${framesText(r)})` } : null;
+    }
+    case "/api/forget": {
+      const r = result as ForgetResult;
+      const what = keptSummary(r.marks, r.timeRefs, r.comments);
+      return { level: "INFO", text: `The user had WireBuddy forget ${what || "what it kept"} of this capture: its packets read as the capture file has them` };
     }
     case "/api/columns": {
       const r = result as FilterCheck;

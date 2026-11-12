@@ -5,6 +5,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Extensions } from "./extensions.ts";
+import { investigationDir } from "./investigation.ts";
 import { removeStaleSlices } from "./livetail.ts";
 import { Viewer } from "./viewer.ts";
 import { startHttp } from "./http.ts";
@@ -113,6 +114,7 @@ const viewer = new Viewer({
   mergecap: which("mergecap") ?? "mergecap",
   extensions,
   panelRuntime: join(dirname(fileURLToPath(import.meta.url)), "../panel"),
+  investigations: investigationDir(),
 });
 // The status bar's count only: never a reason not to start
 try {

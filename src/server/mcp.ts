@@ -32,7 +32,7 @@ You and the user look at the same view: the open capture, display filter, select
 - export_packets writes the relevant packets to a new small capture file, e.g. a minimal repro for a bug report; in pcapng the packet comments go along as edited in the viewer, and your marks and their notes as packet comments too.
 - TLS payloads are only readable when the user has set a key log file in the UI; get_view_state tells you whether it is set.
 - Display filters use Wireshark display-filter syntax (tcp.port == 80), not capture/BPF syntax (tcp port 80); check_display_filter validates one without changing the view.
-- set_display_filter, goto_frame, mark_frames, time_references, packet_comments, set_columns and decode_as change what the user sees; the user gets a notice for each.
+- set_display_filter, goto_frame, mark_frames, time_references, packet_comments, set_columns and decode_as change what the user sees; the user gets a notice for each. Marks, time references and packet comments are kept with the capture (also across restarts) and come back when it is opened again, which an INFO event tells.
 - start_capture starts a live capture when the user asks for one (list_interfaces shows the interfaces and their traffic); the view follows it live, you can read and filter it while it runs, and stop_capture ends it.
 - During a live capture the user can press Now (a toolbar button, or N) when they notice something, without words: a tap asks what happened just before, holding it flags the span until they let go. It comes as a QUESTION event naming the packets, with a display filter for the time to look at in its details; the packets also get packet comments "WireBuddy Now…". Look at once, then show the answer in the user's view (goto_frame the packet that explains it, mark_frames what matters with a note) and tell them in the chat; the user saw something you can't, so ask them when what you find doesn't fit.
 - Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say which frames those are and how many newer packets the user's list shows provisionally.
@@ -134,9 +134,9 @@ function captureSettled(viewer: Viewer, ms: number): Promise<CaptureState> {
   });
 }
 
-/** What opening another capture does to the comments edited in the viewer that weren't exported, or "". */
+/** What leaving a capture did to the comments edited in the viewer and not exported, when they couldn't be kept with it; else "". */
 function discardedComments(edits: number): string {
-  return edits ? `the comments edited in ${edits} packet${edits === 1 ? "" : "s"} and not exported were discarded` : "";
+  return edits ? `the comments edited in ${edits} packet${edits === 1 ? "" : "s"} and not exported were discarded (they couldn't be kept with the capture)` : "";
 }
 
 /** A packet's comments in get_view_state: one line, the first ones in quotes and cut short, then how many more. */
@@ -354,12 +354,12 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "open_capture",
     {
-      description: "Open a pcap/pcapng file in the viewer (replaces what the user sees; keeps the display filter if it still applies).",
+      description: "Open a pcap/pcapng file in the viewer (replaces what the user sees; keeps the display filter if it still applies). The marks, time references and edited packet comments of the capture open before are kept with it, and the ones kept for this capture come back.",
       inputSchema: { path: z.string().describe("Absolute path of the capture file") },
     },
     tool(async ({ path }) => {
-      const discarded = discardedComments(viewer.state.commentEdits);
       await viewer.open(path);
+      const discarded = discardedComments(viewer.droppedEdits);
       viewer.notice(`Opened ${basename(path)}${discarded && ` (${discarded})`}`);
       const s = viewer.state;
       return `Opened ${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s${s.filter ? `, filter "${s.filter}" shows ${s.displayedFrames}` : ""}${discarded && `; ${discarded}`}`;
@@ -408,8 +408,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         }
         const edited = viewer.editedComments(MAX_COMMENT_LINES);
         if (edited.packets || edited.cleared) {
-          const kept = s.commentEdits ? `${s.commentEdits} not exported yet` : "all exported";
-          lines.push(`Packet comments edited in the viewer (${edited.packets} packets, ${kept}; only export_packets to pcapng keeps them, and filters, expert_info and query_packets fields read the file's comments):`);
+          const exported = s.commentEdits ? `${s.commentEdits} not exported yet` : "all exported";
+          lines.push(`Packet comments edited in the viewer (${edited.packets} packets, ${exported}; ${s.kept ? "kept with the capture" : "not kept with the capture on disk yet"}; only export_packets to pcapng writes them to a capture file, and filters, expert_info and query_packets fields read the file's comments):`);
           if (edited.cleared) lines.push(`  1-${edited.cleared}: all comments deleted (Delete All Packet Comments), but for the ones edited since`);
           for (const [f, cm] of edited.list) lines.push(`  ${f}: ${cm.length ? commentsLine(cm) : "(comments deleted)"}`);
           if (edited.frames > edited.list.length) lines.push(`  ... ${edited.frames - edited.list.length} more`);
@@ -679,7 +679,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     "time_references",
     {
       description:
-        "Wireshark's time references (Edit › Set/Unset Time Reference) in the user's view: the Time column shows *REF* on a reference and counts each later packet from the nearest one before it, and so do the fields frame.time_relative and frame.ref_time and the details, while display filters on frame.time_relative count from the first packet. \"set\" or \"unset\" them on frames, or \"clear\" them all. They go when another capture is opened.",
+        "Wireshark's time references (Edit › Set/Unset Time Reference) in the user's view: the Time column shows *REF* on a reference and counts each later packet from the nearest one before it, and so do the fields frame.time_relative and frame.ref_time and the details, while display filters on frame.time_relative count from the first packet. \"set\" or \"unset\" them on frames, or \"clear\" them all. They are kept with the capture and come back when it is opened again.",
       inputSchema: {
         action: z.enum(["set", "unset", "clear"]),
         frames: z.array(z.number().int().min(1)).min(1).max(5000).optional().describe("For set and unset"),
@@ -702,7 +702,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     "packet_comments",
     {
       description:
-        "Packet comments in the user's view, like Wireshark's Edit › Packet Comments: add appends comment to each frame's comments, replace sets them to just comment, delete removes all of them. The user sees them in the packet list and details at once; inspect_frame shows them. They stay in the viewer until the capture is closed or another one opened (a live capture going on in a new file too), and only export_packets to pcapng writes them to a file. Display filters on frame.comment, expert_info and query_packets fields read the comments in the file, not these, until such an export is opened.",
+        "Packet comments in the user's view, like Wireshark's Edit › Packet Comments: add appends comment to each frame's comments, replace sets them to just comment, delete removes all of them. The user sees them in the packet list and details at once; inspect_frame shows them. They are kept with the capture in WireBuddy's data folder and come back when it is opened again (a live capture going on in a new file leaves them with the earlier file), but only export_packets to pcapng writes them to a capture file. Display filters on frame.comment, expert_info and query_packets fields read the comments in the file, not these, until such an export is opened.",
       inputSchema: {
         action: z.enum(["add", "replace", "delete"]),
         frames: z.array(z.number().int().min(1)).min(1).max(5000),
@@ -988,7 +988,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       },
     },
     tool(async (a) => {
-      const discarded = discardedComments(viewer.state.commentEdits);
+      // The view opens the capture's file: kept now, or said to go
+      const discarded = viewer.state.file && !viewer.keep() ? discardedComments(viewer.state.commentEdits) : "";
       const newFile = { durationSec: a.new_file_after_seconds, packets: a.new_file_after_packets, filesizeKB: a.new_file_after_kb, intervalSec: a.new_file_every_seconds };
       const ring = Object.values(newFile).some((v) => v !== undefined) || a.ring_files !== undefined ? { ...newFile, files: a.ring_files } : null;
       const autostop = { durationSec: a.stop_after_seconds, packets: a.stop_after_packets, filesizeKB: a.stop_after_kb, files: a.stop_after_files };

@@ -35,8 +35,8 @@ with provenance: each version's npm page links to the commit and the workflow ru
   packets, change the filter, selection, marks, time references, packet comments, columns and
   Decode As entries, open, reload and close panels, open Wireshark, and write new
   `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
-  file, except one the agent exported itself in the same session and WireBuddy's own record of
-  switched-off extensions.
+  file, except one the agent exported itself in the same session and WireBuddy's own records of
+  switched-off extensions and of what is kept for each capture (below).
 - File › Export Objects and `export_objects` save files carried in the traffic only into a new
   folder they create in a directory the user or the agent names, under names made of the frame
   number and the object's name reduced to letters, digits, `.`, `_` and `-`. The new folder must
@@ -62,6 +62,24 @@ with provenance: each version's npm page links to the commit and the workflow ru
   was killed is removed by a later WireBuddy when it starts, starts a capture or writes slices
   there, but only a folder of the user's own (not a link) of a server on the same machine (host,
   boot and pid namespace) that is gone.
+- Marks with their notes, time references and packet comments edited in the viewer (by the user
+  or the agent; for an edited packet also the capture's own comments it keeps) are written to
+  WireBuddy's data folder, `$XDG_DATA_HOME/wirebuddy/investigations` or
+  `~/.local/share/wirebuddy/investigations`, one file per capture named by the SHA-256 of the
+  capture's first 4096 bytes, never next to the capture, where another user could put a forged
+  one. They stay on disk there until cleared in the viewer or forgotten with File › Forget Kept
+  Marks and Comments… (or the file is among those beyond the
+  200 changed last, pruned at startup). The folder is created `0700` and must belong to the user
+  and not be a link, else nothing is read or written there; each file is written `0600` under a
+  temporary name in that folder, created exclusively, then renamed over the old one, and read
+  only as a regular file of the user's own, not through a link, of at most 4 MiB. What is read is
+  checked whole: an unknown version, any field of the wrong type, a frame number that isn't a
+  whole number from 1, more marks, time references or commented packets than the viewer holds, a
+  note or comment longer than it allows, or a note with control characters, and nothing of the
+  file is used; the agent gets a WARNING and the file is left as it is, until something new is kept
+  for that capture: then it is first renamed to `<key>.unreadable` in the same folder (in place of
+  an older one), never read again and pruned with the others. Notes and comments read
+  back reach the page and the agent only the way the ones set in the session do.
 - Extensions are Lua code that runs as the user inside `sharkd` and the Wireshark WireBuddy
   opens. The MCP tools and the UI can test, reload and switch them on and off, not write them;
   switching one off doesn't stop the agent from testing it or switching it on again.
