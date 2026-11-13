@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -32,7 +32,7 @@ const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
-const { machineTag, interfaceSignature, availableMemory, ViewStore } = await import(join(out, "units.mjs"));
+const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { Edits, marksWith, marksWithout, toggledMarks, displayedMarks, refsWith, toggledRefs, refsChange, commentText, commentAt, MAX_MARKS, MAX_NOTE, MAX_TIME_REFS, StaleGenerationError } = await import(join(out, "units.mjs"));
@@ -1829,6 +1829,60 @@ try {
     assert.equal(edits.dropped(), 7);
     edits.left(true, 7);
     assert.equal(edits.dropped(), 0);
+  });
+  await check("packet list: rows and frames with and without a display filter and a tail, refused row ranges, clipping, startsWith", () => {
+    const tail = { frames: 5, filter: "x", held: null, listed: () => 2, indexOf: (f) => ({ 103: 0, 105: 1 })[f] ?? -1, frameAt: (i) => [103, 105][i], unchecked: (f) => f === 104 };
+    const list = new PacketList();
+    const plain = { totalFrames: 100, displayedFrames: 100, tail: null };
+    assert.equal(list.indexOf(7, plain), 6);
+    assert.equal(list.indexOf(101, plain), -1);
+    assert.equal(list.indexOf(null, plain), -1);
+    assert.deepEqual(list.framesOfRows([[0, 2], [9, 9]], plain), [[1, 3], [10, 10]]);
+    list.setDisplayed(Int32Array.from([5, 6, 9, 40]));
+    const filtered = { totalFrames: 100, displayedFrames: 4, tail: null };
+    assert.equal(list.indexOf(9, filtered), 2);
+    assert.equal(list.indexOf(7, filtered), -1);
+    assert.deepEqual(list.framesOfRows([[0, 2], [3, 3]], filtered), [[5, 6], [9, 9], [40, 40]]);
+    const live = { totalFrames: 100, displayedFrames: 4, tail };
+    assert.equal(list.known(live), 105);
+    assert.equal(list.length(live), 6);
+    assert.equal(list.indexOf(105, live), 5);
+    assert.equal(list.indexOf(104, live), -1);
+    assert.deepEqual(list.framesOfRows([[2, 5]], live), [[9, 9], [40, 40], [103, 103], [105, 105]]);
+    assert.deepEqual(list.rowFrames(live).exact, 100);
+    assert.deepEqual(Array.from({ length: 6 }, (_, i) => list.rowFrames(live).at(i)), [5, 6, 9, 40, 103, 105]);
+    assert.deepEqual(list.page(3, 10, live), { count: 3, exact: 1 });
+    assert.deepEqual(list.page(0, 1000, { totalFrames: 9000, displayedFrames: 9000, tail: null }), { count: 500, exact: 500 });
+    assert.deepEqual(list.select(105, [[4, 5]], live), { selectedIndex: 5, selectedRows: [[4, 5]] });
+    assert.deepEqual(list.select(9, undefined, live), { selectedIndex: 2, selectedRows: [[2, 2]] });
+    assert.deepEqual(list.select(null, undefined, live), { selectedIndex: -1, selectedRows: [] });
+    assert.throws(() => list.select(104, undefined, live) && list.select(104.5, undefined, live), /no frame 104.5/);
+    assert.throws(() => list.select(104, undefined, { ...live, tail: null }), /no frame 104/);
+    assert.throws(() => list.select(0, undefined, live), /no frame 0/);
+    assert.throws(() => list.checkRows([[0, 6]], live), /invalid row range \[0, 6\] \(6 rows are displayed\)/);
+    assert.throws(() => list.checkRows([[2, 1]], live), /invalid row range \[2, 1\]/);
+    assert.throws(() => list.checkRows([[-1, 1]], live), /invalid row range \[-1, 1\]/);
+    assert.throws(() => list.checkRows([[0.5, 1]], live), /invalid row range/);
+    assert.throws(() => list.checkRows(Array.from({ length: 10001 }, (_, i) => [i, i]), { totalFrames: 20000, displayedFrames: 20000, tail: null }), /at most 10000 row ranges can be selected/);
+    assert.deepEqual(list.checkRows([[3, 4], [0, 1], [1, 2]], live), [[0, 4]]);
+    // the list got shorter: the selection is cut to the rows that remain
+    assert.deepEqual(clipRanges([[0, 1], [3, 9], [12, 14]], 5), [[0, 1], [3, 4]]);
+    assert.deepEqual(list.selectedFrames([[0, 1], [3, 9]], filtered), [[5, 6], [40, 40]]);
+    assert.deepEqual(list.selectedOrCurrent({ selectedCount: 0, selectedRows: [], selected: 9 }, filtered), [[9, 9]]);
+    assert.deepEqual(list.selectedOrCurrent({ selectedCount: 0, selectedRows: [], selected: null }, filtered), []);
+    assert.deepEqual(list.selectedOrCurrent({ selectedCount: 1, selectedRows: [[0, 0]], selected: 9 }, filtered), [[5, 5]]);
+    assert.equal(list.unlisted(104, live), "not checked against the display filter yet");
+    assert.equal(list.unlisted(7, live), "hidden by the current display filter");
+    assert.equal(list.unlisted(104, { ...live, tail: { ...tail, held: "a stream index" } }), "listed once read in full, as a stream index");
+    const rows = (frames) => ({ length: frames.length, at: (i) => frames[i] });
+    assert.equal(startsWith(rows([1, 2, 3, 4]), rows([1, 2, 3])), true);
+    assert.equal(startsWith(rows([1, 2]), rows([1, 2, 3])), false);
+    assert.equal(startsWith(rows([1, 9, 3]), rows([1, 2, 3])), false);
+    assert.deepEqual(rowOf(-1), []);
+    assert.equal(listChanged({ file: "a", filter: "", generation: 5 }, { file: "a", filter: "", rowsSince: 5 }), false);
+    assert.equal(listChanged({ file: "a", filter: "", generation: 4 }, { file: "a", filter: "", rowsSince: 5 }), true);
+    assert.equal(listChanged({ file: "a", filter: "" }, { file: "a", filter: "", rowsSince: 5 }), false);
+    assert.equal(listChanged({ file: "b", filter: "" }, { file: "a", filter: "", rowsSince: 0 }), true);
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

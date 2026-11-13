@@ -21,6 +21,7 @@ import type { CapturedObject, ObjectKind } from "./objects.ts";
 import { Keeper, type KeptRead } from "./keeper.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
+import { PacketList, clipRanges, listChanged, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
@@ -119,8 +120,6 @@ export interface SharkdPhs {
 }
 
 const LIVE_RELOAD_MS = 1000;
-/** Row ranges a selection may consist of. */
-const MAX_ROW_RANGES = 10000;
 const MAX_QUESTION = 2000;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
@@ -195,8 +194,8 @@ export class Viewer extends EventEmitter {
     (watching) => this.store.set({ agent: { ...this.state.agent, watching } }),
   );
   private active = 0;
-  /** Frame numbers matching the filter; null means all frames 1..totalFrames. */
-  private displayed: Int32Array | null = null;
+  /** The frames the display filter shows, and which row is which frame. */
+  private readonly list = new PacketList();
   private mutation: Promise<unknown> = Promise.resolve();
   private reloadTimer: NodeJS.Timeout | null = null;
   private liveFailures = 0;
@@ -359,13 +358,13 @@ export class Viewer extends EventEmitter {
       live: () => this.followingCapture() && this.capture.running,
       totalFrames: () => this.state.totalFrames,
       displayed: () => ({
-        set: this.panelSet("displayed", [this.displayed, this.state.totalFrames], () => (this.displayed ? FrameSet.fromSorted(this.displayed) : FrameSet.all(this.state.totalFrames))),
+        set: this.panelSet("displayed", [this.list.shown(), this.state.totalFrames], () => (this.list.shown() ? FrameSet.fromSorted(this.list.shown()!) : FrameSet.all(this.state.totalFrames))),
         filter: this.sharkdFilter(this.state.filter),
       }),
       selected: () => {
         const s = this.state;
-        return this.panelSet("selected", [s.selectedRows, s.selected, this.displayed, s.displayedFrames], () =>
-          s.selectedCount ? FrameSet.fromRows(clipRanges(s.selectedRows, s.displayedFrames), this.displayed) : FrameSet.fromSorted(s.selected === null ? [] : [s.selected]),
+        return this.panelSet("selected", [s.selectedRows, s.selected, this.list.shown(), s.displayedFrames], () =>
+          s.selectedCount ? FrameSet.fromRows(clipRanges(s.selectedRows, s.displayedFrames), this.list.shown()) : FrameSet.fromSorted(s.selected === null ? [] : [s.selected]),
         );
       },
       marked: () => this.panelSet("marked", [this.state.marks], () => FrameSet.fromSorted(this.state.marks.map((m) => m.frame).sort((a, b) => a - b))),
@@ -497,33 +496,23 @@ export class Viewer extends EventEmitter {
     return this.tail?.active ? this.tail : null;
   }
 
+  /** What the packet list reads of the view. */
+  private geometry(): ListView {
+    return { totalFrames: this.state.totalFrames, displayedFrames: this.state.displayedFrames, tail: this.listedTail };
+  }
+
   /** Frames the view knows: read in full, then provisional ones. */
   private known(): number {
-    return this.state.totalFrames + (this.listedTail?.frames ?? 0);
+    return this.list.known(this.geometry());
   }
 
   /** Rows of the list: exact ones, then provisional ones. */
   private listLength(): number {
-    return this.state.displayedFrames + (this.listedTail?.listed() ?? 0);
+    return this.list.length(this.geometry());
   }
 
   private indexOf(frame: number | null): number {
-    if (frame === null) return -1;
-    if (frame > this.state.totalFrames) {
-      const i = this.listedTail?.indexOf(frame) ?? -1;
-      return i < 0 ? -1 : this.state.displayedFrames + i;
-    }
-    if (!this.displayed) return frame >= 1 && frame <= this.state.totalFrames ? frame - 1 : -1;
-    let lo = 0;
-    let hi = this.displayed.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      const v = this.displayed[mid];
-      if (v === frame) return mid;
-      if (v < frame) lo = mid + 1;
-      else hi = mid - 1;
-    }
-    return -1;
+    return this.list.indexOf(frame, this.geometry());
   }
 
   /**
@@ -629,7 +618,7 @@ export class Viewer extends EventEmitter {
     if (this.tail && !this.capture.running && this.tail.count <= status.frames) this.dropTail();
     if (!this.listedTail) this.paused = null;
     this.readFailed = null;
-    this.displayed = displayed;
+    this.list.setDisplayed(displayed);
     this.baseColumns = status.columns;
     this.columnFormats = (status.column_info ?? []).map((c) => c.format);
     this.loads++;
@@ -663,15 +652,9 @@ export class Viewer extends EventEmitter {
     this.store.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
   }
 
-  /** The list's rows as frame numbers, copied: exact rows (of `exact` frames read in full), then provisional ones. */
+  /** The list's rows as frame numbers, copied (see PacketList.rowFrames). */
   private rowFrames(): { exact: number; length: number; at: (i: number) => number } {
-    const displayed = this.displayed;
-    const n = this.state.displayedFrames;
-    const tail = this.listedTail;
-    const listed = tail?.listed() ?? 0;
-    const matches = tail?.filter ? Int32Array.from({ length: listed }, (_, i) => tail.frameAt(i)) : null;
-    const base = this.state.totalFrames;
-    return { exact: base, length: n + listed, at: (i) => (i < n ? (displayed ? displayed[i] : i + 1) : matches ? matches[i - n] : base + 1 + i - n) };
+    return this.list.rowFrames(this.geometry());
   }
 
   /**
@@ -854,7 +837,7 @@ export class Viewer extends EventEmitter {
       return;
     }
     tail?.rebase(0);
-    this.displayed = this.state.filter ? new Int32Array(0) : null;
+    this.list.setDisplayed(this.state.filter ? new Int32Array(0) : null);
     this.loads++;
     const known = tail?.count ?? 0;
     const selected = this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
@@ -1229,7 +1212,7 @@ export class Viewer extends EventEmitter {
       // A restarted sharkd needn't read the closed file again
       for (const e of this.engines) e.forgetFile();
       this.dropTail();
-      this.displayed = null;
+      this.list.setDisplayed(null);
       this.store.set({
         file: null,
         fileSize: 0,
@@ -1281,7 +1264,7 @@ export class Viewer extends EventEmitter {
           displayed = filter ? await matchingFrames(this.engine, refTimeFilter(filter, refs)) : null;
           held = this.listedTail ? await this.heldReason(filter) : null;
         } while (refs !== this.state.timeRefs && usesRefTime(filter));
-        this.displayed = displayed;
+        this.list.setDisplayed(displayed);
         this.listedTail?.setFilter(filter, held);
         this.store.merge({
           filter,
@@ -1317,9 +1300,10 @@ export class Viewer extends EventEmitter {
     // A list that shows its end: the rows it gains are read ahead for a while
     if (start + count >= displayedFrames + (this.state.tail?.displayed ?? 0) - WARM_ROWS) this.newestAskedAt = Date.now();
     const tail = this.listedTail;
-    count = Math.max(0, Math.min(count, 500, this.listLength() - start));
+    const shown = this.list.page(start, count, this.geometry());
+    count = shown.count;
     if (count === 0 || start < 0) return { generation, start, rows: [] };
-    const exact = Math.max(0, Math.min(count, displayedFrames - start));
+    const exact = shown.exact;
     const params = page(start, exact);
     const refs = this.state.timeRefs;
     const sharkd = refTimeFilter(filter, refs);
@@ -1407,7 +1391,7 @@ export class Viewer extends EventEmitter {
     if (!refs.length || limit <= 0) return () => [];
     let frames: Int32Array;
     if (!filter) frames = Int32Array.from({ length: Math.max(0, Math.min(limit, this.state.totalFrames - offset)) }, (_, i) => offset + 1 + i);
-    else if (filter === this.state.filter && this.displayed) frames = this.displayed.subarray(offset, offset + limit);
+    else if (filter === this.state.filter && this.list.shown()) frames = this.list.shown()!.subarray(offset, offset + limit);
     else frames = Int32Array.from(await this.engine.call<{ num: number }[]>("frames", { filter: sharkd, ...page(offset, limit), column0: "frame.number:0" }), (r) => r.num);
     return (from, to) => refsOf(refs, frames.subarray(from, to));
   }
@@ -1554,14 +1538,10 @@ export class Viewer extends EventEmitter {
    */
   select(frame: number | null, by: "user" | "agent", rows?: Ranges, view?: { file: string; filter: string; generation?: number }): void {
     // Rows clicked, or a frame found, in a list the view has replaced or changed in place since
-    if (view && (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince)) {
+    if (view && listChanged(view, this.state)) {
       throw new StaleGenerationError("the selection belongs to another view");
     }
-    if (frame !== null && (!Number.isInteger(frame) || frame < 1 || frame > this.known())) {
-      throw new Error(`no frame ${frame}`);
-    }
-    const selectedIndex = this.indexOf(frame);
-    const selectedRows = rows ? this.checkRows(rows) : rowOf(selectedIndex);
+    const { selectedIndex, selectedRows } = this.list.select(frame, rows, this.geometry());
     this.store.set({
       selected: frame,
       selectedIndex,
@@ -1575,55 +1555,27 @@ export class Viewer extends EventEmitter {
     }
   }
 
-  /** Why the list has no row for `frame`, a frame the view knows: "hidden by the current display filter", or why it isn't listed yet. */
+  /** Why the list has no row for `frame`, a frame the view knows. */
   unlisted(frame: number): string {
-    const tail = this.listedTail;
-    if (tail && frame > this.state.totalFrames) {
-      if (tail.held) return `listed once read in full, as ${tail.held}`;
-      if (tail.unchecked(frame)) return "not checked against the display filter yet";
-    }
-    return "hidden by the current display filter";
+    return this.list.unlisted(frame, this.geometry());
   }
 
-  /** Checks row ranges against the displayed list and merges them. */
   private checkRows(rows: Ranges): Ranges {
-    if (rows.length > MAX_ROW_RANGES) throw new Error(`at most ${MAX_ROW_RANGES} row ranges can be selected`);
-    const n = this.listLength();
-    for (const [a, b] of rows) {
-      if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || a > b || b >= n) throw new Error(`invalid row range [${a}, ${b}] (${n} rows are displayed)`);
-    }
-    return mergeRanges(rows);
+    return this.list.checkRows(rows, this.geometry());
   }
 
   /** Frame ranges of the user's selected rows. */
   selectedFrames(): Ranges {
-    return this.framesOfRows(clipRanges(this.state.selectedRows, this.listLength()));
+    return this.list.selectedFrames(this.state.selectedRows, this.geometry());
   }
 
-  /** Frame ranges of displayed rows, provisional ones too. */
   private framesOfRows(rows: Ranges): Ranges {
-    const displayed = this.displayed;
-    const n = this.state.displayedFrames;
-    const tail = this.listedTail;
-    // Without a filter, row i is frame i + 1 throughout
-    if (!displayed && !tail?.filter) return rows.map(([a, b]) => [a + 1, b + 1]);
-    const out: Ranges = [];
-    for (const [a, b] of rows) {
-      for (let i = a; i <= b; i++) {
-        const frame = i < n ? (displayed ? displayed[i] : i + 1) : tail!.frameAt(i - n);
-        const last = out[out.length - 1];
-        if (last && frame === last[1] + 1) last[1] = frame;
-        else out.push([frame, frame]);
-      }
-    }
-    return out;
+    return this.list.framesOfRows(rows, this.geometry());
   }
 
   /** Frames of the selected rows, else the selected frame. */
   selectedOrCurrent(): Ranges {
-    if (this.state.selectedCount) return this.selectedFrames();
-    const frame = this.state.selected;
-    return frame === null ? [] : [[frame, frame]];
+    return this.list.selectedOrCurrent(this.state, this.geometry());
   }
 
   /** Marks frames and returns the frame numbers that exist. */
@@ -1692,9 +1644,9 @@ export class Viewer extends EventEmitter {
         if (this.state.timeRefs !== before) continue;
         this.tail?.setRefs(refs);
         const generation = this.state.generation + 1;
-        const was = this.displayed;
+        const was = this.list.shown();
         if (displayed && !(was && was.length === displayed.length && was.every((f, i) => f === displayed[i]))) {
-          this.displayed = displayed;
+          this.list.setDisplayed(displayed);
           this.store.merge({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, displayedFrames: displayed.length, generation, rowsSince: generation });
           const selectedIndex = this.indexOf(this.state.selected);
           this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
@@ -2027,7 +1979,7 @@ export class Viewer extends EventEmitter {
    * `frame`) of the list `view` showed; refused once that list is gone.
    */
   framesAbout({ frame, rows, view }: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): Ranges {
-    if (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince) {
+    if (listChanged(view, this.state)) {
       throw new StaleGenerationError("the packet list changed since you chose the packets; select them again");
     }
     if (rows?.length) return this.framesOfRows(this.checkRows(rows));
@@ -2202,10 +2154,11 @@ export class Viewer extends EventEmitter {
       leftOut = known - this.state.totalFrames;
     } else if (req.filter !== undefined || req.which === "all") ranges = everything;
     else if (req.which === "displayed") {
-      ranges = this.displayed ? toRanges(this.displayed) : everything;
+      const shown = this.list.shown();
+      ranges = shown ? toRanges(shown) : everything;
       // Its provisional matches, and newer packets not checked against it
       const tail = this.listedTail;
-      if (this.displayed && tail) leftOut = tail.held ? tail.frames : tail.listed() + tail.unfiltered();
+      if (shown && tail) leftOut = tail.held ? tail.frames : tail.listed() + tail.unfiltered();
     } else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
     else if (req.which === "selected") ranges = req.about ? this.framesAbout(req.about) : this.selectedOrCurrent();
     else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), known);
@@ -2627,27 +2580,6 @@ async function framesBefore({ count, timeOf }: LiveTimes, t: number, orAt: boole
     else hi = mid - 1;
   }
   return lo;
-}
-
-/** The row at `index` alone, or no rows for -1. */
-function rowOf(index: number): Ranges {
-  return index >= 0 ? [[index, index]] : [];
-}
-
-function rowSelection(rows: Ranges): Pick<ViewState, "selectedRows" | "selectedCount"> {
-  return { selectedRows: rows, selectedCount: countRanges(rows) };
-}
-
-/** Cuts merged `ranges` to 0..n-1. */
-function clipRanges(ranges: Ranges, n: number): Ranges {
-  return ranges.filter(([a]) => a < n).map(([a, b]) => [a, Math.min(b, n - 1)]);
-}
-
-/** Whether every row of `before` shows the same frame in `after` (a growing live capture). */
-function startsWith(after: { length: number; at: (i: number) => number }, before: { length: number; at: (i: number) => number }): boolean {
-  if (after.length < before.length) return false;
-  for (let i = 0; i < before.length; i++) if (before.at(i) !== after.at(i)) return false;
-  return true;
 }
 
 /** Points out capture-filter (BPF) syntax used where a display filter belongs. */
