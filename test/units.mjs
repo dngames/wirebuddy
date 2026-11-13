@@ -19,7 +19,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n") + `\nexport { availableMemory } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`,
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -27,11 +27,14 @@ const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Shar
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
+const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
+
+const { codeSpan, cell, quote, escapeLine, checkSummary, MAX_SUMMARY_BYTES, buildFindings, checkReportTarget, writeReport, MAX_LISTED, MAX_REPORT_BYTES, TargetExists } = await import(join(out, "units.mjs"));
 
 const { check, finish } = suite();
 
@@ -1422,6 +1425,224 @@ try {
     } finally {
       await Promise.all(open.map(stop));
     }
+  });
+
+  // The findings report: text from captures, notes and comments never becomes Markdown
+  const hostile = [
+    // text, code span, table cell, blockquote
+    ["plain", "`plain`", "`plain`", "> plain"],
+    ["a`b", "``a`b``", "``a`b``", "> a\\`b"],
+    ["``x``", "``` ``x`` ```", "``` ``x`` ```", "> \\`\\`x\\`\\`"],
+    ["`", "`` ` ``", "`` ` ``", "> \\`"],
+    [" lead and trail ", "`  lead and trail  `", "`  lead and trail  `", ">  lead and trail "],
+    ["a|b", "`a|b`", "`a\\|b`", "> a\\|b"],
+    ["line1\nline2\ttab", "`line1?line2?tab`", "`line1?line2?tab`", "> line1\n> line2 tab"],
+    ["<script>alert(1)</script>", "`<script>alert(1)</script>`", "`<script>alert(1)</script>`", "> \\<script\\>alert\\(1\\)\\</script\\>"],
+    ["![x](y)", "`![x](y)`", "`![x](y)`", "> \\!\\[x\\]\\(y\\)"],
+    ["[x](javascript:alert(1))", "`[x](javascript:alert(1))`", "`[x](javascript:alert(1))`", "> \\[x\\]\\(javascript:alert\\(1\\)\\)"],
+    ["# head", "`# head`", "`# head`", "> \\# head"],
+    ["> q", "`> q`", "`> q`", "> \\> q"],
+    ["- item", "`- item`", "`- item`", "> \\- item"],
+    ["1. one", "`1. one`", "`1. one`", "> 1\\. one"],
+    ["```js", "```` ```js ````", "```` ```js ````", "> \\`\\`\\`js"],
+    ["&amp; &lt;", "`&amp; &lt;`", "`&amp; &lt;`", "> \\&amp; \\&lt;"],
+    ["nul\0x", "`nul?x`", "`nul?x`", "> nul?x"],
+    ["http://evil.example/x www.evil.com a@b.c", "`http://evil.example/x www.evil.com a@b.c`", "`http://evil.example/x www.evil.com a@b.c`", "> http\\://evil\\.example/x www\\.evil\\.com a\\@b\\.c"],
+    ["***", "`***`", "`***`", "> \\*\\*\\*"],
+    ["===", "`===`", "`===`", "> \\=\\=\\="],
+    ["a\\b", "`a\\b`", "`a\\b`", "> a\\\\b"],
+    ["", "", "", ">"],
+  ];
+  await check("findings text: code spans, table cells and quotes of hostile text read exactly as given", () => {
+    for (const [text, span, inCell, quoted] of hostile) {
+      assert.equal(codeSpan(text), span, `span of ${JSON.stringify(text)}`);
+      assert.equal(cell(text), inCell, `cell of ${JSON.stringify(text)}`);
+      assert.equal(quote(text), quoted, `quote of ${JSON.stringify(text)}`);
+    }
+  });
+  await check("findings text: a quote escapes every line, empty ones stay in it, any line break ends a line", () => {
+    assert.equal(quote("# a\n\n- b\r\n1. c\r> d\n```\n"), "> \\# a\n>\n> \\- b\n> 1\\. c\n> \\> d\n> \\`\\`\\`\n>");
+    assert.equal(escapeLine("x y\u0085z"), "x?y?z");
+  });
+  await check("findings text: in a table cell an odd number of backslashes stands before every pipe, so none ends the cell, whatever backslashes the text has there", () => {
+    assert.equal(cell("a|b"), "`a\\|b`");
+    assert.equal(cell("a\\|b"), "`a\\\\\\|b`");
+    assert.equal(cell("a\\\\|b"), "`a\\\\\\\\\\|b`");
+    for (const text of ["|", "\\|", "\\\\|", "\\\\\\| [x](javascript:alert(1))", "a|b\\|c\\\\|d", "x\\", "\\|\\|"]) {
+      const out = cell(text);
+      for (const m of out.matchAll(/(\\*)\|/g)) assert.equal(m[1].length % 2, 1, `${JSON.stringify(text)} gives ${out}`);
+    }
+  });
+  await check("findings text: no span can be closed from inside, whatever backtick runs it holds", () => {
+    for (const text of ["`", "``", "a`b``c```d", "```", "x`", "`x", "`` ` ``"]) {
+      const span = codeSpan(text);
+      const fence = /^`+/.exec(span)[0];
+      const runs = (span.slice(fence.length, -fence.length).match(/`+/g) ?? []).map((r) => r.length);
+      assert.ok(runs.every((n) => n < fence.length), `fence of ${JSON.stringify(text)}: ${span}`);
+      assert.ok(span.endsWith(fence));
+    }
+  });
+  await check("findings summary: kept as given but for trailing whitespace; a NUL, other control characters and more than 16 KiB are refused", () => {
+    assert.equal(checkSummary("## Found\n\n- tab\there \n\n"), "## Found\n\n- tab\there");
+    assert.equal(checkSummary(" \n"), "");
+    for (const bad of ["a\0b", "a\rb", "a\x1b[31mb", "a\x08b", "a\x0bb"]) assert.throws(() => checkSummary(bad), /control characters/, JSON.stringify(bad));
+    assert.equal(checkSummary("x".repeat(MAX_SUMMARY_BYTES)).length, MAX_SUMMARY_BYTES);
+    assert.throws(() => checkSummary("x".repeat(MAX_SUMMARY_BYTES + 1)), /16 KiB/);
+    assert.throws(() => checkSummary("é".repeat(MAX_SUMMARY_BYTES / 2 + 1)), /16 KiB/);
+  });
+
+  const row = (n, extra = {}) => ({ time: `0.00${n}`, source: `10.0.0.${n}`, destination: "10.0.0.9", protocol: "TCP", info: `${n} > 80 [SYN]`, ...extra });
+  const base = {
+    name: "robot.pcapng",
+    path: "/cap/robot.pcapng",
+    packets: 120,
+    bytes: 45678,
+    duration: 12.3456,
+    live: false,
+    filter: "",
+    decodeAs: [],
+    timeRefs: [],
+    version: "1.2.3",
+    at: new Date("2026-11-12T10:20:30.456Z"),
+    summary: "",
+    marks: [],
+    commented: [],
+  };
+  await check("findings report: a capture with nothing marked or commented is the heading and the facts", () => {
+    assert.equal(buildFindings(base), "# Findings: `robot.pcapng`\n\n## Capture\n- File: `/cap/robot.pcapng`\n- 120 packets, 45678 bytes, 12.346 s\n- Written by WireBuddy 1.2.3 on 2026-11-12T10:20:30Z\n");
+    assert.match(buildFindings({ ...base, packets: 1 }), /\n- 1 packet, /);
+  });
+  await check("findings report: the whole format, pinned", () => {
+    const text = buildFindings({
+      ...base,
+      live: true,
+      summary: "The arm **stalls** after each command.\n\n- evidence: packets 3 and 17\n\n",
+      filter: "tcp.port == 80",
+      decodeAs: ["udp.port 50000 → rtp", "tcp.port 9 → http"],
+      timeRefs: [3, 17],
+      marks: [
+        { frame: 3, note: "first <b>stall</b>", by: "agent", provisional: false, row: row(3) },
+        { frame: 17, note: "", by: "user", provisional: false, row: row(1, { info: "a | b `c`" }) },
+        { frame: 121, note: "newest", by: "user", provisional: true, row: null },
+      ],
+      commented: [
+        { frame: 3, comments: ["first\nsecond line\n# not a heading", "[x](javascript:alert(1))"], provisional: false, row: row(3) },
+        { frame: 122, comments: ["only known so far"], provisional: true, row: null },
+      ],
+    });
+    assert.equal(
+      text,
+      [
+        "# Findings: `robot.pcapng`",
+        "",
+        "The arm **stalls** after each command.",
+        "",
+        "- evidence: packets 3 and 17",
+        "",
+        "## Capture",
+        "- File: `/cap/robot.pcapng`",
+        "- 120 packets, 45678 bytes, 12.346 s (live capture, still running)",
+        "- Display filter: `tcp.port == 80`",
+        "- Decode As: `udp.port 50000 → rtp`, `tcp.port 9 → http`",
+        "- Time references: packets 3, 17",
+        "- Written by WireBuddy 1.2.3 on 2026-11-12T10:20:30Z",
+        "",
+        "## Marked packets",
+        "",
+        "| Packet | Time | Source | Destination | Protocol | Info | Note | By |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 3 | `0.003` | `10.0.0.3` | `10.0.0.9` | `TCP` | `3 > 80 [SYN]` | `first <b>stall</b>` | agent |",
+        "| 17 | `0.001` | `10.0.0.1` | `10.0.0.9` | `TCP` | `` a \\| b `c` `` |  | user |",
+        "| 121 (provisional) |  |  |  |  |  | `newest` | user |",
+        "",
+        "## Packet comments",
+        "",
+        "### Packet 3: `TCP` `10.0.0.3` → `10.0.0.9`",
+        "`3 > 80 [SYN]`",
+        "> first",
+        "> second line",
+        "> \\# not a heading",
+        ">",
+        "> \\[x\\]\\(javascript:alert\\(1\\)\\)",
+        "",
+        "### Packet 122 (provisional)",
+        "> only known so far",
+        "",
+      ].join("\n"),
+    );
+  });
+  await check("findings report: a single time reference is named in the singular", () => {
+    assert.match(buildFindings({ ...base, timeRefs: [5] }), /\n- Time references: packet 5\n/);
+  });
+  await check("findings report: at most 2,000 marked and 2,000 commented packets are written, one line counts the rest", () => {
+    const marks = Array.from({ length: MAX_LISTED + 5 }, (_, i) => ({ frame: i + 1, note: "", by: "user", provisional: false, row: null }));
+    const commented = Array.from({ length: MAX_LISTED + 1 }, (_, i) => ({ frame: i + 1, comments: ["c"], provisional: false, row: null }));
+    const text = buildFindings({ ...base, marks, commented });
+    assert.equal(text.split("\n").filter((l) => /^\| \d+ \|/.test(l)).length, MAX_LISTED);
+    assert.equal(text.split("\n").filter((l) => /^### Packet /.test(l)).length, MAX_LISTED);
+    assert.match(text, /\n5 more marked packets not listed\.\n/);
+    assert.match(text, /\n1 more packet with comments not listed\.\n/);
+    assert.doesNotMatch(text, /\| 2001 \|/);
+    // The caller may have counted more beyond the ones it hands over
+    const more = buildFindings({ ...base, marks: marks.slice(0, 1), moreMarks: 1, commented: commented.slice(0, 1), moreCommented: 7 });
+    assert.match(more, /\n1 more marked packet not listed\.\n/);
+    assert.match(more, /\n7 more packets with comments not listed\.\n/);
+  });
+
+  const reportDir = mkdtempSync(join(out, "report-"));
+  await check("findings report: a new file is written 0600 and whole, one that exists only with overwrite, never through a link, with no temporary file left", () => {
+    const file = join(reportDir, "one.md");
+    assert.equal(writeReport(file, "# one\n", false), 6);
+    assert.equal(readFileSync(file, "utf8"), "# one\n");
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.throws(() => writeReport(file, "# two\n", false), TargetExists);
+    assert.equal(readFileSync(file, "utf8"), "# one\n");
+    writeReport(file, "# three\n", true);
+    assert.equal(readFileSync(file, "utf8"), "# three\n");
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    // A link in the name: a new file is refused, and an overwrite refuses it as well, leaving what it points to alone
+    const target = join(reportDir, "target.txt");
+    writeFileSync(target, "mine");
+    const link = join(reportDir, "link.md");
+    symlinkSync(target, link);
+    assert.throws(() => writeReport(link, "x", false), TargetExists);
+    assert.throws(() => writeReport(link, "x", true), /is a link/);
+    assert.equal(readFileSync(target, "utf8"), "mine");
+    assert.deepEqual(readdirSync(reportDir).sort(), ["link.md", "one.md", "target.txt"]);
+  });
+  await check("findings report: more than 4 MiB is refused before anything is written", () => {
+    const file = join(reportDir, "big.md");
+    assert.throws(() => writeReport(file, "x".repeat(MAX_REPORT_BYTES + 1), false), /4 MiB/);
+    assert.equal(existsSync(file), false);
+    assert.equal(writeReport(file, "x".repeat(MAX_REPORT_BYTES), false), MAX_REPORT_BYTES);
+  });
+  await check("findings report: the target is checked as an export's is", () => {
+    const file = join(reportDir, "t.md");
+    assert.throws(() => checkReportTarget("rel.md", [], false), /must be absolute/);
+    assert.throws(() => checkReportTarget(join(reportDir, "t.txt"), [], false), /end in \.md/);
+    assert.throws(() => checkReportTarget(join(reportDir, "none", "t.md"), [], false), /no such directory/);
+    checkReportTarget(file, [], false);
+    writeFileSync(file, "x");
+    assert.throws(() => checkReportTarget(file, [], false), TargetExists);
+    checkReportTarget(file, [], true);
+    assert.throws(() => checkReportTarget(file, [file], true), /open capture/);
+    mkdirSync(join(reportDir, "dir.md"));
+    assert.throws(() => checkReportTarget(join(reportDir, "dir.md"), [], true), /not a file/);
+  });
+  await check("patch: only the fields that changed, a value rebuilt equal isn't one, and big unchanged values are never serialised", () => {
+    const marks = [{ frame: 1 }];
+    const prev = { marks, rows: [[1, 2]], filter: "", total: 3, capture: { n: 1 } };
+    const seen = [];
+    const jsonOf = (v) => (seen.push(v), JSON.stringify(v));
+    const next = { marks, rows: [[1, 2]], filter: "tcp", total: 3, capture: { n: 2 } };
+    assert.deepEqual(changedFields(prev, next, jsonOf), { filter: '"tcp"', capture: '{"n":2}' });
+    assert.ok(!seen.includes(marks));
+    assert.deepEqual(changedFields(prev, { ...prev, rows: [[1, 2]] }, jsonOf), {});
+    assert.deepEqual(changedFields(prev, { ...prev, filter: null }, jsonOf), { filter: "null" });
+    assert.deepEqual(changedFields(prev, prev, jsonOf), {});
+    assert.deepEqual(changedFields({ a: null }, { a: { b: 1 } }, jsonOf), { a: '{"b":1}' });
+    assert.deepEqual(JSON.parse(patchMessage(7, { filter: '"tcp"', capture: '{"n":2}' })), { type: "patch", seq: 7, patch: { filter: "tcp", capture: { n: 2 } } });
+    assert.deepEqual(JSON.parse(patchMessage(8, {})), { type: "patch", seq: 8, patch: {} });
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

@@ -22,9 +22,8 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { WebSocket } from "ws";
 import { chromeOrSkip } from "./chrome.mjs";
-import { apiFetch, launchChrome, sleep, suite } from "./harness.mjs";
+import { apiFetch, followState, launchChrome, sleep, suite } from "./harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const work = mkdtempSync(join(tmpdir(), "wirebuddy-live-tail-"));
@@ -183,13 +182,8 @@ try {
   });
 
   await check("a capture going on in a new file: comments edited in the last one and not exported stay with that file, the user and the agent hear so, and they are back when it is opened again", async () => {
-    const toasts = [];
-    const ws = new WebSocket(`${wb.ui.origin.replace("http", "ws")}/ws?token=${wb.ui.searchParams.get("token")}`);
-    ws.on("message", (m) => {
-      const e = JSON.parse(String(m));
-      if (e.type === "toast") toasts.push(e.text);
-    });
-    await new Promise((resolve, reject) => (ws.once("open", resolve), ws.once("error", reject)));
+    const feed = await followState(wb.ui.origin, wb.ui.searchParams.get("token"));
+    const { toasts } = feed;
     try {
       await api("/api/capture/start", { iface: "lo", filter: "burst 200 rate 50", autostop: {}, ring: { packets: 400 } });
       const first = await until("the first file", 15_000, (s) => s.file === s.capture.files[0] && s.totalFrames > 0);
@@ -212,7 +206,7 @@ try {
       assert.ok(toasts.includes(restored), toasts.join("\n"));
       await api("/api/forget", {});
     } finally {
-      ws.close();
+      feed.close();
       await api("/api/capture/stop", {}).catch(() => {});
       await until("the capture to stop", 15_000, (s) => s.capture.status === "idle");
     }

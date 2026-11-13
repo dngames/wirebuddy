@@ -1,16 +1,17 @@
-import { execFileSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import type { Transform } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createGunzip, createZstdDecompress } from "node:zlib";
-import { COLUMN_FIELD, matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
+import { COLUMN_FIELD, matchingFrames, page, Sharkd, SharkdError, SharkdExit, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
+import { fileHead, looksLikeCapture, safeSize } from "./capturefile.ts";
+import { commentsOf, hasFrame, withCommentNode, withComments, type CommentsView, type Edited, type EditedComments } from "./comments.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
+import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
+import { checkSummary } from "./markdown.ts";
 import { Extensions } from "./extensions.ts";
 import {
   INVESTIGATION_HEAD,
@@ -18,25 +19,28 @@ import {
   InvalidInvestigation,
   investigationKey,
   keptSummary,
-  MAX_INVESTIGATION_BYTES,
   nothingToKeep,
   pruneInvestigations,
   readInvestigation,
-  removeInvestigation,
-  serializeInvestigation,
-  setAsideInvestigation,
   setAsideName,
-  writeInvestigation,
   type Investigation,
 } from "./investigation.ts";
 import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
+import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
-import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
+import type { CapturedObject, ObjectKind } from "./objects.ts";
+import { Keeper } from "./keeper.ts";
+import { LuaErrors } from "./luaerrors.ts";
+import { PanelOffers } from "./offers.ts";
 import { Panels } from "./panels.ts";
+import { StaleGenerationError } from "./stale.ts";
+import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
+import { FOLLOW_LIMIT, capturedObjects, follow, saveObjects, type StreamsView } from "./streams.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
-import { launchWireshark } from "./wireshark.ts";
+import { openInWireshark } from "./wireshark.ts";
 import { entryText } from "../shared/decodeas.ts";
+import { VERSION } from "../shared/version.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   AskResult,
@@ -48,9 +52,11 @@ import type {
   EndpointRow,
   ExpertItem,
   ExtensionList,
-  ExpertSeverity,
   ExportRequest,
   ExportResult,
+  FindingsRequest,
+  FindingsResult,
+  FindingsSummary,
   FilterCheck,
   ForgetResult,
   FindResult,
@@ -94,8 +100,6 @@ export interface ExtensionTest {
   hierarchy: string[];
 }
 
-export class StaleGenerationError extends Error {}
-
 interface SharkdStatus {
   frames: number;
   duration?: number;
@@ -106,17 +110,7 @@ interface SharkdStatus {
 }
 
 /** A sharkd "frames" row: commented packets carry their comments. */
-type SharkdRow = PacketRow & { comments?: string[] };
-
-/**
- * A packet's comments as edited in the viewer, in place of the file's: the
- * first `own` of `list` are the file's own ones, all of them, unchanged (-1:
- * they aren't).
- */
-interface EditedComments {
-  list: string[];
-  own: number;
-}
+export type SharkdRow = PacketRow & { comments?: string[] };
 
 interface SharkdFrame {
   tree: TreeNode[];
@@ -127,27 +121,15 @@ interface SharkdFrame {
   fol?: [string, string | null][];
 }
 
-interface SharkdPhs {
+export interface SharkdPhs {
   proto: string;
   frames: number;
   bytes: number;
   protos?: SharkdPhs[];
 }
 
-const CONV_TAPS = { eth: "Ethernet", ipv4: "IPv4", ipv6: "IPv6", tcp: "TCP", udp: "UDP" } as const;
-export type ConvType = keyof typeof CONV_TAPS;
-export const CONV_TYPES = Object.keys(CONV_TAPS) as ConvType[];
-
-/** Bytes of payload data a follow result may carry before it is cut. */
-const FOLLOW_LIMIT = 4 * 1024 * 1024;
-/** Largest object Export Objects saves (sharkd sends it as base64 JSON). */
-const MAX_OBJECT_SAVE = 128 * 1024 * 1024;
-/** Bytes one save of objects may write. */
-const MAX_OBJECTS_SAVE = 1024 * 1024 * 1024;
 const LIVE_RELOAD_MS = 1000;
 const MAX_MARKS = 10000;
-/** Between two Wireshark launches. */
-const WIRESHARK_GAP_MS = 2000;
 /** Row ranges a selection may consist of. */
 const MAX_ROW_RANGES = 10000;
 const MAX_NOTE = 200;
@@ -156,19 +138,6 @@ const MAX_COMMENTED = 10_000;
 const MAX_COMMENT = 2000;
 /** What an investigation read back may hold: what the view can. */
 const INVESTIGATION_LIMITS = { marks: MAX_MARKS, note: MAX_NOTE, timeRefs: MAX_TIME_REFS, commented: MAX_COMMENTED, comment: MAX_COMMENT };
-/** How soon after a change the investigation is kept. */
-const KEEP_MS = 1000;
-/** Lines of a comment the details list, as Wireshark's frame.max_comment_lines. */
-const COMMENT_LINES = 30;
-/** Ranges of frames whose comments are read one by one, however big the capture. */
-const COMMENT_READS = 20;
-/** Frames a search for the commented ones costs about as much as reading one range's comments. */
-const COMMENT_READ_FRAMES = 100;
-/** Comments the list's rows carry, and characters of each. */
-const ROW_COMMENTS = 5;
-const ROW_COMMENT = 300;
-/** Wireshark's longest item label, in bytes. */
-const ITEM_LABEL_LENGTH = 240;
 const MAX_QUESTION = 2000;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
@@ -185,11 +154,6 @@ const NOW_CLOCK_MS = 5000;
 const MAX_CUSTOM_COLUMNS = 10;
 /** Longer custom column values (e.g. whole payloads) are cut to this. */
 const MAX_COLUMN_VALUE = 500;
-const MAX_IO_BUCKETS = 4000;
-/** sharkd computes the interval in 32-bit microseconds; larger intervals overflow. */
-const MAX_IO_INTERVAL = 2_000_000;
-const MAX_IO_BUCKETS_HARD = 100_000;
-const MAX_IO_GRAPHS = 4;
 const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 /** Loads tried again after extensions crashed sharkd (each crash switches one off). */
 const MAX_CRASH_RETRIES = 10;
@@ -199,10 +163,6 @@ const RESTART_WAIT_MS = 10_000;
 const MAX_LIVE_FAILURES = 3;
 /** Once a live full read takes this long, newer packets are listed provisionally until it lands. */
 const TAIL_AFTER_MS = 1000;
-/** What a sharkd holds before it reads a file. */
-const SHARKD_BASE_BYTES = 160 * 1024 * 1024;
-/** Memory a full read must leave free. */
-const MEMORY_MARGIN = 512 * 1024 * 1024;
 /** Between two reports of failing provisional rows. */
 const TAIL_PROBLEM_MS = 60_000;
 /** Provisional rows, details or filter passes that fail in a row before the tail is turned off. */
@@ -211,8 +171,6 @@ const MAX_TAIL_FAILURES = 3;
 const WARM_ROWS = 500;
 /** How long after a client last asked for the list's newest rows the rows it gains are still read ahead. */
 const FOLLOWED_MS = 3000;
-/** How often unmatched panel offers are checked again during a live capture. */
-const OFFER_LIVE_MS = 30_000;
 /** The prelude's preferences for the Decode As entries, and for how applying them went. */
 const DECODE_AS = "wirebuddy.decode_as";
 const DECODE_AS_STATUS = "wirebuddy.decode_as_status";
@@ -229,7 +187,7 @@ const DECODE_AS_STATUS = "wirebuddy.decode_as_status";
  */
 export class Viewer extends EventEmitter {
   private engines: [Sharkd, Sharkd];
-  /** Files the agent exported in this session: the only ones it may overwrite. */
+  /** Files the agent exported or wrote as findings reports in this session: the only ones it may overwrite. */
   private readonly agentExports = new Set<string>();
   private wiresharkAt = 0;
   /** Lua dissector extensions sharkd and Wireshark load. */
@@ -242,23 +200,11 @@ export class Viewer extends EventEmitter {
   private readonly panelData: PanelData;
   /** Why the epoch changed last, for the panels' reset. */
   private epochWhy = "file";
-  /** Panel offers for the open file: matched ones (with their filter), invalid filters, dismissed ones. */
-  private offerFile: string | null = null;
-  private readonly offerMatched = new Map<string, { offer: PanelOffer; filter: string }>();
-  private readonly offerErrors = new Map<string, { filter: string; error: string }>();
-  private readonly offerDismissed = new Set<string>();
-  private offerSeq = 0;
-  private offerRun: Promise<void> = Promise.resolve();
-  private offerTimer: NodeJS.Timeout | null = null;
-  /** Offer filters that matched no packet of the file up to a frame, for the file and epoch they were checked with. */
-  private offerChecked = { file: "", epoch: -1, to: new Map<string, number>() };
   /** Inode and first bytes of the file read last: another file at the same path, or other first bytes, is a rewritten capture. */
   private loadedIno = 0;
   private loadedHead: Buffer = Buffer.alloc(0);
   /** sharkd starts an extension crashed; a load is retried after each. */
   private extensionCrashes = 0;
-  /** Lua errors the extensions reported for the open file, told to the agent in batches. */
-  private luaErrs = { file: "", frames: new Set<number>(), more: false, told: 0, example: null as LuaError | null, timer: null as NodeJS.Timeout | null, since: 0 };
   private readonly sharkdBin: string;
   /** Problems and user activity for the agent. */
   readonly events = new EventLog(
@@ -277,6 +223,63 @@ export class Viewer extends EventEmitter {
   private readonly profile: string | undefined;
   private readonly editcap: string;
   private readonly mergecap: string;
+  /** Lua errors of the open file, told to the agent in batches. */
+  private readonly luaBatches = new LuaErrors({
+    file: () => this.state.file,
+    report: (text) => this.events.add("ERROR", text),
+  });
+  /** The panels offered for the open file. */
+  private readonly offers = new PanelOffers({
+    state: () => this.state,
+    set: (patch) => this.set(patch),
+    offers: () => this.extensions.offers(),
+    checkFilter: (filter) => this.checkFilter(filter),
+    warn: (text) => this.events.add("WARNING", text),
+    capturing: () => this.capture.running,
+    followingCapture: () => this.followingCapture(),
+    heldReason: (filter) => this.heldReason(filter),
+    liveTail: () => this.tail,
+    tailWorked: (tail) => this.tailWorked(tail),
+    tailFailed: (tail, err) => this.tailFailed(tail, err),
+    memoryShort: () => this.memoryShort(),
+    anyMatch: (filters, release) => this.panelData.anyMatch(filters, release),
+    isOpen: (name) => this.panels.isOpen(name),
+  });
+  /** What reading the comments asks of this viewer. */
+  private readonly commentsView: CommentsView = {
+    totalFrames: () => this.state.totalFrames,
+    fileCommentsKnown: () => this.commentedFrames?.loads === this.loads,
+    fileCommented: () => this.fileCommented(),
+    engine: () => this.engine,
+    listedTail: () => this.listedTail,
+    rowView: () => this.rowView(),
+  };
+  /** The investigation kept for the open capture. */
+  private readonly keeper = new Keeper({
+    dir: () => this.investigations,
+    state: () => this.state,
+    set: (patch) => this.set(patch),
+    investigation: () => this.investigation(),
+    loadedHead: () => this.loadedHead,
+    growing: (file) => this.capture.running && this.capture.state.currentFile === file,
+    warn: (text) => this.events.add("WARNING", text),
+  });
+  /** What Follow Stream and Export Objects ask of this viewer. */
+  private readonly streamsView: StreamsView = {
+    engine: () => this.engine,
+    requireFile: () => this.requireFile(),
+    codeFolders: () => this.extensions.codeFolders(),
+    notice: (text) => this.notice(text),
+  };
+  /** What the statistics and Find ask of this viewer. */
+  private readonly statsView: StatsView = {
+    engine: () => this.engine,
+    state: () => this.state,
+    requireFile: () => this.requireFile(),
+    checkFilter: (filter) => this.checkFilter(filter),
+    sharkdFilter: (filter) => this.sharkdFilter(filter),
+    indexOf: (frame) => this.indexOf(frame),
+  };
   /** Columns sharkd reports for the open file, before custom ones. */
   private baseColumns: string[] = [];
   /** Their formats (%m the number, %i Info). */
@@ -337,15 +340,6 @@ export class Viewer extends EventEmitter {
   private commentedFrames: { loads: number; frames: Int32Array } | null = null;
   /** Where the marks, time references and edited comments of each capture are kept; null: nowhere. */
   private readonly investigations: string | null;
-  /** What the open capture's investigation file holds, as this server wrote or read it: its key, and its content ("" for none). */
-  private kept = { key: "", content: "" };
-  private keepTimer: NodeJS.Timeout | null = null;
-  /** What the last save looked at: a change to any of these is saved shortly after. */
-  private keptOf: unknown[] = [];
-  /** Problems with keeping investigations already told to the agent. */
-  private readonly keepTold = new Set<string>();
-  /** Keys whose file this server refused to read: set aside before anything is written over it. */
-  private readonly refused = new Set<string>();
   /** Packets whose comments were edited and not exported in the capture the view left last, if they weren't kept; else 0. */
   droppedEdits = 0;
   readonly capture: Capture;
@@ -372,7 +366,7 @@ export class Viewer extends EventEmitter {
     this.panels = new Panels(this.extensions, this.events, opts.panelRuntime ?? "");
     this.panels.on("change", () => {
       this.set({ panels: this.panels.list() });
-      this.showOffers();
+      this.offers.showOffers();
     });
     this.sharkdBin = opts.sharkd ?? "sharkd";
     const env = () => this.extensions.env();
@@ -386,7 +380,7 @@ export class Viewer extends EventEmitter {
         this.events.add("WARNING", printable(message) + hint);
       };
       e.onLua = (report) => this.luaReport(report);
-      e.onLuaError = (error) => this.luaError(error);
+      e.onLuaError = (error) => this.luaBatches.luaError(error);
     }
     const source: PanelSource = {
       view: () => this.panelView(),
@@ -474,7 +468,7 @@ export class Viewer extends EventEmitter {
     this.capture.on("stopped", () => {
       this.captureStoppedAt = Date.now();
       // A capture shorter than the head that names it is kept once it stopped growing
-      this.keepSoon();
+      this.keeper.keepSoon();
       if (this.reloadTimer) clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
       if (!this.followingCapture()) return;
@@ -486,18 +480,18 @@ export class Viewer extends EventEmitter {
           this.finalRead = false;
           this.publishTail();
         })
-        .then(() => this.checkOffers(false), () => {});
+        .then(() => this.offers.checkOffers(false), () => {});
     });
     this.investigations = opts.investigations ?? null;
     if (this.investigations) {
       try {
         pruneInvestigations(this.investigations);
       } catch (err) {
-        this.keepProblem(`Could not prune the investigations kept in ${this.investigations}: ${(err as Error).message}`);
+        this.keeper.keepProblem(`Could not prune the investigations kept in ${this.investigations}: ${(err as Error).message}`);
       }
     }
     this.on("state", () => {
-      if (this.keepingOf().some((v, i) => v !== this.keptOf[i])) this.keepSoon();
+      if (this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.keeper.keepSoon();
     });
   }
 
@@ -513,7 +507,7 @@ export class Viewer extends EventEmitter {
   private set(patch: Partial<ViewState>): void {
     this.state = { ...this.state, ...patch };
     // Changed since it was last kept: not kept until the next save
-    if (this.state.kept && this.keepingOf().some((v, i) => v !== this.keptOf[i])) this.state = { ...this.state, kept: false };
+    if (this.state.kept && this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.state = { ...this.state, kept: false };
     this.emit("state", this.state);
   }
 
@@ -763,8 +757,8 @@ export class Viewer extends EventEmitter {
         // A live capture's file may not have its header yet
         if (!this.capture.state.files.includes(file) && !(await looksLikeCapture(file))) throw new Error(`not a capture file: ${file}`);
         // Kept first: reopened, the capture (or a copy) comes back as it is now
-        this.keepNow();
-        const read = this.kept;
+        this.keeper.keepNow();
+        const read = this.keeper.kept;
         const head = fileHead(file);
         let kept = this.keptFor(file, head);
         const refs = kept.investigation?.timeRefs ?? [];
@@ -779,9 +773,9 @@ export class Viewer extends EventEmitter {
         // The filter may not apply to this capture's protocols; then it shows everything
         const result = await this.loadInto(this.engines[standby], file, filter, refs, true);
         filter = result.filter;
-        const keptLast = this.keepNow();
+        const keptLast = this.keeper.keepNow();
         // Changed while this one loaded, and the same capture: what it has now (rows read with the references they have anyway)
-        if (kept.key && this.kept.key === kept.key && this.kept !== read) kept = this.keptFor(file, head);
+        if (kept.key && this.keeper.kept.key === kept.key && this.keeper.kept !== read) kept = this.keptFor(file, head);
         this.active = standby;
         this.forgetTypes();
         this.lastReadMs = 0;
@@ -804,7 +798,7 @@ export class Viewer extends EventEmitter {
           this.events.add("WARNING", text);
           this.emit("toast", "error", text);
         }
-        void this.checkOffers(true);
+        void this.offers.checkOffers(true);
       } catch (err) {
         const message = printable((err as Error).message);
         this.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
@@ -875,7 +869,7 @@ export class Viewer extends EventEmitter {
     this.applyLoad(file, result.filter, result, true, { changed: result.rolledBack ? "extensions" : rewritten ? "rewritten" : null, redissected: redissect, untrusted, held });
     this.loadedIno = ino;
     // A live capture's first bytes are all there now: what it has can be kept
-    if (head.length > this.loadedHead.length) this.keepSoon();
+    if (head.length > this.loadedHead.length) this.keeper.keepSoon();
     this.loadedHead = head;
     if (redissect || result.rolledBack) void this.filterTail();
     if (result.rolledBack) {
@@ -1301,8 +1295,8 @@ export class Viewer extends EventEmitter {
 
   close(): Promise<void> {
     return this.exclusive(async () => {
-      this.droppedEdits = this.keepNow() ? 0 : this.state.commentEdits;
-      this.kept = { key: "", content: "" };
+      this.droppedEdits = this.keeper.keepNow() ? 0 : this.state.commentEdits;
+      this.keeper.kept = { key: "", content: "" };
       // A restarted sharkd needn't read the closed file again
       for (const e of this.engines) e.forgetFile();
       this.dropTail();
@@ -1328,7 +1322,7 @@ export class Viewer extends EventEmitter {
         epoch: this.newEpoch("closed"),
         tail: null,
       });
-      void this.checkOffers(true);
+      void this.offers.checkOffers(true);
     });
   }
 
@@ -1920,7 +1914,7 @@ export class Viewer extends EventEmitter {
       this.dropComments();
       this.set({ marks: [], commentEdits: this.editCount(), commentsEdited: 0, commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
     });
-    this.keepNow();
+    this.keeper.keepNow();
     return gone;
   }
 
@@ -2028,33 +2022,8 @@ export class Viewer extends EventEmitter {
     return this.unexported.size + this.clearedFrames.length - both;
   }
 
-  /** The comments `frames` (frames the view knows, ascending) have now: as edited here, else the file's. */
   private async commentsOf(frames: number[]): Promise<Map<number, EditedComments>> {
-    const out = new Map<number, EditedComments>();
-    const file = (f: number, list: string[]): void => void out.set(f, { list, own: list.length });
-    const read = this.state.totalFrames;
-    const exact: number[] = [];
-    const later: number[] = [];
-    for (const f of frames) {
-      const edited = this.comments.get(f);
-      if (edited) out.set(f, edited);
-      else if (f <= this.cleared) out.set(f, { list: [], own: 0 });
-      else (f <= read ? exact : later).push(f);
-    }
-    let ranges = toRanges(exact);
-    // Many ranges of a small capture: only the frames with comments are read
-    if (ranges.length > COMMENT_READS && (this.commentedFrames?.loads === this.loads || ranges.length * COMMENT_READ_FRAMES > read)) {
-      const commented = await this.fileCommented();
-      for (const f of exact) file(f, []);
-      ranges = toRanges(exact.filter((f) => hasFrame(commented, f)));
-    }
-    const engine = this.engine;
-    for (const [a, b] of ranges) {
-      for (const r of await engine.call<SharkdRow[]>("frames", { ...page(a - 1, b - a + 1), column0: "frame.number:0" })) file(r.num, r.comments ?? []);
-    }
-    const tail = this.listedTail;
-    if (later.length && tail) for (const r of await tail.rowsOf(later, await this.rowView())) file(r.num, r.cm ?? []);
-    return out;
+    return commentsOf(this.commentsView, this.edited(), frames);
   }
 
   /** Frames read in full that have comments in the file. */
@@ -2066,33 +2035,16 @@ export class Viewer extends EventEmitter {
     return frames;
   }
 
-  /** The comments edited here in place of frame `num`'s, or null. */
-  private editedOf(num: number): string[] | null {
-    return this.comments.get(num)?.list ?? (num <= this.cleared ? [] : null);
-  }
-
-  /** `rows` with their comments as edited here; `short`: as the list's rows carry them. */
   private withComments(rows: PacketRow[], short = false): PacketRow[] {
-    if (!this.comments.size && !this.cleared && !short) return rows;
-    return rows.map((r) => {
-      const { cm: file, ...row } = r;
-      const cm = this.editedOf(r.num) ?? file;
-      if (!cm?.length) return row;
-      return { ...row, cm: short ? cm.slice(0, ROW_COMMENTS).map((c) => (c.length > ROW_COMMENT ? `${c.slice(0, ROW_COMMENT - 1)}…` : c)) : cm };
-    });
+    return withComments(rows, this.edited(), short);
   }
 
-  /** Frame `num`'s `tree` with its comments as edited here, in Wireshark's "Packet comments" node. */
   private withCommentNode(num: number, tree: TreeNode[]): TreeNode[] {
-    const node = tree.find((n) => n.fn === "pkt_comment");
-    // As sharkd's own comment nodes expand
-    if (node?.e !== undefined) this.commentEtts.node = node.e;
-    const item = node?.n?.find((n) => n.e !== undefined);
-    if (item?.e !== undefined) this.commentEtts.item = item.e;
-    const cm = this.editedOf(num);
-    if (!cm) return tree;
-    const rest = tree.filter((n) => n !== node);
-    return cm.length ? [commentTree(cm, this.commentEtts), ...rest] : rest;
+    return withCommentNode(num, tree, this.edited(), this.commentEtts);
+  }
+
+  private edited(): Edited {
+    return { comments: this.comments, cleared: this.cleared };
   }
 
   /** Drops the comments edited for frames after `last`; what the state says then. */
@@ -2133,7 +2085,7 @@ export class Viewer extends EventEmitter {
     try {
       return { key, investigation: readInvestigation(dir, key, INVESTIGATION_LIMITS), problem: null };
     } catch (err) {
-      if (err instanceof InvalidInvestigation) this.refused.add(key);
+      if (err instanceof InvalidInvestigation) this.keeper.refused.add(key);
       return { key, investigation: null, problem: (err as Error).message };
     }
   }
@@ -2154,13 +2106,13 @@ export class Viewer extends EventEmitter {
   /** Tells what came back of the investigation kept for `file` (under `key`), or why nothing did. */
   private restored(file: string, key: string, problem: string | null): void {
     const inv = this.investigation();
-    this.kept = { key, content: key && !problem && !nothingToKeep(inv) ? investigationContent(inv) : "" };
-    this.keptOf = this.keepingOf();
+    this.keeper.kept = { key, content: key && !problem && !nothingToKeep(inv) ? investigationContent(inv) : "" };
+    this.keeper.keptOf = this.keeper.keepingOf();
     // What the view has is what is kept: nothing, or what was read
     if (this.state.kept !== !!key) this.set({ kept: !!key });
     if (problem) {
       const dir = this.investigations!;
-      const aside = this.refused.has(key) ? `; it stays as it is until something is kept for this capture, then it is moved to ${setAsideName(dir, key)}` : "";
+      const aside = this.keeper.refused.has(key) ? `; it stays as it is until something is kept for this capture, then it is moved to ${setAsideName(dir, key)}` : "";
       this.events.add("WARNING", `The marks, time references and packet comments kept for ${basename(file)} were not restored: ${problem} (${join(dir, `${key}.json`)})${aside}`);
       return;
     }
@@ -2187,93 +2139,9 @@ export class Viewer extends EventEmitter {
     };
   }
 
-  /** The name of the open capture's investigation; null while a live capture still grows into the bytes that name it. */
-  private captureKey(): string | null {
-    const file = this.state.file;
-    let head = this.loadedHead;
-    if (!file || !head.length) return null;
-    if (head.length < INVESTIGATION_HEAD) {
-      if (this.capture.running && this.capture.state.currentFile === file) return null;
-      // A file that stopped growing: its first bytes as they are now, if they go on from the ones read
-      const now = fileHead(file);
-      if (!now.subarray(0, head.length).equals(head)) return null;
-      head = now;
-    }
-    return investigationKey(head);
-  }
-
   /** Keeps the open capture's marks, time references and comment edits now; whether they are kept (see ViewState.kept). */
   keep(): boolean {
-    return this.keepNow();
-  }
-
-  /** Keeps the investigation a second after a change, at most once a second. */
-  private keepSoon(): void {
-    if (!this.investigations || this.keepTimer) return;
-    this.keepTimer = setTimeout(() => {
-      this.keepTimer = null;
-      this.keepNow();
-    }, KEEP_MS);
-    this.keepTimer.unref();
-  }
-
-  /**
-   * Keeps the open capture's marks, time references and edited comments
-   * now, or removes its file when nothing is left to keep; returns whether
-   * they are kept (or there is nothing to keep).
-   */
-  private keepNow(): boolean {
-    if (this.keepTimer) clearTimeout(this.keepTimer);
-    this.keepTimer = null;
-    const kept = this.keepNowIn();
-    if (this.state.kept !== kept) this.set({ kept });
-    return kept;
-  }
-
-  /** What changes make the view's investigation one to keep again. */
-  private keepingOf(): unknown[] {
-    const s = this.state;
-    return [s.file, s.marks, s.timeRefs, s.commentRevision, s.commentEdits];
-  }
-
-  private keepNowIn(): boolean {
-    const dir = this.investigations;
-    const file = this.state.file;
-    this.keptOf = this.keepingOf();
-    if (!dir || !file) return false;
-    const key = this.captureKey();
-    if (!key) return false;
-    const inv = this.investigation();
-    const content = nothingToKeep(inv) ? "" : investigationContent(inv);
-    if (key === this.kept.key && content === this.kept.content) return true;
-    try {
-      // A file this server couldn't read goes aside first, not lost
-      if (this.refused.has(key)) {
-        setAsideInvestigation(dir, key);
-        this.refused.delete(key);
-      }
-      if (!content) removeInvestigation(dir, key);
-      else {
-        const text = serializeInvestigation(inv, { path: file, size: this.state.fileSize, frames: this.state.totalFrames });
-        if (Buffer.byteLength(text) > MAX_INVESTIGATION_BYTES) {
-          this.keepProblem(`The marks, time references and packet comments of ${basename(file)} take more than ${MAX_INVESTIGATION_BYTES / 1024 / 1024} MiB, too much to keep: they stay only until the capture is closed or another one opened`, key);
-          return false;
-        }
-        writeInvestigation(dir, key, text);
-      }
-      this.kept = { key, content };
-      return true;
-    } catch (err) {
-      this.keepProblem(`Could not keep the marks, time references and packet comments of ${basename(file)} in ${dir}: ${(err as Error).message}`);
-      return false;
-    }
-  }
-
-  /** A WARNING for the agent, once for each problem (or `once` key). */
-  private keepProblem(text: string, once = text): void {
-    if (this.keepTold.has(once)) return;
-    this.keepTold.add(once);
-    this.events.add("WARNING", text);
+    return this.keeper.keepNow();
   }
 
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
@@ -2458,145 +2326,32 @@ export class Viewer extends EventEmitter {
     this.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
   }
 
-  /** sharkd tap parameters, limited to `filter` when given. */
-  private async tapParams(tap: string, filter?: string): Promise<Record<string, unknown>> {
-    this.requireFile();
-    if (!filter?.trim()) return { tap0: tap };
-    const check = await this.checkFilter(filter);
-    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-    return { tap0: tap, filter: this.sharkdFilter(filter.trim()) };
-  }
-
   async phs(filter?: string): Promise<PhsNode[]> {
-    const r = await this.engine.call<{ taps: { protos: SharkdPhs[] }[] }>("tap", await this.tapParams("phs", filter));
-    const map = (p: SharkdPhs): PhsNode => ({
-      proto: p.proto,
-      frames: p.frames,
-      bytes: p.bytes,
-      children: (p.protos ?? []).map(map),
-    });
-    return (r.taps[0]?.protos ?? []).map(map);
+    return phs(this.statsView, filter);
   }
 
   async conversations(type: ConvType, filter?: string): Promise<ConvRow[]> {
-    const r = await this.engine.call<{ taps: { convs?: Record<string, never>[] }[] }>("tap", await this.tapParams(`conv:${CONV_TAPS[type]}`, filter));
-    return (r.taps[0]?.convs ?? []).map((c: Record<string, any>) => ({
-      addrA: c.saddr,
-      portA: c.sport,
-      addrB: c.daddr,
-      portB: c.dport,
-      framesAB: c.txf,
-      bytesAB: c.txb,
-      framesBA: c.rxf,
-      bytesBA: c.rxb,
-      start: c.start,
-      duration: c.stop - c.start,
-      filter: c.filter,
-    }));
+    return conversations(this.statsView, type, filter);
   }
 
   async endpoints(type: ConvType, filter?: string): Promise<EndpointRow[]> {
-    const r = await this.engine.call<{ taps: { hosts?: Record<string, never>[] }[] }>("tap", await this.tapParams(`endpt:${CONV_TAPS[type]}`, filter));
-    return (r.taps[0]?.hosts ?? []).map((h: Record<string, any>) => ({
-      addr: h.host,
-      port: h.port,
-      framesTx: h.txf,
-      bytesTx: h.txb,
-      framesRx: h.rxf,
-      bytesRx: h.rxb,
-      filter: h.filter,
-    }));
+    return endpoints(this.statsView, type, filter);
   }
 
   async expert(filter?: string): Promise<ExpertItem[]> {
-    const r = await this.engine.call<{ taps: { details?: { f: number; s: string; g: string; p: string; m: string }[] }[] }>(
-      "tap",
-      await this.tapParams("expert", filter),
-    );
-    return (r.taps[0]?.details ?? [])
-      // Lua dissectors can put packet bytes into messages
-      .map((d) => ({ frame: d.f, severity: d.s as ExpertSeverity, group: printable(d.g), protocol: printable(d.p), message: printable(d.m) }))
-      .sort((a, b) => a.frame - b.frame);
+    return expert(this.statsView, filter);
   }
 
-  /**
-   * Packets, bytes or bits per interval for up to four filters. The interval
-   * grows when the capture would need more than MAX_IO_BUCKETS buckets.
-   */
   async ioGraph(specs: IoGraphSpec[], intervalMs: number): Promise<IoGraphResult> {
-    this.requireFile();
-    if (!specs.length || specs.length > MAX_IO_GRAPHS) throw new Error(`give 1 to ${MAX_IO_GRAPHS} graphs`);
-    if (!Number.isFinite(intervalMs) || intervalMs < 1) throw new Error("the interval must be at least 1 ms");
-    const params: Record<string, unknown> = {};
-    for (const [i, g] of specs.entries()) {
-      if (g.metric !== "packets" && g.metric !== "bytes" && g.metric !== "bits") throw new Error(`unknown metric "${g.metric}"`);
-      params[`graph${i}`] = g.metric;
-      const filter = (g.filter ?? "").trim();
-      if (filter) {
-        const check = await this.checkFilter(filter);
-        if (!check.ok) throw new Error(`invalid display filter "${filter}": ${check.error}`);
-        params[`filter${i}`] = this.sharkdFilter(filter);
-      }
-    }
-    const spanUs = Math.max(Math.round(this.state.duration * 1e6), 1);
-    const interval = Math.min(niceInterval(Math.max(Math.round(intervalMs), Math.ceil(spanUs / 1000 / MAX_IO_BUCKETS))), MAX_IO_INTERVAL);
-    const buckets = Math.floor(spanUs / (interval * 1000)) + 1;
-    if (buckets > MAX_IO_BUCKETS_HARD) throw new Error("the capture spans too much time for an I/O graph (check for packets with bogus timestamps)");
-    const r = await this.engine.call<{ iograph: { items?: (number | string)[] }[] }>("iograph", { interval, ...params });
-    return {
-      interval,
-      series: specs.map((g, i) => ({ metric: g.metric, filter: (g.filter ?? "").trim(), values: denseItems(r.iograph[i]?.items ?? [], buckets) })),
-    };
+    return ioGraph(this.statsView, specs, intervalMs);
   }
 
-  /** First frame at or after `seconds` since the first frame (and before `until`, if given), within the display filter. */
   async frameAt(seconds: number, until?: number): Promise<number | null> {
-    this.requireFile();
-    if (!Number.isFinite(seconds) || seconds < 0) throw new Error("time must be a non-negative number of seconds");
-    if (until !== undefined && !(Number.isFinite(until) && until > seconds)) throw new Error("until must be a time after t");
-    const at = `frame.time_relative >= ${seconds.toFixed(9)}${until === undefined ? "" : ` && frame.time_relative < ${until.toFixed(9)}`}`;
-    return this.firstMatching(this.engine, this.state.filter ? `(${this.sharkdFilter(this.state.filter)}) && ${at}` : at);
+    return frameAt(this.statsView, seconds, until);
   }
 
-  private async firstMatching(engine: Sharkd, filter: string): Promise<number | null> {
-    const rows = await engine.call<{ num: number }[]>("frames", { filter, ...page(0, 1), column0: "frame.number:0" });
-    return rows[0]?.num ?? null;
-  }
-
-  /**
-   * Find Packet: the first displayed frame after `from` (dir 1) or the last
-   * one before it (dir -1) matching `filter`, else the first (last) one
-   * overall. `from` 0 searches the whole list without wrapping.
-   */
   async find(filter: string, from: number, dir: number): Promise<FindResult> {
-    this.requireFile();
-    if (dir !== 1 && dir !== -1) throw new Error("dir must be 1 or -1");
-    if (!Number.isInteger(from) || from < 0) throw new Error("from must be a frame number, or 0 for none");
-    filter = filter.trim();
-    if (!filter) throw new Error("no display filter to find");
-    const check = await this.checkFilter(filter);
-    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-    const engine = this.engine;
-    const { file, filter: view } = this.state;
-    const match = this.sharkdFilter(view ? `(${view}) && (${filter})` : `(${filter})`);
-    let frame: number | null;
-    let wrapped = false;
-    if (dir === 1) {
-      frame = await this.firstMatching(engine, from ? `${match} && frame.number > ${from}` : match);
-      if (frame === null && from) {
-        frame = await this.firstMatching(engine, match);
-        wrapped = frame !== null;
-      }
-    } else {
-      const frames = await matchingFrames(engine, match);
-      const last = frames.length ? frames[frames.length - 1] : null;
-      const before = from ? (frames.findLast((f) => f < from) ?? null) : last;
-      frame = before ?? last;
-      wrapped = before === null && last !== null;
-    }
-    // Live reloads keep frame numbers; another file or filter does not
-    if (this.state.file !== file || this.state.filter !== view) throw new StaleGenerationError("the view changed during the search");
-    return { frame, index: this.indexOf(frame), wrapped };
+    return find(this.statsView, filter, from, dir);
   }
 
   /** Reads the keylog file Wireshark's own preferences may already set. */
@@ -2640,7 +2395,7 @@ export class Viewer extends EventEmitter {
       this.set({ epoch: this.newEpoch(why) });
       this.panelData.hold(false);
       // A panel's offer may need a protocol only this brings
-      void this.checkOffers(true);
+      void this.offers.checkOffers(true);
     }
   }
 
@@ -2776,148 +2531,124 @@ export class Viewer extends EventEmitter {
     return { path: req.path, frames, size, comments: marks, ...(edited ? { edited } : {}), ...(leftOut ? { leftOut } : {}), ...(provisional ? { provisional } : {}) };
   }
 
-  async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
-    this.requireFile();
-    const r = await this.engine.call<{
-      shost: string;
-      sport: string;
-      chost: string;
-      cport: string;
-      payloads?: { n: number; d: string; s?: number }[];
-    }>("follow", { follow: proto, filter });
-    if (r.shost === "NONE" && r.chost === "NONE" && !r.payloads?.length) throw new Error(`no ${proto} stream matches ${filter}`);
-    const payloads: FollowResult["payloads"] = [];
-    let total = 0;
-    let omittedBytes = 0;
-    let serverBytes = 0;
-    let clientBytes = 0;
-    for (const p of r.payloads ?? []) {
-      const data = Buffer.from(p.d, "base64");
-      if (p.s) serverBytes += data.length;
-      else clientBytes += data.length;
-      const room = limit - total;
-      if (room <= 0) {
-        omittedBytes += data.length;
-        continue;
-      }
-      const part = data.length > room ? data.subarray(0, room) : data;
-      omittedBytes += data.length - part.length;
-      total += part.length;
-      payloads.push({ frame: p.n, server: !!p.s, data: part === data ? p.d : part.toString("base64") });
-    }
-    return {
-      proto,
-      filter,
-      server: { host: r.shost, port: r.sport, bytes: serverBytes },
-      client: { host: r.chost, port: r.cport, bytes: clientBytes },
-      payloads,
-      truncated: omittedBytes > 0,
-      omittedBytes,
-    };
+  /**
+   * The packets a findings report lists: the marked ones, and the ones with
+   * comments as the viewer shows them (edited here, else the file's, of
+   * packets read in full), each in frame order.
+   */
+  private async findingsFrames(): Promise<{ marks: Mark[]; commented: number[] }> {
+    const marks = [...this.state.marks].sort((a, b) => a.frame - b.frame);
+    const frames = new Set<number>();
+    for (const [f, e] of this.comments) if (e.list.length) frames.add(f);
+    for (const f of await this.fileCommented()) if (f > this.cleared && !this.comments.has(f)) frames.add(f);
+    return { marks, commented: [...frames].sort((a, b) => a - b) };
   }
 
-  /** Files carried in the traffic (Wireshark's Export Objects) of `kind`. */
-  async capturedObjects(kind: ObjectKind, engine = this.engine): Promise<CapturedObject[]> {
+  /** What a findings report would list now: marked packets and packets with comments. */
+  async findingsSummary(): Promise<FindingsSummary> {
     this.requireFile();
-    type Eo = { pkt: number; hostname?: string; type?: string; filename?: string; _download: string; len: number; sha1?: string };
-    const r = await engine.call<{ taps?: { objects?: Eo[] }[] }>("tap", { tap0: `eo:${kind}` });
-    return (r.taps?.[0]?.objects ?? []).map((o) => ({
-      frame: o.pkt,
-      host: o.hostname ?? "",
-      type: o.type ?? "",
-      filename: o.filename ?? "",
-      size: o.len,
-      sha1: o.sha1 ?? "",
-      token: o._download,
-    }));
+    const { marks, commented } = await this.findingsFrames();
+    return { marks: marks.length, commented: commented.length };
+  }
+
+  /** What the packet list shows of frame `num`: its time, source, destination, protocol and info. */
+  private async rowSummary(num: number): Promise<RowSummary | null> {
+    const row = await this.row(num);
+    if (!row) return null;
+    const at = (name: string): string => row.c[this.state.columns.indexOf(name)] ?? "";
+    return { time: at("Time"), source: at("Source"), destination: at("Destination"), protocol: at("Protocol"), info: at("Info") };
   }
 
   /**
-   * Saves the objects of `kind` into a new folder in `dir`, made once there is
-   * one to save: those `pick.keys` ("frame:sha1") name, else those in
-   * `pick.frames`, else all.
+   * Writes the findings report of the open capture, a Markdown file with the
+   * caller's summary, the capture's facts, the marks with their notes and the
+   * packet comments, to a new file (see checkReportTarget).
    */
+  async writeFindings(req: FindingsRequest, by: "user" | "agent"): Promise<FindingsResult> {
+    this.requireFile();
+    const path = String(req.path ?? "");
+    // The agent must not destroy the user's files: it may only replace its own reports and exports
+    if (by === "agent" && req.overwrite && !this.agentExports.has(resolve(path))) {
+      throw new Error("the agent can only replace files it wrote itself in this session; choose a new file name");
+    }
+    const summary = req.summary === undefined ? "" : checkSummary(String(req.summary));
+    const input = this.state.file!;
+    checkReportTarget(path, [input, ...this.capture.state.files], !!req.overwrite);
+    const file = this.commentsFile;
+    const { marks, commented } = await this.findingsFrames();
+    const read = this.state.totalFrames;
+    const markedOut: MarkedPacket[] = [];
+    for (const m of marks.slice(0, MAX_LISTED)) markedOut.push({ frame: m.frame, note: m.note, by: m.by, provisional: m.frame > read, row: await this.rowSummary(m.frame) });
+    const listed = commented.slice(0, MAX_LISTED);
+    const texts = await this.commentsOf(listed);
+    const commentedOut: CommentedPacket[] = [];
+    for (const f of listed) {
+      const comments = texts.get(f)?.list ?? [];
+      if (comments.length) commentedOut.push({ frame: f, comments, provisional: f > read, row: await this.rowSummary(f) });
+    }
+    // The capture the report is about must still be the one open
+    this.sameCapture(file);
+    if (this.state.file !== input) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
+    const s = this.state;
+    const text = buildFindings({
+      name: basename(input),
+      path: input,
+      packets: s.totalFrames,
+      bytes: s.fileSize,
+      duration: s.duration,
+      live: this.capture.running && this.followingCapture(),
+      filter: s.filter,
+      decodeAs: s.decodeAs.entries.map(entryText),
+      timeRefs: s.timeRefs,
+      version: VERSION,
+      at: new Date(),
+      summary,
+      marks: markedOut,
+      commented: commentedOut,
+      moreMarks: marks.length - markedOut.length,
+      moreCommented: commented.length - listed.length,
+    });
+    const size = writeReport(path, text, !!req.overwrite);
+    if (by === "agent") {
+      this.agentExports.add(resolve(path));
+      this.notice(`Wrote a findings report to ${path}`);
+    }
+    return { path, marks: marks.length, commented: commentedOut.length, size };
+  }
+
+  async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
+    return follow(this.streamsView, proto, filter, limit);
+  }
+
+  async capturedObjects(kind: ObjectKind, engine = this.engine): Promise<CapturedObject[]> {
+    return capturedObjects(this.streamsView, kind, engine);
+  }
+
   async saveObjects(
     kind: ObjectKind,
     pick: { frames?: number[]; keys?: string[] },
     dir: string,
     by: "user" | "agent",
   ): Promise<{ folder: string | null; saved: (CapturedObject & { name: string })[]; skipped: { object: CapturedObject; reason: string }[] }> {
-    const codeFolders = this.extensions.codeFolders();
-    const real = objectDir(dir, codeFolders);
-    // Download tokens belong to the sharkd that listed the objects
-    const engine = this.engine;
-    const all = await this.capturedObjects(kind, engine);
-    const key = (o: CapturedObject): string => `${o.frame}:${o.sha1}`;
-    let chosen: CapturedObject[];
-    if (pick.keys) {
-      const listed = new Set(all.map(key));
-      // A key that names nothing came from another capture or dissection
-      if (pick.keys.some((k) => !listed.has(k))) throw new StaleGenerationError("the capture changed; list the objects again");
-      const want = new Set(pick.keys);
-      chosen = all.filter((o) => want.has(key(o)));
-    } else {
-      const want = pick.frames && new Set(pick.frames);
-      chosen = want ? all.filter((o) => want.has(o.frame)) : all;
-    }
-    if (!all.length) throw new Error(`the capture has no ${kind} objects`);
-    if (!chosen.length) throw new Error(`none of the ${kind} objects is in the given frames`);
-    let folder: string | null = null;
-    const saved: (CapturedObject & { name: string })[] = [];
-    const skipped: { object: CapturedObject; reason: string }[] = [];
-    let total = 0;
-    try {
-      for (const o of chosen) {
-        // Without one, a token a reload moved would save another object unnoticed
-        if (!o.sha1) {
-          skipped.push({ object: o, reason: "sharkd gave no checksum to check it by" });
-          continue;
-        }
-        if (o.size > MAX_OBJECT_SAVE) {
-          skipped.push({ object: o, reason: `larger than ${MAX_OBJECT_SAVE / 2 ** 20} MiB` });
-          continue;
-        }
-        if (total + o.size > MAX_OBJECTS_SAVE) {
-          skipped.push({ object: o, reason: `over the ${MAX_OBJECTS_SAVE / 2 ** 30} GiB one save may write` });
-          continue;
-        }
-        const r = await engine.call<{ data?: string }>("download", { token: o.token });
-        const data = Buffer.from(r.data ?? "", "base64");
-        // Tokens are positions in sharkd's list: a reload may have moved them
-        if (r.data === undefined || createHash("sha1").update(data).digest("hex") !== o.sha1) {
-          throw new Error("the capture changed while saving; list the objects again");
-        }
-        total += data.length;
-        folder ??= newObjectFolder(real, kind, codeFolders);
-        saved.push({ ...o, name: writeObject(folder, objectFileName(o.frame, o.filename), data) });
-      }
-    } catch (err) {
-      // What is already there stays: say where
-      const names = saved.slice(0, 20).map((o) => o.name).join(", ") + (saved.length > 20 ? ", …" : "");
-      const done = saved.length ? ` (${saved.length} saved to ${folder}: ${names})` : "";
-      throw new Error(`${(err as Error).message}${done}`);
-    }
-    if (saved.length && by === "agent") this.notice(`Saved ${saved.length} ${kind.toUpperCase()} object${saved.length === 1 ? "" : "s"} to ${folder}`);
-    return { folder, saved, skipped };
+    return saveObjects(this.streamsView, kind, pick, dir, by);
   }
 
-  /** Opens the capture in Wireshark; returns what doesn't go along, or null. */
   async openInWireshark(frame?: number | null): Promise<string | null> {
-    this.requireFile();
-    if (!this.wiresharkBin) throw new Error("wireshark was not found on PATH");
-    // One window per click, not one per repeated request
-    if (Date.now() - this.wiresharkAt < WIRESHARK_GAP_MS) throw new Error("Wireshark is already starting");
-    this.wiresharkAt = Date.now();
-    const args = ["-r", this.state.file!];
-    if (this.profile) args.push("-C", this.profile);
-    if (this.state.tlsKeylog) args.push("-o", `tls.keylog_file:${this.state.tlsKeylog}`);
-    // Wireshark has none of the view's time references: frame.ref_time goes as their frame numbers
-    if (this.state.filter) args.push("-Y", this.sharkdFilter(this.state.filter));
-    const target = frame ?? this.state.selected;
-    if (target) args.push("-g", String(target));
-    await launchWireshark(this.wiresharkBin, args, this.extensions.env());
-    const { entries } = this.state.decodeAs;
-    return entries.length ? `WireBuddy's Decode As entries don't go along (${entries.map(entryText).join(", ")}); use Analyze › Decode As in Wireshark` : null;
+    return openInWireshark(
+      {
+        bin: this.wiresharkBin,
+        profile: this.profile,
+        state: () => this.state,
+        requireFile: () => this.requireFile(),
+        sharkdFilter: (filter) => this.sharkdFilter(filter),
+        env: () => this.extensions.env(),
+        lastLaunch: () => this.wiresharkAt,
+        launching: (at) => {
+          this.wiresharkAt = at;
+        },
+      },
+      frame,
+    );
   }
 
   private remember(file: string): void {
@@ -2936,7 +2667,7 @@ export class Viewer extends EventEmitter {
     const list = this.extensions.listing();
     for (const e of list.extensions) {
       if (!e.panel) continue;
-      const bad = this.offerErrors.get(e.name);
+      const bad = this.offers.errorOf(e.name);
       if (bad) e.panel.offerError = `invalid offer filter "${bad.filter}": ${bad.error}`;
       if (!this.panels.isOpen(e.name)) continue;
       e.panel.open = true;
@@ -2945,138 +2676,12 @@ export class Viewer extends EventEmitter {
     return list;
   }
 
-  /**
-   * Checks the offers of enabled panels against the open capture (`all`: also
-   * the ones matched already): each filter is checked, then whether a packet
-   * matches it (see offerMatches). Matches show as panelOffers.
-   */
-  private checkOffers(all: boolean): Promise<void> {
-    const seq = ++this.offerSeq;
-    if (this.offerTimer) clearTimeout(this.offerTimer);
-    this.offerTimer = null;
-    this.offerRun = this.offerPass(seq, all).catch((err) => {
-      if (seq !== this.offerSeq) return;
-      this.showOffers();
-      // Another file or extensions meanwhile: the pass that follows checks again
-      if (!(err instanceof ApiError && ["stale", "busy", "no-capture", "gone"].includes(err.code))) this.events.add("WARNING", `Checking the panels' offers failed: ${printable((err as Error).message)}`);
-    });
-    return this.offerRun;
-  }
-
-  private async offerPass(seq: number, all: boolean): Promise<void> {
-    const file = this.state.file;
-    if (file !== this.offerFile) {
-      this.offerFile = file;
-      this.offerMatched.clear();
-      this.offerDismissed.clear();
-      this.showOffers();
-    }
-    const offers = this.extensions.offers();
-    // Offers gone or changed since are no offers any more
-    for (const [name, m] of this.offerMatched) if (!offers.some((o) => o.name === name && o.filter === m.filter)) this.offerMatched.delete(name);
-    for (const [name, e] of this.offerErrors) if (!offers.some((o) => o.name === name && o.filter === e.filter)) this.offerErrors.delete(name);
-    const valid: typeof offers = [];
-    for (const o of offers.filter((x) => all || !this.offerMatched.has(x.name))) {
-      const check = await this.checkFilter(o.filter);
-      if (seq !== this.offerSeq) return;
-      if (check.ok) {
-        this.offerErrors.delete(o.name);
-        valid.push(o);
-        continue;
-      }
-      const error = check.error ?? "invalid";
-      if (this.offerErrors.get(o.name)?.error !== error) this.events.add("WARNING", `The offer filter "${o.filter}" of the panel "${o.name}" is invalid, so it is never offered: ${error}`);
-      this.offerErrors.set(o.name, { filter: o.filter, error });
-      this.offerMatched.delete(o.name);
-    }
-    if (file && this.state.totalFrames > 0 && valid.length) {
-      const found = await this.offerMatches(file, valid.map((o) => o.filter), () => seq === this.offerSeq);
-      if (seq !== this.offerSeq || this.state.file !== file) return;
-      for (const o of valid) {
-        // Not checked this time: as it was
-        if (!found.has(o.filter)) continue;
-        if (found.get(o.filter)) this.offerMatched.set(o.name, { offer: { name: o.name, label: o.label, text: o.text }, filter: o.filter });
-        else this.offerMatched.delete(o.name);
-      }
-    }
-    this.showOffers();
-    // A live capture may bring matching packets later
-    if (file && this.capture.running && this.followingCapture() && offers.some((o) => !this.offerMatched.has(o.name) && !this.offerErrors.has(o.name))) {
-      this.offerTimer = setTimeout(() => {
-        this.offerTimer = null;
-        if (this.capture.running && this.followingCapture()) void this.checkOffers(false);
-      }, OFFER_LIVE_MS);
-      this.offerTimer.unref();
-    }
-  }
-
-  /**
-   * Which of `filters` match a packet of `file`. Of a live capture, from
-   * slices of the live tail: each filter from the frame it was found in none
-   * up to on. Without a tail, and for filters slices can't check (see
-   * heldReason), by the panel engine reading the whole file, which waits
-   * while memory is short during a capture. Only while `wanted`.
-   */
-  private async offerMatches(file: string, filters: string[], wanted: () => boolean): Promise<Map<string, boolean>> {
-    const { epoch } = this.state;
-    if (this.offerChecked.file !== file || this.offerChecked.epoch !== epoch) this.offerChecked = { file, epoch, to: new Map() };
-    const checked = this.offerChecked.to;
-    const found = new Map<string, boolean>();
-    // Those found are checked from the start again: their match may lie before `to`
-    const advance = (fs: string[], to: number): void => {
-      if (this.offerChecked.to !== checked || !wanted()) return;
-      for (const f of fs) if (!found.get(f)) checked.set(f, Math.max(checked.get(f) ?? 0, to));
-    };
-    const held = new Set<string>();
-    for (const f of filters) if (await this.heldReason(f)) held.add(f);
-    const tail = this.tail?.file === file && !this.tail.broken() ? this.tail : null;
-    const sliced = tail ? filters.filter((f) => !held.has(f)) : [];
-    if (tail && sliced.length) {
-      try {
-        const r = await tail.anyMatch(sliced, (f) => (checked.get(f) ?? 0) + 1, wanted);
-        this.tailWorked(tail);
-        if (!wanted()) return found;
-        for (const f of sliced) found.set(f, r.found.has(f));
-        advance(sliced, r.to);
-      } catch (err) {
-        // The live tail went, broke or failed: the whole file says
-        if (!(err instanceof Superseded)) this.tailFailed(tail, err as Error);
-      }
-    }
-    const whole = filters.filter((f) => !found.has(f));
-    if (whole.length && wanted() && !(this.capture.running && this.memoryShort())) {
-      // Slices check them next time: the panel engine needn't keep the file
-      const release = this.capture.running && whole.every((f) => !held.has(f));
-      const { matches, frames } = await this.panelData.anyMatch(whole, release);
-      for (const f of whole) found.set(f, matches.get(f) ?? false);
-      advance(whole, frames);
-    }
-    return found;
-  }
-
-  /** The matched offers the user sees: not of open panels, not dismissed. */
-  private showOffers(): void {
-    const offers = this.shownOffers();
-    if (JSON.stringify(offers) !== JSON.stringify(this.state.panelOffers)) this.set({ panelOffers: offers });
-  }
-
-  private shownOffers(): PanelOffer[] {
-    const offers = [...this.offerMatched.values()].map((m) => m.offer).filter((o) => !this.panels.isOpen(o.name) && !this.offerDismissed.has(o.name));
-    return offers.sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  /** The user dismissed a panel's offer: not offered again for this file. */
   dismissOffer(name: string): void {
-    this.offerDismissed.add(name);
-    this.showOffers();
+    this.offers.dismissOffer(name);
   }
 
-  /** Panels offered for the open capture, once a check that runs now is done (or after `ms`). */
   async matchedOffers(ms = 5000): Promise<PanelOffer[]> {
-    let timer: NodeJS.Timeout | undefined;
-    await Promise.race([this.offerRun, new Promise<void>((done) => (timer = setTimeout(done, ms)))]);
-    clearTimeout(timer);
-    return this.shownOffers();
+    return this.offers.matchedOffers(ms);
   }
 
   /**
@@ -3130,7 +2735,7 @@ export class Viewer extends EventEmitter {
     return this.exclusive(async () => {
       if (change) this.extensions.include(change.name, change.on);
       else this.extensions.refresh();
-      this.forgetLuaErrors();
+      this.luaBatches.forgetLuaErrors();
       // Panels wait until the view reads with the new extensions, then start over
       this.panelData.hold(true);
       const filter = this.state.filter;
@@ -3154,7 +2759,7 @@ export class Viewer extends EventEmitter {
         this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
         this.panelData.hold(false);
         this.refreshExtensions();
-        void this.checkOffers(true);
+        void this.offers.checkOffers(true);
       }
       if (rolledBack) {
         // Going back without the one switched on fixed it: it stays off
@@ -3181,46 +2786,10 @@ export class Viewer extends EventEmitter {
     // A panel alone needs no sharkd restart, nor does a switch where sharkd loads no extensions
     if (this.extensions.unavailable || !this.extensions.list().find((e) => e.name === name)?.lua) {
       this.refreshExtensions();
-      void this.checkOffers(true);
+      void this.offers.checkOffers(true);
       return;
     }
     await this.reloadExtensions({ name, on });
-  }
-
-  /** An extension failed on a packet while a file was read: the agent hears about new ones in batches. */
-  private luaError(e: LuaError): void {
-    const s = this.luaErrs;
-    if (e.file !== s.file) {
-      this.tellLuaErrors();
-      this.forgetLuaErrors(e.file);
-    }
-    if (e.frame === 0) s.more = true;
-    else if (!s.frames.has(e.frame) && s.frames.size < 100_000) {
-      s.frames.add(e.frame);
-      if (!s.example || e.frame < s.example.frame) s.example = e;
-    }
-    // Once they stop coming for 1.5 s (a looping dissector takes 1 s per packet), at most 8 s after the first
-    if (s.timer) clearTimeout(s.timer);
-    else s.since = Date.now();
-    s.timer = setTimeout(() => this.tellLuaErrors(), Math.max(0, Math.min(1500, s.since + 8000 - Date.now())));
-  }
-
-  private tellLuaErrors(): void {
-    const s = this.luaErrs;
-    s.timer = null;
-    const n = s.frames.size - s.told;
-    if (n <= 0 || !s.example) return;
-    const what = `${s.told ? `${n} more packet${n === 1 ? "" : "s"}` : `${n}${s.more ? "+" : ""} packet${n === 1 ? "" : "s"}`} of ${basename(s.file)}`;
-    this.events.add("ERROR", `Lua errors in ${what}, e.g. frame ${s.example.frame}: ${printable(s.example.message)} — fix the extension, check it with extensions(action "test"), then reload`);
-    s.told = s.frames.size;
-    s.example = null;
-  }
-
-  /** New code or another file: its errors are all new. */
-  private forgetLuaErrors(file = this.state.file ?? ""): void {
-    const s = this.luaErrs;
-    if (s.timer) clearTimeout(s.timer);
-    Object.assign(s, { file, frames: new Set<number>(), more: false, told: 0, example: null, timer: null });
   }
 
   /** Loads one extension into a separate sharkd with the open capture and reports what it decodes. */
@@ -3283,7 +2852,7 @@ export class Viewer extends EventEmitter {
   }
 
   shutdown(): void {
-    this.keepNow();
+    this.keeper.keepNow();
     this.capture.stop();
     this.capture.stopActivity();
     if (this.tailTimer) clearInterval(this.tailTimer);
@@ -3340,86 +2909,6 @@ function noticeText(text: string): string {
   return line.length > 80 ? `${line.slice(0, 79)}…` : line;
 }
 
-/**
- * Wireshark's "Packet comments" node: a comment of several lines shows its
- * first line, and each line under it. `ett`: the expansion ids of the node
- * and of its comments.
- */
-export function commentTree(comments: string[], ett: { node: number; item: number }): TreeNode {
-  const line = (text: string): TreeNode => ({ l: labelText(text), f: `frame.comment == ${filterString(text)}`, fn: "frame.comment" });
-  const comment = (text: string): TreeNode => {
-    const lines = text.split("\n");
-    if (lines.length === 1) return { ...line(text), s: "Comment", e: ett.item, n: [] };
-    if (lines[lines.length - 1] === "") lines.pop();
-    const n = lines.slice(0, COMMENT_LINES).map(line);
-    if (lines.length > COMMENT_LINES) n.push({ l: `[comment truncated at ${COMMENT_LINES} lines]`, f: 'frame.comment == ""', fn: "frame.comment" });
-    return { ...line(lines[0]), l: labelText(`${lines[0]} [...]`), s: "Comment", e: ett.item, n };
-  };
-  return { l: "Packet comments", t: "proto", f: "pkt_comment", fn: "pkt_comment", s: "Comment", e: ett.node, n: comments.map(comment) };
-}
-
-/** Escapes of control characters, as Wireshark writes them. */
-const ESCAPES: Record<string, string> = { "\u0007": "a", "\b": "b", "\f": "f", "\n": "n", "\r": "r", "\t": "t", "\v": "v" };
-
-/**
- * `text` as sharkd labels it: control characters escaped (\t, \x01, \u0085),
- * and cut to Wireshark's label length as proto.c does, behind "[…] ".
- */
-function labelText(text: string): string {
-  const label = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => {
-    const code = c.charCodeAt(0);
-    return `\\${ESCAPES[c] ?? `${code < 0x80 ? "x" : "u00"}${code.toString(16).toUpperCase().padStart(2, "0")}`}`;
-  });
-  const bytes = Buffer.from(label);
-  if (bytes.length < ITEM_LABEL_LENGTH) return label;
-  // The mark goes first, and the last character in the buffer, whole or not, goes
-  const cut = Buffer.concat([Buffer.from("[…] "), bytes.subarray(0, ITEM_LABEL_LENGTH - 6)]);
-  let end = ITEM_LABEL_LENGTH - 1;
-  while (end > 0 && (cut[end] & 0xc0) === 0x80) end--;
-  return cut.subarray(0, end).toString();
-}
-
-/** `text` as a display filter string, escaped as Wireshark does. */
-function filterString(text: string): string {
-  return `"${text.replace(/[\u0007\b\f\n\r\t\v\\"]/g, (c) => `\\${ESCAPES[c] ?? c}`)}"`;
-}
-
-/** Whether ascending `frames` hold `f`. */
-function hasFrame(frames: Int32Array, f: number): boolean {
-  let lo = 0;
-  let hi = frames.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (frames[mid] === f) return true;
-    if (frames[mid] < f) lo = mid + 1;
-    else hi = mid - 1;
-  }
-  return false;
-}
-
-/** Rounds up to 1, 2 or 5 times a power of ten milliseconds. */
-function niceInterval(ms: number): number {
-  const p = 10 ** Math.floor(Math.log10(ms));
-  for (const m of [1, 2, 5, 10]) if (m * p >= ms) return m * p;
-  return 10 * p;
-}
-
-/** sharkd skips empty buckets: a string item is the next bucket's index in hex. */
-function denseItems(items: (number | string)[], buckets: number): number[] {
-  const values = new Array<number>(buckets).fill(0);
-  let i = 0;
-  for (const item of items) {
-    if (typeof item === "string") i = parseInt(item, 16);
-    else {
-      // Rounding of the capture duration can leave sharkd one bucket ahead of us
-      while (values.length <= i) values.push(0);
-      values[i] = item;
-      i++;
-    }
-  }
-  return values;
-}
-
 /** Frame count and capture times of a capture's packets; `complete`: every packet up to the time asked for is there. */
 type LiveTimes = { count: number; timeOf: (frame: number) => Promise<number>; complete: boolean };
 
@@ -3434,11 +2923,6 @@ async function framesBefore({ count, timeOf }: LiveTimes, t: number, orAt: boole
     else hi = mid - 1;
   }
   return lo;
-}
-
-/** sharkd rejects skip: 0, so leave it out. */
-function page(skip: number, limit: number): Record<string, unknown> {
-  return skip > 0 ? { skip, limit } : { limit };
 }
 
 /** The row at `index` alone, or no rows for -1. */
@@ -3460,169 +2944,6 @@ function startsWith(after: { length: number; at: (i: number) => number }, before
   if (after.length < before.length) return false;
   for (let i = 0; i < before.length; i++) if (before.at(i) !== after.at(i)) return false;
   return true;
-}
-
-/**
- * Whether a sharkd reading `next` frames needs more memory than is
- * `available`, beyond what the standby holds already: as much a frame as the
- * active one needs, which read `frames`.
- */
-export function memoryShort(m: { activeBytes: number; frames: number; standbyBytes: number; next: number; available: number }): boolean {
-  if (!m.frames) return false;
-  const perFrame = Math.max(0, m.activeBytes - SHARKD_BASE_BYTES) / m.frames;
-  return SHARKD_BASE_BYTES + perFrame * m.next - m.standbyBytes > m.available - MEMORY_MARGIN;
-}
-
-/** Where a process's resident memory comes from: /proc where there is one, else ps. */
-export type RssSource = { hasProc: boolean; proc: (pid: number) => string; ps: (pid: number) => string };
-
-const rssSource: RssSource = {
-  hasProc: existsSync("/proc/self/status"),
-  proc: (pid) => readFileSync(`/proc/${pid}/status`, "utf8"),
-  ps: (pid) => execFileSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }),
-};
-/** ps is asked again for a pid after this long. */
-const RSS_CACHE_MS = 2000;
-const rssCache = new Map<number, { at: number; bytes: number | null }>();
-
-/** Resident memory of a process, or null: from /proc (Linux), else from `ps -o rss=` (KiB), cached for a moment. */
-export function rssBytes(pid: number | null, source: RssSource = rssSource, now = Date.now()): number | null {
-  if (!pid) return null;
-  if (source.hasProc) {
-    try {
-      const kb = /^VmRSS:\s+(\d+) kB/m.exec(source.proc(pid));
-      return kb ? Number(kb[1]) * 1024 : null;
-    } catch {
-      return null;
-    }
-  }
-  const cached = rssCache.get(pid);
-  if (cached && now - cached.at < RSS_CACHE_MS) return cached.bytes;
-  let bytes: number | null = null;
-  try {
-    const kb = /^\s*(\d+)\s*$/.exec(source.ps(pid));
-    bytes = kb ? Number(kb[1]) * 1024 : null;
-  } catch {
-    // the process is gone, or ps is
-  }
-  for (const [p, c] of rssCache) if (now - c.at >= RSS_CACHE_MS) rssCache.delete(p);
-  rssCache.set(pid, { at: now, bytes });
-  return bytes;
-}
-
-/** Memory the process can still use (Linux), or null: the smaller of the system's figure and its cgroup's headroom; WIREBUDDY_MEM_AVAILABLE (bytes) stands in for both in tests. */
-function availableBytes(): number | null {
-  const fake = Number(process.env.WIREBUDDY_MEM_AVAILABLE);
-  return fake > 0 ? fake : availableMemory();
-}
-
-/** Limits at or above this are the kernel's way of saying "none" (v1 reports 2^63 less a page). */
-const NO_LIMIT = 2 ** 62;
-
-/**
- * Memory that is free for this process: /proc/meminfo's MemAvailable, cut down to the headroom of the
- * tightest cgroup limit on its group or any ancestor, since in a container meminfo shows the host's
- * memory. Reclaimable file cache counts as free. Unreadable or absent counts as no limit; null if
- * nothing gives a figure.
- */
-export function availableMemory(read: (file: string) => string = (f) => readFileSync(f, "utf8")): number | null {
-  const text = (file: string): string => {
-    try {
-      return read(file);
-    } catch {
-      return "";
-    }
-  };
-  const num = (file: string): number | null => {
-    const n = /^\s*(\d+)\s*$/.exec(text(file));
-    return n ? Number(n[1]) : null;
-  };
-  // Headroom under one group's limit, or null when it has none
-  const headroom = (dir: string, limit: string, usage: string, stat: string, inactive: string): number | null => {
-    const max = num(`${dir}/${limit}`);
-    const used = num(`${dir}/${usage}`);
-    if (max === null || max >= NO_LIMIT || used === null) return null;
-    const cache = new RegExp(`^${inactive} (\\d+)`, "m").exec(text(`${dir}/${stat}`));
-    return max - Math.max(0, used - (cache ? Number(cache[1]) : 0));
-  };
-  const figures: number[] = [];
-  const kb = /^MemAvailable:\s+(\d+) kB/m.exec(text("/proc/meminfo"));
-  if (kb) figures.push(Number(kb[1]) * 1024);
-  const groups = text("/proc/self/cgroup");
-  // v2: the group's own directory and every ancestor up to the root
-  const own = /^0::(\/.*)$/m.exec(groups)?.[1] ?? "/";
-  for (let dir = own.replace(/\/+$/, ""); ; dir = dir.slice(0, dir.lastIndexOf("/"))) {
-    const room = headroom(`/sys/fs/cgroup${dir}`, "memory.max", "memory.current", "memory.stat", "inactive_file");
-    if (room !== null) figures.push(room);
-    if (!dir) break;
-  }
-  // v1: the group's folder when it exists, else the root one
-  const v1 = /^\d+:(?:[^:]*,)?memory(?:,[^:]*)?:(\/.*)$/m.exec(groups)?.[1].replace(/\/+$/, "") ?? "";
-  const folder = v1 && num(`/sys/fs/cgroup/memory${v1}/memory.limit_in_bytes`) !== null ? `/sys/fs/cgroup/memory${v1}` : "/sys/fs/cgroup/memory";
-  const room = headroom(folder, "memory.limit_in_bytes", "memory.usage_in_bytes", "memory.stat", "total_inactive_file");
-  if (room !== null) figures.push(room);
-  return figures.length ? Math.max(0, Math.min(...figures)) : null;
-}
-
-/** Names the file dialog lists: of the formats looksLikeCapture lets open() read. */
-export const CAPTURE_FILE = /\.(pcapng|pcap|cap|ntar|snoop)(\.(gz|zst))?$/i;
-
-/** pcap (both byte orders, µs and ns), pcapng, snoop and Network Monitor 2 files start with these. */
-const CAPTURE_MAGIC = ["a1b2c3d4", "d4c3b2a1", "a1b23c4d", "4d3cb2a1", "0a0d0d0a", "736e6f6f70000000", "474d4255"];
-
-/**
- * Keeps open() to capture files, by content (also inside gzip and zstd), so it
- * can't be used to read arbitrary files: names prove nothing.
- */
-async function looksLikeCapture(file: string): Promise<boolean> {
-  const head = (await firstBytes(file, 8)).toString("hex");
-  const inner = head.startsWith("1f8b") ? createGunzip() : head.startsWith("28b52ffd") && typeof createZstdDecompress === "function" ? createZstdDecompress() : null;
-  const hex = inner ? (await firstBytes(file, 8, inner)).toString("hex") : head;
-  return CAPTURE_MAGIC.some((m) => hex.startsWith(m));
-}
-
-/** The first `n` bytes of `file`, through `transform` if given; fewer when it is shorter or broken. */
-function firstBytes(file: string, n: number, transform?: Transform): Promise<Buffer> {
-  return new Promise((done) => {
-    const src = createReadStream(file, transform ? {} : { start: 0, end: n - 1 });
-    const out = transform ? src.pipe(transform) : src;
-    const chunks: Buffer[] = [];
-    let len = 0;
-    let finished = false;
-    const finish = (): void => {
-      if (finished) return;
-      finished = true;
-      src.destroy();
-      transform?.destroy();
-      done(Buffer.concat(chunks).subarray(0, n));
-    };
-    out.on("data", (c: Buffer) => {
-      chunks.push(c);
-      len += c.length;
-      if (len >= n) finish();
-    });
-    out.on("end", finish);
-    out.on("error", finish);
-    src.on("error", finish);
-  });
-}
-
-/** The first bytes of a file: a capture that only grows keeps them. */
-function fileHead(file: string): Buffer {
-  let fd = -1;
-  try {
-    fd = openSync(file, "r");
-    const buf = Buffer.alloc(4096);
-    return buf.subarray(0, readSync(fd, buf, 0, buf.length, 0));
-  } catch {
-    return Buffer.alloc(0);
-  } finally {
-    if (fd >= 0) closeSync(fd);
-  }
-}
-
-function safeSize(file: string): number {
-  return statSync(file, { throwIfNoEntry: false })?.size ?? -1;
 }
 
 /** Points out capture-filter (BPF) syntax used where a display filter belongs. */

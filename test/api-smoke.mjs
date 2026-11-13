@@ -11,7 +11,7 @@ import { dirname, join, sep } from "node:path";
 import assert from "node:assert/strict";
 import { writeAcmeCapture } from "./acme.mjs";
 import { epb, idb, shb, udpFrame } from "./capgen.mjs";
-import { apiFetch, serverUrl, spawnServer, suite } from "./harness.mjs";
+import { apiFetch, followState, serverUrl, sleep, spawnServer, suite } from "./harness.mjs";
 import { Pcap } from "./media/pcap.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
@@ -627,6 +627,142 @@ try {
   };
   const rowsOf = async (start, count) => (await api(`/api/rows?gen=${(await state()).generation}&start=${start}&count=${count}`)).json.rows;
   const commentsOf = async (frame) => (await rowsOf(frame - 1, 1))[0].cm;
+
+  /** The packet list's cells of one frame, by column name. */
+  const cellsOf = async (frame) => {
+    const cols = (await state()).columns;
+    const [r] = await rowsOf(frame - 1, 1);
+    assert.equal(r.num, frame);
+    return (name) => r.c[cols.indexOf(name)];
+  };
+
+  await check("findings report: marks, edited comments, time references and summary, written 0600 as text, in frame order; the rules of exports", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-findings-"));
+    const file = join(dir, "report.md");
+    try {
+      assert.equal((await api("/api/open", { path: fixture })).status, 200);
+      await api("/api/forget", {});
+      await api("/api/filter", { filter: "" });
+      await api("/api/events/take", {});
+      const note = "see <b>this</b> | [x](javascript:alert(1))";
+      await api("/api/marks", { frames: [12], note });
+      await api("/api/marks", { frames: [3], note: "first" });
+      await api("/api/comments", { frames: [5], comment: "line one\n# heading\n![x](y)" });
+      await api("/api/comments", { frames: [5], comment: "<script>alert(1)</script>" });
+      await api("/api/comments", { frames: [9], comment: "plain" });
+      await api("/api/timerefs", { frames: [10], on: true });
+      const [s3, s12] = [await cellsOf(3), await cellsOf(12)];
+      await api("/api/filter", { filter: "http || tcp.flags.syn == 1" });
+      assert.deepEqual((await api("/api/findings")).json, { marks: 2, commented: 2 });
+
+      const written = await api("/api/findings", { path: file, summary: "## What was found\n\nThe **server** answers `GET /`.\n\n" });
+      assert.equal(written.status, 200, JSON.stringify(written.json));
+      assert.deepEqual(Object.keys(written.json).sort(), ["commented", "marks", "path", "size"]);
+      assert.deepEqual([written.json.path, written.json.marks, written.json.commented], [file, 2, 2]);
+      assert.equal(written.json.size, statSync(file).size);
+      if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
+      const text = readFileSync(file, "utf8");
+      assert.ok(text.endsWith("\n") && !text.endsWith("\n\n"));
+      const lines = text.split("\n");
+      assert.equal(lines[0], "# Findings: `http.pcapng`");
+      assert.deepEqual(lines.slice(1, 6), ["", "## What was found", "", "The **server** answers `GET /`.", ""]);
+      assert.deepEqual(lines.slice(6, 8), ["## Capture", `- File: \`${fixture}\``]);
+      assert.match(lines[8], /^- 29 packets, \d+ bytes, \d+\.\d{3} s$/);
+      assert.deepEqual(lines.slice(9, 11), ["- Display filter: `http || tcp.flags.syn == 1`", "- Time references: packet 10"]);
+      assert.match(lines[11], /^- Written by WireBuddy \S+ on \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      // Marks in frame order, the note as text in a table cell
+      const at = (re) => lines.findIndex((l) => re.test(l));
+      assert.equal(lines[at(/^## Marked packets$/) + 2], "| Packet | Time | Source | Destination | Protocol | Info | Note | By |");
+      const [row3, row12] = [at(/^\| 3 \|/), at(/^\| 12 \|/)];
+      assert.ok(row3 > 0 && row12 === row3 + 1, "frame order");
+      const head = (c) => `| \`${c("Time")}\` | \`${c("Source")}\` | \`${c("Destination")}\` | \`${c("Protocol")}\` | `;
+      assert.equal(lines[row3].slice(0, `| 3 ${head(s3)}`.length), `| 3 ${head(s3)}`);
+      assert.ok(lines[row3].endsWith(" | `first` | user |"), lines[row3]);
+      assert.equal(lines[row12].slice(0, `| 12 ${head(s12)}`.length), `| 12 ${head(s12)}`);
+      assert.ok(lines[row12].endsWith(" | `see <b>this</b> \\| [x](javascript:alert(1))` | user |"), lines[row12]);
+      // Comments of packets 5 and 9 as the viewer shows them, escaped line by line
+      const c5 = at(/^### Packet 5: /);
+      assert.ok(c5 > row12 && at(/^### Packet 9: /) > c5);
+      assert.deepEqual(lines.slice(c5 + 2, c5 + 8), ["> line one", "> \\# heading", "> \\!\\[x\\]\\(y\\)", ">", "> \\<script\\>alert\\(1\\)\\</script\\>", ""]);
+      assert.equal(lines[at(/^### Packet 9: /) + 2], "> plain");
+      // Nothing from the notes or comments is left that Markdown could act on
+      for (const raw of ["<script>", "![x](y)", "\n# heading"]) assert.ok(!text.includes(raw), raw);
+      assert.ok(lines.filter((l) => l.startsWith("#")).every((l) => /^(# Findings: |## |### Packet \d+: )/.test(l)), "no heading but the report's own");
+      assert.deepEqual(readdirSync(dir), ["report.md"], "no temporary file left");
+      assert.ok((await api("/api/events/take", {})).json.events.some((e) => e.text === `The user wrote a findings report to ${file}`));
+
+      // A file that exists is asked about; with overwrite it is replaced (and the summary is optional)
+      const again = await api("/api/findings", { path: file });
+      assert.equal(again.status, 400);
+      assert.equal(again.json.code, "exists");
+      assert.equal(readFileSync(file, "utf8"), text);
+      const replaced = await api("/api/findings", { path: file, overwrite: true });
+      assert.equal(replaced.status, 200, JSON.stringify(replaced.json));
+      assert.ok(!readFileSync(file, "utf8").includes("## What was found"));
+      assert.equal(statSync(file).mode & 0o777, 0o600);
+      // A directory is never replaced
+      mkdirSync(join(dir, "folder.md"));
+      assert.match((await api("/api/findings", { path: join(dir, "folder.md"), overwrite: true })).json.error, /not a file/);
+
+      // Refused: nothing is written
+      const refuse = async (body, re) => {
+        const r = await api("/api/findings", body);
+        assert.equal(r.status, 400, JSON.stringify(body));
+        assert.match(r.json.error, re, JSON.stringify(body));
+        assert.notEqual(r.json.code, "exists");
+      };
+      await refuse({ path: "report.md" }, /must be absolute/);
+      await refuse({ path: join(dir, "report.txt") }, /must end in \.md/);
+      await refuse({ path: join(dir, "report.pcapng") }, /must end in \.md/);
+      await refuse({ path: join(dir, "gone", "report.md") }, /no such directory/);
+      await refuse({ path: join(dir, "nul.md"), summary: "a\0b" }, /control characters/);
+      await refuse({ path: join(dir, "esc.md"), summary: "\u001b[31mred" }, /control characters/);
+      await refuse({ path: join(dir, "big.md"), summary: "x".repeat(16 * 1024 + 1) }, /16 KiB/);
+      assert.deepEqual(readdirSync(dir).sort(), ["folder.md", "report.md"]);
+      // Tabs and newlines in the summary are fine, and a summary of 16 KiB exactly
+      assert.equal((await api("/api/findings", { path: join(dir, "tabs.md"), summary: `a\tb\n${"x".repeat(16 * 1024 - 4)}` })).status, 200);
+    } finally {
+      await api("/api/forget", {});
+      await api("/api/filter", { filter: "" });
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // Nothing open: nothing to write
+    await api("/api/close", {});
+    const none = await api("/api/findings", { path: file });
+    assert.equal(none.status, 400);
+    assert.match(none.json.error, /no capture/i);
+    assert.equal((await api("/api/open", { path: fixture })).status, 200);
+  });
+
+  await check("findings report: a capture file's own comments are listed as the viewer shows them, edited ones as edited", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-findings-"));
+    try {
+      const once = join(dir, "once.pcapng");
+      const source = join(dir, "commented.pcapng");
+      execFileSync("editcap", ["-a", "2:file *own* <i>x</i>", fixture, once]);
+      execFileSync("editcap", ["--preserve-packet-comments", "-a", "2:file two", "-a", "4:file four", "-a", "8:file eight", once, source]);
+      assert.equal((await api("/api/open", { path: source })).status, 200);
+      await api("/api/comments/edit", { frame: 4, index: 0, old: "file four", comment: "four [edited](http://evil.example)" });
+      await api("/api/comments", { frames: [6], comment: "added" });
+      await api("/api/comments/delete", { frame: 8, index: 0, old: "file eight" });
+      assert.deepEqual((await api("/api/findings")).json, { marks: 0, commented: 3 });
+      const report = join(dir, "report.md");
+      assert.deepEqual((await api("/api/findings", { path: report })).json.commented, 3);
+      const lines = readFileSync(report, "utf8").split("\n");
+      assert.ok(!lines.includes("## Marked packets"), "no marks, no table");
+      const heads = lines.filter((l) => l.startsWith("### "));
+      assert.deepEqual(heads.map((l) => l.split(":")[0]), ["### Packet 2", "### Packet 4", "### Packet 6"]);
+      const after = (n) => lines.slice(lines.findIndex((l) => l.startsWith(`### Packet ${n}:`)) + 2);
+      assert.deepEqual(after(2).slice(0, 4), ["> file \\*own\\* \\<i\\>x\\</i\\>", ">", "> file two", ""]);
+      assert.equal(after(4)[0], "> four \\[edited\\]\\(http\\://evil\\.example\\)");
+      assert.equal(after(6)[0], "> added");
+      assert.ok(!lines.some((l) => l.includes("file eight")), "a deleted comment is not listed");
+    } finally {
+      await api("/api/forget", {});
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assert.equal((await api("/api/open", { path: fixture })).status, 200);
+  });
 
   await check("packet comments: added, edited and deleted; rows and details show them as Wireshark does", async () => {
     await api("/api/filter", { filter: "" });
@@ -1644,6 +1780,100 @@ try {
     ws._socket.write(Buffer.from([0x8f, 0x80, 1, 2, 3, 4]));
     await closed;
     assert.equal((await api("/api/state")).status, 200);
+  });
+  await check("websocket: a whole state with a number first, then patches of what changed, numbered one after the other", async () => {
+    await api("/api/open", { path: fixture });
+    await api("/api/marks/clear", {});
+    await api("/api/select", { frame: 3 });
+    await sleep(300);
+    const a = await followState(base, token);
+    const b = await followState(base, token);
+    // The state as the page holds it, once what is pending has been pushed
+    const agrees = async (f) => {
+      await sleep(250);
+      assert.deepEqual(f.state, (await api("/api/state")).json);
+    };
+    try {
+      assert.equal(a.messages[0].type, "state");
+      assert.ok(Number.isInteger(a.messages[0].seq));
+      assert.equal(b.messages[0].type, "state");
+      assert.equal(b.messages[0].seq, a.seq, "a client connecting between pushes gets the number of the last push");
+      await agrees(a);
+      await agrees(b);
+
+      // A change of the marks is followed a second later by the viewer's own note that it kept them
+      const seq = a.seq;
+      await api("/api/marks", { frames: [4, 5], note: "n" });
+      await a.until("the mark", 5000, (s) => s.marks.length === 2);
+      await sleep(1300);
+      await agrees(a);
+      const patches = a.messages.filter((m) => m.type === "patch");
+      assert.equal(patches[0].seq, seq + 1);
+      assert.ok(patches[0].patch.marks);
+      for (const m of patches) assert.ok(!("columns" in m.patch) && !("capture" in m.patch), Object.keys(m.patch).join());
+      assert.deepEqual(patches.map((m) => m.seq), patches.map((_, i) => seq + 1 + i));
+      // Two clients, the same pushes
+      await b.until("the mark", 5000, (s) => s.marks.length === 2);
+      await agrees(b);
+      assert.deepEqual(b.messages.slice(1), patches);
+
+      // A selection that changes nothing, though the viewer builds its values again: nothing is pushed
+      const before = a.messages.length;
+      const now = a.seq;
+      await api("/api/select", { frame: 3 });
+      await sleep(300);
+      assert.equal(a.messages.length, before, JSON.stringify(a.messages.slice(before)));
+      assert.equal(b.seq, now);
+
+      // A client that connects after changes: the whole state at the current number, then the next patch applies to it
+      const c = await followState(base, token);
+      try {
+        assert.equal(c.messages[0].type, "state");
+        assert.equal(c.messages[0].seq, now);
+        await agrees(c);
+        await api("/api/marks/clear", { frames: [4] });
+        await c.until("the next patch", 5000, (s) => s.marks.length === 1);
+        assert.equal(c.messages[1].seq, now + 1);
+        await a.until("the next patch", 5000, (s) => s.marks.length === 1);
+        assert.deepEqual(a.messages.slice(before).map((m) => m.seq).slice(0, 1), [now + 1]);
+        await sleep(1300);
+        await agrees(c);
+        await agrees(a);
+        assert.equal(c.seq, a.seq);
+      } finally {
+        c.close();
+      }
+    } finally {
+      a.close();
+      b.close();
+      await api("/api/marks/clear", {});
+    }
+  });
+  await check("websocket: with 5,000 marks a selection is pushed as a small patch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-marks-"));
+    const big = join(dir, "big.pcapng");
+    writeFileSync(big, Buffer.concat([shb(), idb(1), ...Array.from({ length: 6000 }, (_, i) => epb(0, 1_700_000_000_000_000n + BigInt(i) * 1000n, udpFrame(i)))]));
+    let f;
+    try {
+      assert.equal((await api("/api/open", { path: big })).status, 200);
+      await api("/api/marks", { frames: Array.from({ length: 5000 }, (_, i) => i + 1), note: "" });
+      f = await followState(base, token);
+      assert.equal(f.state.marks.length, 5000);
+      assert.ok(f.messages[0].bytes > 100_000, `the whole state is ${f.messages[0].bytes} bytes`);
+      await api("/api/select", { frame: 77 });
+      await f.until("the selection", 5000, (s) => s.selected === 77);
+      const patch = f.messages.at(-1);
+      assert.equal(patch.type, "patch");
+      assert.ok(!("marks" in patch.patch));
+      assert.ok(patch.bytes < 2048, `the patch is ${patch.bytes} bytes`);
+      await sleep(250);
+      assert.deepEqual(f.state, (await api("/api/state")).json);
+    } finally {
+      f?.close();
+      await api("/api/marks/clear", {});
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   await check("open checks the content: renamed or compressed non-captures are refused", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-gate-"));

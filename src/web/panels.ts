@@ -59,7 +59,10 @@ const closing = new Set<string>();
 let available: { name: string; title: string }[] = [];
 
 export function initPanels(): void {
-  bus.on("state", sync);
+  // Only the list of panels matters to sync, and it keeps its identity while it doesn't change
+  bus.on("state", (s, prev) => {
+    if (!prev || s.panels !== prev.panels) sync(s);
+  });
   window.addEventListener("message", onMessage);
   for (const type of ["pointerdown", "keydown"]) {
     window.addEventListener(

@@ -8,12 +8,16 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ReportedError } from "./events.ts";
 import { keptSummary } from "./investigation.ts";
 import { listenLoopback } from "./loopback.ts";
+import { changedFields, patchMessage } from "./patch.ts";
 import { TargetExists, toRanges } from "./export.ts";
 import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
 import { changeText } from "./timerefs.ts";
-import { CAPTURE_FILE, CONV_TYPES, StaleGenerationError, type ConvType, type Viewer } from "./viewer.ts";
-import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, ForgetResult, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import { CAPTURE_FILE } from "./capturefile.ts";
+import { StaleGenerationError } from "./stale.ts";
+import { CONV_TYPES, type ConvType } from "./stats.ts";
+import type { Viewer } from "./viewer.ts";
+import type { CaptureRequest, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, FindingsResult, ForgetResult, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import type { Ranges } from "../shared/ranges.ts";
 
@@ -59,7 +63,8 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
   };
 
   const get: Record<string, Handler> = {
-    "/api/state": () => viewer.state,
+    // What changed is pushed first: the answer is then the state the next patch applies to, also for a field that changes back before it
+    "/api/state": () => (push(), viewer.state),
     "/api/rows": (q) => viewer.rows(num(q, "gen"), num(q, "start"), num(q, "count")),
     "/api/frame": (q) => viewer.frame(num(q, "num"), true),
     "/api/filter/check": (q) => viewer.checkFilter(q.get("filter") ?? ""),
@@ -75,6 +80,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/follow": (q) => viewer.follow(q.get("proto") || "TCP", q.get("filter") ?? ""),
     "/api/find": (q) => viewer.find(q.get("filter") ?? "", num(q, "from"), num(q, "dir")),
     // Download tokens stay here: a save names objects by frame and sha1
+    "/api/findings": () => viewer.findingsSummary(),
     "/api/objects": async (q): Promise<ObjectList> => ({ objects: (await viewer.capturedObjects(objectKind(q.get("kind")))).map(({ token, ...row }) => row), dir: objectsDefaultDir(viewer) }),
     "/api/capture/interfaces": () => viewer.capture.interfaces(),
     "/api/capture/check": (q) => viewer.capture.checkFilter(q.get("iface") ?? "", q.get("filter") ?? ""),
@@ -123,6 +129,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
     "/api/decode-as": (_q, b) => viewer.decodeAs(b, "user"),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
+    "/api/findings": (_q, b) => viewer.writeFindings({ path: String(b.path ?? ""), summary: b.summary === undefined ? undefined : String(b.summary), overwrite: !!b.overwrite }, "user"),
     "/api/objects/save": async (_q, b): Promise<ObjectSaveResult> => {
       const kind = objectKind(b.kind);
       const dir = text(b.dir, "dir");
@@ -244,18 +251,34 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     wss.handleUpgrade(req, socket, head, (ws) => {
       // A malformed frame or a too large message: drop this client, keep the server
       ws.on("error", () => ws.terminate());
-      ws.send(JSON.stringify({ type: "state", state: viewer.state } satisfies ServerEvent));
+      // What the others are sent first, so that this client holds exactly the state `sent` and `seq`, and the next patch applies to it
+      push(ws);
+      ws.send(JSON.stringify({ type: "state", seq, state: viewer.state } satisfies ServerEvent));
     });
   };
 
-  const broadcast = (event: ServerEvent) => {
-    let data: string;
-    try {
-      data = JSON.stringify(event);
-    } catch {
-      return;
-    }
-    for (const ws of wss.clients as Set<WebSocket>) if (ws.readyState === ws.OPEN) ws.send(data);
+  const broadcast = (data: string, except?: WebSocket) => {
+    for (const ws of wss.clients as Set<WebSocket>) if (ws !== except && ws.readyState === ws.OPEN) ws.send(data);
+  };
+  // Pushes are numbered; a client takes the whole state when it connects and then the patches in order
+  let seq = 0;
+  // The state as of the push numbered `seq`
+  let sent = viewer.state;
+  // A value's JSON is kept by its identity: a value is not changed in place (the viewer replaces it), so it reads the same as long as it exists
+  const jsons = new WeakMap<object, string>();
+  const jsonOf = (value: unknown): string => {
+    if (typeof value !== "object" || value === null) return JSON.stringify(value);
+    let json = jsons.get(value);
+    if (json === undefined) jsons.set(value, (json = JSON.stringify(value)));
+    return json;
+  };
+  /** Sends every client but `except` the fields that changed since the last push, if any did. */
+  const push = (except?: WebSocket) => {
+    const fields = changedFields(sent, viewer.state, jsonOf);
+    if (!Object.keys(fields).length) return;
+    seq++;
+    sent = viewer.state;
+    broadcast(patchMessage(seq, fields), except);
   };
   // Live captures change state many times a second; coalesce to ~10 updates/s
   let stateTimer: NodeJS.Timeout | null = null;
@@ -263,10 +286,10 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     if (stateTimer) return;
     stateTimer = setTimeout(() => {
       stateTimer = null;
-      broadcast({ type: "state", state: viewer.state });
+      push();
     }, 100);
   });
-  viewer.on("toast", (level: "info" | "error", text: string) => broadcast({ type: "toast", level, text }));
+  viewer.on("toast", (level: "info" | "error", text: string) => broadcast(JSON.stringify({ type: "toast", level, text } satisfies ServerEvent)));
 
   const listening = await listenLoopback(() => createServer(onRequest).on("upgrade", onUpgrade), port);
   port = listening.port;
@@ -336,6 +359,7 @@ const ACTIONS: Record<string, string> = {
   "/api/tls": "Setting the TLS key log",
   "/api/decode-as": "Changing Decode As",
   "/api/export": "Exporting packets",
+  "/api/findings": "Writing the findings report",
   "/api/objects": "Listing export objects",
   "/api/objects/save": "Saving export objects",
   "/api/agent/ask": "Asking the agent",
@@ -422,6 +446,8 @@ function userActivity(path: string, b: any, result: unknown): { level: ViewerEve
       const r = result as ExportResult;
       return { level: "INFO", text: `The user exported ${r.frames} packets to ${r.path}` };
     }
+    case "/api/findings":
+      return { level: "INFO", text: `The user wrote a findings report to ${(result as FindingsResult).path}` };
     case "/api/objects/save": {
       const { saved: n, folder, skipped } = result as ObjectSaveResult;
       const k = skipped.length;

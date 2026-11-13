@@ -34,9 +34,25 @@ with provenance: each version's npm page links to the commit and the workflow ru
   into WireBuddy's capture folder. They can open any capture file the user can read, read
   packets, change the filter, selection, marks, time references, packet comments, columns and
   Decode As entries, open, reload and close panels, open Wireshark, and write new
-  `.pcap`/`.pcapng` exports wherever the user can write. They never replace an existing
-  file, except one the agent exported itself in the same session and WireBuddy's own records of
-  switched-off extensions and of what is kept for each capture (below).
+  `.pcap`/`.pcapng` exports and `.md` findings reports wherever the user can write. They never
+  replace an existing file, except one the agent exported or wrote as a report itself in the same
+  session and WireBuddy's own records of switched-off extensions and of what is kept for each
+  capture (below).
+- File › Write Findings Report… and `write_findings` write one Markdown file (UTF-8, at most
+  4 MiB) under the rules of exports of packets: an absolute path in a directory that exists,
+  a name ending in `.md`, a new file (the page asks before replacing one; the agent may replace
+  only a file it wrote or exported itself in the session), never over the open capture or a
+  file being recorded. Like exports it is not kept out of code or configuration folders; it
+  is written `0600` under a temporary name in the target's folder, created exclusively, and put
+  in place whole (a new file by a link that fails if anything, a link included, is there). It holds the
+  capture's path, size, display filter, Decode As entries and time references, the marks with
+  their notes, up to 2,000, and the packet comments as the viewer shows them, up to 2,000 packets
+  (the capture file's own ones too). All of that, capture text included, is written as text: table
+  cells and inline values in code spans whose fence outgrows any backticks inside, control
+  characters as "?", comments in a blockquote with every line backslash-escaped, so nothing from
+  a capture or a note can become a link, image, HTML, heading, table break or code fence. Only
+  the summary, the caller's own Markdown (at most 16 KiB, no control characters but newline and
+  tab), is written as given.
 - File › Export Objects and `export_objects` save files carried in the traffic only into a new
   folder they create in a directory the user or the agent names, under names made of the frame
   number and the object's name reduced to letters, digits, `.`, `_` and `-`. The new folder must
@@ -54,7 +70,7 @@ with provenance: each version's npm page links to the commit and the workflow ru
   or follows a link in its own name.
 - Open accepts only files whose content is a capture (pcap, pcapng, snoop, Network Monitor;
   also gzip- or zstd-compressed), whatever the name.
-- Live captures, exports and saved objects are created readable only by the user. While a big
+- Live captures, exports, findings reports and saved objects are created readable only by the user. While a big
   live capture is read provisionally, slices of its newest packets are written next to it, into
   a folder `.wirebuddy-slices-<machine>-<pid>-<random>` only the user can open (`0700`, files
   `0600`, created exclusively); the folder is removed once the capture is read in full, the view

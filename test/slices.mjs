@@ -17,7 +17,7 @@ import { sleep, suite } from "./harness.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = mkdtempSync(join(tmpdir(), "wirebuddy-slices-"));
 const entry = join(out, "entry.ts");
-writeFileSync(entry, ["livetail", "flows", "framestore", "sharkd"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n") + `\nexport { memoryShort, rssBytes } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`);
+writeFileSync(entry, ["livetail", "flows", "framestore", "sharkd", "memory"].map((m) => `export * from ${JSON.stringify(join(root, `src/server/${m}.ts`))};`).join("\n"));
 await build({ entryPoints: [entry], outfile: join(out, "slices.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { LiveTail, FlowIndex, FrameStore, Sharkd, Superseded, CHUNK, CONTEXT, sliceFrames, sliceKey, toGlobal, toLocal, renumberRow, renumberInfo, renumberTree, heldReason, streamNumbered, matchingFrames, memoryShort, rssBytes } = await import(join(out, "slices.mjs"));
 

@@ -118,3 +118,56 @@ export async function launchChrome(bin, profile, flags) {
   const ws = await pageSocket(port);
   return { chrome, ws, cdp: rawCdp(ws) };
 }
+
+/**
+ * A WebSocket to the server's UI feed, followed the way the page does: `state` is taken whole, a `patch` is applied
+ * when its number is the one after the last, and a skipped number is an error (thrown by `state`, `seq` and `until`).
+ * Resolves once the first message (the whole state) is in. `messages` lists what came as {type, seq, bytes, patch?}
+ * (the state message has no patch), `toasts` the texts of toasts, `until(describe, ms, pred)` the state once `pred(state)` is truthy.
+ */
+export async function followState(base, token) {
+  const ws = new WebSocket(`${base.replace("http", "ws")}/ws?token=${token}`);
+  const messages = [];
+  const toasts = [];
+  let state = null;
+  let seq = null;
+  let failure = null;
+  const woken = new Set();
+  ws.on("message", (raw) => {
+    const m = JSON.parse(String(raw));
+    if (m.type === "toast") return void toasts.push(m.text);
+    messages.push({ type: m.type, seq: m.seq, bytes: Buffer.byteLength(String(raw)), patch: m.patch });
+    if (m.type === "state") state = m.state;
+    else if (m.type === "patch" && state !== null && m.seq === seq + 1) state = { ...state, ...m.patch };
+    else failure = new Error(`push ${m.seq} after ${seq}${state === null ? " (no state yet)" : ""}: a number was skipped`);
+    seq = m.seq;
+    for (const wake of woken) wake();
+  });
+  await new Promise((resolve, reject) => (ws.once("open", resolve), ws.once("error", reject)));
+  const until = (what, ms, pred) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => (woken.delete(look), reject(new Error(`gave up waiting for ${what}`))), ms);
+      const look = () => {
+        if (failure) return clearTimeout(timer), woken.delete(look), reject(failure);
+        if (state !== null && pred(state)) return clearTimeout(timer), woken.delete(look), resolve(state);
+      };
+      woken.add(look);
+      look();
+    });
+  await until("the first state", 10_000, () => true);
+  return {
+    ws,
+    messages,
+    toasts,
+    until,
+    get state() {
+      if (failure) throw failure;
+      return state;
+    },
+    get seq() {
+      if (failure) throw failure;
+      return seq;
+    },
+    close: () => ws.close(),
+  };
+}

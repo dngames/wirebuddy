@@ -7,7 +7,12 @@
  * Errors come back as a non-2xx status with an {@link ApiError} body.
  *
  * The WebSocket at `/ws?token=...` only pushes {@link ServerEvent}s; the UI
- * sends nothing over it.
+ * sends nothing over it. A client gets the whole `ViewState` once, when it
+ * connects (`state`), then `patch`es: the top-level fields whose value changed
+ * since the push before, each with its whole new value. Pushes are numbered:
+ * a patch's `seq` is one more than the one before, and a client that sees a
+ * number skipped reconnects for a whole state. `GET /api/state` answers the
+ * whole state, without a number.
  *
  * `POST /api/select` rows are indices into the displayed list of `view`
  * ({ file, filter, generation }); when that list has since been replaced or
@@ -67,6 +72,8 @@
  * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
  * | POST   | /api/decode-as                | DecodeAsChange                       | DecodeAsResult         |
  * | POST   | /api/export                   | ExportRequest                        | ExportResult (400 with code "exists": the file is there, ask before `overwrite`) |
+ * | GET    | /api/findings                 |                                      | FindingsSummary        |
+ * | POST   | /api/findings                 | FindingsRequest                      | FindingsResult (400 with code "exists": the file is there, ask before `overwrite`) |
  * | GET    | /api/objects                  | ?kind=http\|imf\|smb\|tftp\|dicom\|ftp-data | ObjectList      |
  * | POST   | /api/objects/save             | { kind, dir, file, keys? } (409 if another capture is open) | ObjectSaveResult |
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
@@ -734,6 +741,33 @@ export interface ExportResult {
   provisional?: number;
 }
 
+/** File > Write Findings Report: a Markdown file with the marks and their notes, the packet comments and the capture's facts. */
+export interface FindingsRequest {
+  /** Absolute path ending in .md, in a directory that exists. */
+  path: string;
+  /** The caller's own Markdown, written into the report as given: at most 16 KiB, no control characters but newline and tab. */
+  summary?: string;
+  /** Replace an existing file. */
+  overwrite?: boolean;
+}
+
+/** What a report would list now. */
+export interface FindingsSummary {
+  /** Marked packets. */
+  marks: number;
+  /** Packets with comments, as the viewer shows them: edited here, else the file's (packets read in full). */
+  commented: number;
+}
+
+export interface FindingsResult {
+  path: string;
+  /** Marked packets of the capture (the report lists at most 2,000). */
+  marks: number;
+  /** Packets with comments written out. */
+  commented: number;
+  size: number;
+}
+
 /** File > Export Objects: what carries the files. */
 export type ObjectKind = "http" | "imf" | "smb" | "tftp" | "dicom" | "ftp-data";
 
@@ -761,7 +795,10 @@ export interface ObjectSaveResult {
 }
 
 export type ServerEvent =
-  | { type: "state"; state: ViewState }
+  /** The whole state, sent when the client connects; `seq` is the number of the last push. */
+  | { type: "state"; seq: number; state: ViewState }
+  /** What changed since the push before; `seq` is one more than that push's. */
+  | { type: "patch"; seq: number; patch: Partial<ViewState> }
   | { type: "toast"; level: "info" | "error"; text: string };
 
 /**

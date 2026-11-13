@@ -22,6 +22,8 @@ decode or a packet list can't show, the agent extends the viewer itself.
   selected.
   Right-click packets to ask the agent about them without leaving the view. You check its
   findings in the packets instead of taking a summary on trust.
+  When you want the result written up, the agent marks and comments the packets that carry it
+  and writes a findings report.
 - **The agent extends the viewer.** Traffic Wireshark doesn't know, such as a company's sensor
   stream or a game's protocol, shows up as "Data". The agent writes a Lua dissector for it from
   the bytes or a spec, tests it against the open capture and reloads the view, which then
@@ -60,6 +62,11 @@ The viewer itself works like Wireshark:
   packet comments edited in the viewer are kept in WireBuddy's data folder and come back when
   you open the capture (or a copy of it) again, also after another capture or a restart; File ›
   Forget Kept Marks and Comments… goes back to what the capture file holds.
+- **A findings report:** File › Write Findings Report… (or the agent's `write_findings`) writes
+  what an investigation found as one Markdown file: your or the agent's summary, the capture's
+  facts, a table of the marked packets with their notes, and the packets with comments, in the
+  rules of an export (a new `.md` file); text from the capture is written escaped, so it reads as
+  text and renders as nothing else.
 - **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
   checked as you type, new files automatically, a ring buffer and stop conditions; the view
   updates about once a second.
@@ -366,6 +373,7 @@ solution; `solution/ctseries` is the panel.
 | `expert_info` | Expert Information grouped by severity and message, with example frames |
 | `io_graph` | Packets/bytes/bits over time for up to 4 filters: peaks, empty stretches, a downsampled series |
 | `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file, with their packet comments as edited and marks as comments (pcapng) |
+| `write_findings` | Write the findings report to a new Markdown file: the agent's summary, the capture's facts, the marked packets with their notes and the packets with comments |
 | `export_objects` | List the files carried in the traffic (HTTP, email, SMB, TFTP, DICOM, FTP), or save them to a new folder |
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
@@ -423,9 +431,9 @@ the questions you asked it.
 - The MCP tools can start and stop captures on the interfaces `dumpcap` may capture on, always
   into WireBuddy's capture folder. They can open any capture file you can read, read packets,
   change the filter, marks, time references, packet comments, selection, columns and Decode As
-  entries, open and close panels, open Wireshark, and write new `.pcap`/`.pcapng` exports where
-  you can write; an existing file is never replaced unless the agent exported it itself in the
-  same session.
+  entries, open and close panels, open Wireshark, and write new `.pcap`/`.pcapng` exports and
+  `.md` findings reports where you can write; an existing file is never replaced unless the
+  agent wrote it itself in the same session.
 - File › Export Objects and `export_objects` save files from the traffic, whose names and
   contents a sender chose, only into a new folder they create (`http-objects`, `http-objects-2`,
   …) in a directory you or the agent name, under names of their own (`f12-report.pdf`). No other

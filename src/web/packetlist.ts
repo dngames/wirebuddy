@@ -921,12 +921,15 @@ export function createPacketList(): HTMLElement {
   bus.on("state", (s, prev) => {
     // Measured with the row count the scroll was made in
     takeScroll();
-    const cols = s.columns ?? [];
-    const key = `${cols.join("\u0001")}\u0002${(s.customColumns ?? []).map((c) => c.field).join("\u0001")}`;
-    if (key !== headerKey) {
-      headerKey = key;
-      columns = cols.slice();
-      buildHeader();
+    // The columns keep their identity while they don't change
+    if (!prev || s.columns !== prev.columns || s.customColumns !== prev.customColumns) {
+      const cols = s.columns ?? [];
+      const key = `${cols.join("\u0001")}\u0002${(s.customColumns ?? []).map((c) => c.field).join("\u0001")}`;
+      if (key !== headerKey) {
+        headerKey = key;
+        columns = cols.slice();
+        buildHeader();
+      }
     }
     const fileChanged = !prev || s.file !== prev.file;
     // A restarted server's rows and generations have nothing to do with the cached ones

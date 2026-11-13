@@ -6,9 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- The page gets only what changed of the view's state after the first, so many marks or a long selection no longer slow a live capture's updates
 - Marks, time references and packet comments edited in the viewer are kept with their capture and come back when it (or a copy of it) is opened again, also after another capture or a restart; a notice says what came back
 - Security: what is kept for each capture is written to `~/.local/share/wirebuddy/investigations` (folder `0700`, files `0600`), never next to the capture, and a file there that doesn't check out is ignored whole and set aside, not overwritten
 - File › Forget Kept Marks and Comments… drops the marks, time references and comment edits of the open capture, so its packets read as the capture file has them again
+- File › Write Findings Report… and the agent's `write_findings` write the summary, the marked packets with their notes, the packet comments and the capture's facts as one Markdown file, under the rules of exports; text from the capture is escaped so it can't render as a link, image, HTML or heading
 - Open, Close and Start Capture ask before discarding edited packet comments only when they can't be kept with the capture
 
 ## [0.16.0] - 2026-11-12
