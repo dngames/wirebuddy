@@ -104,12 +104,6 @@ end (A25) · the extension test says what stayed undecoded (A26) · the README's
 Released as 0.17.0 (tag `v0.17.0`), with everything above.
 Round 3, fixed afterwards: the session token is kept between starts, so an open page reconnects after a restart, and a
 page whose token is refused says so in a notice over the page (A33).
-Round 3, fixed afterwards: the session token is kept between starts, so an open page reconnects after a restart, and a
-page whose token is refused says so in a notice over the page (A33).
-Round 3, fixed afterwards: custom columns and the recent files are kept across a restart, and the README says the display
-filter and the questions are not (A34).
-Round 3, fixed afterwards: the session token is kept between starts, so an open page reconnects after a restart, and a
-page whose token is refused says so in a notice over the page (A33).
 Round 3, fixed afterwards: custom columns and the recent files are kept across a restart, and the README says the display
 filter and the questions are not (A34).
 Round 3, fixed afterwards: the watcher prints the activity before the event it was woken by (A39).
