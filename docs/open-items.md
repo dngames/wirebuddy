@@ -76,7 +76,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | # | Item | Recommendation |
 |---|---|---|
 | D1 | The live tail's future (fifth piece of the `viewer.ts` work depends on it) | keep it frozen, ask Wireshark upstream |
-| D2 | Release 0.17.0: the release commit is on main once its pull request merges; the tag `v0.17.0` is then pushed by the maintainer, which starts the release workflow | — |
 | D3 | Dependabot pull requests 8 and 9 (9 needs a fresh CI run) | — |
 | D4 | Required reviewers on the `npm` environment, as a gate before publishing | — |
 
@@ -93,3 +92,4 @@ is no longer a problem reported to the agent, and the guide says what a panel se
 guide on following a live capture (A23) · a new display filter shows the selected packet or the top, not the
 end (A25) · the extension test says what stayed undecoded (A26) · the README's name for the questions dialog
 (A27) · the capture folder's refused creation names the user (A13).
+Released as 0.17.0 (tag `v0.17.0`), with everything above.
