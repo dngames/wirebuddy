@@ -107,7 +107,8 @@ function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: num
   };
   for (const top of nodes) {
     const name = (top.fn ?? "").toLowerCase();
-    const selected = wanted ? wanted.includes(name) : name !== "frame";
+    // A line without a field or children (the mark) has nothing to expand
+    const selected = !top.fn && !top.n?.length ? true : wanted ? wanted.includes(name) : name !== "frame";
     if (selected) walk([top], 0);
     else lines.push(`${top.l}  (collapsed${wanted ? "" : "; pass protocols:[\"frame\"] to expand"})`);
     if (lines.length >= opts.maxLines) {

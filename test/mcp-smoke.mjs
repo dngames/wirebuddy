@@ -147,6 +147,7 @@ try {
   assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame: yours; replaced the user's mark on frame 29$/);
   // The details of a marked packet lead with its mark
   await call("inspect_frame", { frame: 29, max_lines: 10 }, (t) => assert.match(t, /^Frame 29: .*\nMarked by Agent: yours\n/));
+  await call("inspect_frame", { frame: 29, protocols: ["ip"], max_lines: 10 }, (t) => assert.match(t, /^Frame 29: .*\nMarked by Agent: yours\nFrame 29: .*\(collapsed/));
   await call("clear_marks", { frames: [26, 27, 28, 29] }, () => {});
   await call("query_packets", { filter: "http", fields: ["http.request.uri", "http.response.code"] }, (t) => {
     assert.match(t, /^No\. \| http\.request\.uri \| http\.response\.code$/m);
