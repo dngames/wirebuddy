@@ -7,7 +7,12 @@
  * Errors come back as a non-2xx status with an {@link ApiError} body.
  *
  * The WebSocket at `/ws?token=...` only pushes {@link ServerEvent}s; the UI
- * sends nothing over it.
+ * sends nothing over it. A client gets the whole `ViewState` once, when it
+ * connects (`state`), then `patch`es: the top-level fields whose value changed
+ * since the push before, each with its whole new value. Pushes are numbered:
+ * a patch's `seq` is one more than the one before, and a client that sees a
+ * number skipped reconnects for a whole state. `GET /api/state` answers the
+ * whole state, without a number.
  *
  * `POST /api/select` rows are indices into the displayed list of `view`
  * ({ file, filter, generation }); when that list has since been replaced or
@@ -790,7 +795,10 @@ export interface ObjectSaveResult {
 }
 
 export type ServerEvent =
-  | { type: "state"; state: ViewState }
+  /** The whole state, sent when the client connects; `seq` is the number of the last push. */
+  | { type: "state"; seq: number; state: ViewState }
+  /** What changed since the push before; `seq` is one more than that push's. */
+  | { type: "patch"; seq: number; patch: Partial<ViewState> }
   | { type: "toast"; level: "info" | "error"; text: string };
 
 /**

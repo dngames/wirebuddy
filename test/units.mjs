@@ -19,7 +19,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n") + `\nexport { availableMemory } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`,
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n") + `\nexport { availableMemory } from ${JSON.stringify(join(root, "src/server/viewer.ts"))};`,
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -27,6 +27,7 @@ const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Shar
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
+const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
@@ -1627,6 +1628,21 @@ try {
     assert.throws(() => checkReportTarget(file, [file], true), /open capture/);
     mkdirSync(join(reportDir, "dir.md"));
     assert.throws(() => checkReportTarget(join(reportDir, "dir.md"), [], true), /not a file/);
+  });
+  await check("patch: only the fields that changed, a value rebuilt equal isn't one, and big unchanged values are never serialised", () => {
+    const marks = [{ frame: 1 }];
+    const prev = { marks, rows: [[1, 2]], filter: "", total: 3, capture: { n: 1 } };
+    const seen = [];
+    const jsonOf = (v) => (seen.push(v), JSON.stringify(v));
+    const next = { marks, rows: [[1, 2]], filter: "tcp", total: 3, capture: { n: 2 } };
+    assert.deepEqual(changedFields(prev, next, jsonOf), { filter: '"tcp"', capture: '{"n":2}' });
+    assert.ok(!seen.includes(marks));
+    assert.deepEqual(changedFields(prev, { ...prev, rows: [[1, 2]] }, jsonOf), {});
+    assert.deepEqual(changedFields(prev, { ...prev, filter: null }, jsonOf), { filter: "null" });
+    assert.deepEqual(changedFields(prev, prev, jsonOf), {});
+    assert.deepEqual(changedFields({ a: null }, { a: { b: 1 } }, jsonOf), { a: '{"b":1}' });
+    assert.deepEqual(JSON.parse(patchMessage(7, { filter: '"tcp"', capture: '{"n":2}' })), { type: "patch", seq: 7, patch: { filter: "tcp", capture: { n: 2 } } });
+    assert.deepEqual(JSON.parse(patchMessage(8, {})), { type: "patch", seq: 8, patch: {} });
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

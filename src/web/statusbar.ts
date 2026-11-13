@@ -1,6 +1,6 @@
 /** Status bar: expert LED, file, field info, panel offers, TLS keys, Decode As, extensions, packet counts, provisional packets, marks, capture, connection. */
 
-import type { ExpertItem, ExpertSeverity, PanelOffer, ViewState } from "../shared/api.ts";
+import type { ExpertItem, ExpertSeverity, Mark, PanelOffer, ViewState } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
@@ -80,6 +80,9 @@ export function createStatusBar(): HTMLElement {
       });
   };
 
+  let agentMarksOf: Mark[] | null = null;
+  let agentMarks = 0;
+
   const update = (): void => {
     const s = app.state;
     const sev = capKnown ? capSev : maxSeverity(app.frame);
@@ -118,7 +121,12 @@ export function createStatusBar(): HTMLElement {
       const known = knownFrames(s);
       const shown = s.displayedFrames + (s.tail?.displayed ?? 0);
       setText(pktSeg, `Packets: ${fmtInt(known)} · Displayed: ${fmtInt(shown)} (${fmtPct(shown, known || 1)})${nSel > 1 ? ` · Selected: ${fmtInt(nSel)}` : ""}`);
-      const agent = s.marks.filter((m) => m.by === "agent").length;
+      // Counted again only for another marks array: the state keeps the one it has while the marks don't change
+      if (s.marks !== agentMarksOf) {
+        agentMarksOf = s.marks;
+        agentMarks = s.marks.filter((m) => m.by === "agent").length;
+      }
+      const agent = agentMarks;
       markSeg.hidden = false;
       setText(markSeg, `Marked: ${fmtInt(s.marks.length)}${agent ? ` (${agent} by ${agentName()})` : ""}`);
     } else {

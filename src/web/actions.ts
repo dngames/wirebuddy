@@ -1,6 +1,6 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
-import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, ViewState } from "../shared/api.ts";
+import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, Mark, ViewState } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, captureActive, hooks, knownFrames } from "./app.ts";
@@ -14,12 +14,12 @@ let wsStateSeq = 0;
 let stateReq: Promise<void> | null = null;
 let stateAgain = false;
 
-/** Called for every state pushed over the WebSocket. */
+/** Called for every state or patch taken from the WebSocket. */
 export function noteWsState(): void {
   wsStateSeq++;
 }
 
-/** GET /api/state; dropped if a pushed state arrives while it is in flight. */
+/** GET /api/state; dropped if a pushed state or patch arrives while it is in flight (the server pushes what changed before it answers, so a taken answer is the state the patches after it apply to). */
 export function refreshState(): Promise<void> {
   if (stateReq) {
     stateAgain = true;
@@ -52,6 +52,9 @@ export function markResync(): void {
   resync = true;
 }
 
+/** The `marks` array of the state `app.marks` was built from. */
+let marksOf: Mark[] | null = null;
+
 export function applyState(s: ViewState): void {
   const prev = app.state;
   const fresh = !prev || (resync && prev.instance !== s.instance);
@@ -62,7 +65,11 @@ export function applyState(s: ViewState): void {
   app.state = s;
   // Auto-scroll the agent turned off comes back with the next capture or another file, not at the stop: its packet stays in view
   if (pausedByAgent && prev && (s.file !== prev.file || (captureActive(s) && !captureActive(prev)))) setAutoScroll(load<boolean>("autoscroll", true));
-  app.marks = new Map(s.marks.map((m) => [m.frame, m]));
+  // A patch leaves `marks` out when it didn't change: the array is the same object then
+  if (s.marks !== marksOf) {
+    app.marks = new Map(s.marks.map((m) => [m.frame, m]));
+    marksOf = s.marks;
+  }
 
   let reveal: { index: number; flash: boolean } | null = null;
   if (fresh || !prev) {

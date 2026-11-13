@@ -9,6 +9,10 @@ import { toast, toastRefused } from "./toast.ts";
 let ws: WebSocket | null = null;
 let attempt = 0;
 let retryTimer = 0;
+/** Number of the last push of this socket taken: its whole state, then each patch in turn; null before the state. */
+let pushSeq: number | null = null;
+/** Sockets in a row closed for a skipped number without a patch taken in order since. */
+let skips = 0;
 
 function setConn(c: ConnState): void {
   if (app.conn === c) return;
@@ -27,6 +31,7 @@ function open(): void {
     return;
   }
   ws = sock;
+  pushSeq = null;
   sock.onopen = () => {
     attempt = 0;
     // The server may have restarted: the next state must not be diffed against the old one.
@@ -42,8 +47,20 @@ function open(): void {
       return;
     }
     if (msg.type === "state") {
+      pushSeq = msg.seq;
       noteWsState();
       applyState(msg.state);
+    } else if (msg.type === "patch") {
+      // Without the state before it or with a number missing, what changed in between is unknown: a whole state comes with a new socket
+      if (!app.state || pushSeq === null || msg.seq !== pushSeq + 1) {
+        skipped(sock);
+        return;
+      }
+      pushSeq = msg.seq;
+      skips = 0;
+      noteWsState();
+      // The fields the patch leaves out keep their objects from the state before: applyState and the handlers rely on that to skip work
+      applyState({ ...app.state, ...msg.patch });
     } else if (msg.type === "toast") {
       // The server logs an error it sends here for the agent itself
       if (msg.level === "error") toastRefused(msg.text);
@@ -58,6 +75,19 @@ function open(): void {
   sock.onerror = () => {
     // onclose follows and schedules the retry
   };
+}
+
+/** A push is missing: reconnect for a whole state, at once the first time, then with the backoff so that a server that keeps doing this is not hammered. */
+function skipped(sock: WebSocket): void {
+  ws = null;
+  sock.onmessage = null;
+  sock.close();
+  if (skips++ === 0) {
+    open();
+    return;
+  }
+  attempt = skips - 2;
+  schedule();
 }
 
 function schedule(): void {

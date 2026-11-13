@@ -11,7 +11,7 @@ import { dirname, join, sep } from "node:path";
 import assert from "node:assert/strict";
 import { writeAcmeCapture } from "./acme.mjs";
 import { epb, idb, shb, udpFrame } from "./capgen.mjs";
-import { apiFetch, serverUrl, spawnServer, suite } from "./harness.mjs";
+import { apiFetch, followState, serverUrl, sleep, spawnServer, suite } from "./harness.mjs";
 import { Pcap } from "./media/pcap.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
@@ -1780,6 +1780,100 @@ try {
     ws._socket.write(Buffer.from([0x8f, 0x80, 1, 2, 3, 4]));
     await closed;
     assert.equal((await api("/api/state")).status, 200);
+  });
+  await check("websocket: a whole state with a number first, then patches of what changed, numbered one after the other", async () => {
+    await api("/api/open", { path: fixture });
+    await api("/api/marks/clear", {});
+    await api("/api/select", { frame: 3 });
+    await sleep(300);
+    const a = await followState(base, token);
+    const b = await followState(base, token);
+    // The state as the page holds it, once what is pending has been pushed
+    const agrees = async (f) => {
+      await sleep(250);
+      assert.deepEqual(f.state, (await api("/api/state")).json);
+    };
+    try {
+      assert.equal(a.messages[0].type, "state");
+      assert.ok(Number.isInteger(a.messages[0].seq));
+      assert.equal(b.messages[0].type, "state");
+      assert.equal(b.messages[0].seq, a.seq, "a client connecting between pushes gets the number of the last push");
+      await agrees(a);
+      await agrees(b);
+
+      // A change of the marks is followed a second later by the viewer's own note that it kept them
+      const seq = a.seq;
+      await api("/api/marks", { frames: [4, 5], note: "n" });
+      await a.until("the mark", 5000, (s) => s.marks.length === 2);
+      await sleep(1300);
+      await agrees(a);
+      const patches = a.messages.filter((m) => m.type === "patch");
+      assert.equal(patches[0].seq, seq + 1);
+      assert.ok(patches[0].patch.marks);
+      for (const m of patches) assert.ok(!("columns" in m.patch) && !("capture" in m.patch), Object.keys(m.patch).join());
+      assert.deepEqual(patches.map((m) => m.seq), patches.map((_, i) => seq + 1 + i));
+      // Two clients, the same pushes
+      await b.until("the mark", 5000, (s) => s.marks.length === 2);
+      await agrees(b);
+      assert.deepEqual(b.messages.slice(1), patches);
+
+      // A selection that changes nothing, though the viewer builds its values again: nothing is pushed
+      const before = a.messages.length;
+      const now = a.seq;
+      await api("/api/select", { frame: 3 });
+      await sleep(300);
+      assert.equal(a.messages.length, before, JSON.stringify(a.messages.slice(before)));
+      assert.equal(b.seq, now);
+
+      // A client that connects after changes: the whole state at the current number, then the next patch applies to it
+      const c = await followState(base, token);
+      try {
+        assert.equal(c.messages[0].type, "state");
+        assert.equal(c.messages[0].seq, now);
+        await agrees(c);
+        await api("/api/marks/clear", { frames: [4] });
+        await c.until("the next patch", 5000, (s) => s.marks.length === 1);
+        assert.equal(c.messages[1].seq, now + 1);
+        await a.until("the next patch", 5000, (s) => s.marks.length === 1);
+        assert.deepEqual(a.messages.slice(before).map((m) => m.seq).slice(0, 1), [now + 1]);
+        await sleep(1300);
+        await agrees(c);
+        await agrees(a);
+        assert.equal(c.seq, a.seq);
+      } finally {
+        c.close();
+      }
+    } finally {
+      a.close();
+      b.close();
+      await api("/api/marks/clear", {});
+    }
+  });
+  await check("websocket: with 5,000 marks a selection is pushed as a small patch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-marks-"));
+    const big = join(dir, "big.pcapng");
+    writeFileSync(big, Buffer.concat([shb(), idb(1), ...Array.from({ length: 6000 }, (_, i) => epb(0, 1_700_000_000_000_000n + BigInt(i) * 1000n, udpFrame(i)))]));
+    let f;
+    try {
+      assert.equal((await api("/api/open", { path: big })).status, 200);
+      await api("/api/marks", { frames: Array.from({ length: 5000 }, (_, i) => i + 1), note: "" });
+      f = await followState(base, token);
+      assert.equal(f.state.marks.length, 5000);
+      assert.ok(f.messages[0].bytes > 100_000, `the whole state is ${f.messages[0].bytes} bytes`);
+      await api("/api/select", { frame: 77 });
+      await f.until("the selection", 5000, (s) => s.selected === 77);
+      const patch = f.messages.at(-1);
+      assert.equal(patch.type, "patch");
+      assert.ok(!("marks" in patch.patch));
+      assert.ok(patch.bytes < 2048, `the patch is ${patch.bytes} bytes`);
+      await sleep(250);
+      assert.deepEqual(f.state, (await api("/api/state")).json);
+    } finally {
+      f?.close();
+      await api("/api/marks/clear", {});
+      await api("/api/open", { path: fixture });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   await check("open checks the content: renamed or compressed non-captures are refused", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-gate-"));
