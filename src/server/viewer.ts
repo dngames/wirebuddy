@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { COLUMN_FIELD, matchingFrames, page, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
+import { COLUMN_FIELD, matchingFrames, page, Sharkd, SharkdError, SharkdExit, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { fileHead, looksLikeCapture, safeSize } from "./capturefile.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
@@ -33,6 +33,7 @@ import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, S
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
+import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
@@ -230,8 +231,6 @@ export class Viewer extends EventEmitter {
   private loadedHead: Buffer = Buffer.alloc(0);
   /** sharkd starts an extension crashed; a load is retried after each. */
   private extensionCrashes = 0;
-  /** Lua errors the extensions reported for the open file, told to the agent in batches. */
-  private luaErrs = { file: "", frames: new Set<number>(), more: false, told: 0, example: null as LuaError | null, timer: null as NodeJS.Timeout | null, since: 0 };
   private readonly sharkdBin: string;
   /** Problems and user activity for the agent. */
   readonly events = new EventLog(
@@ -250,6 +249,11 @@ export class Viewer extends EventEmitter {
   private readonly profile: string | undefined;
   private readonly editcap: string;
   private readonly mergecap: string;
+  /** Lua errors of the open file, told to the agent in batches. */
+  private readonly luaBatches = new LuaErrors({
+    file: () => this.state.file,
+    report: (text) => this.events.add("ERROR", text),
+  });
   /** The panels offered for the open file. */
   private readonly offers = new PanelOffers({
     state: () => this.state,
@@ -392,7 +396,7 @@ export class Viewer extends EventEmitter {
         this.events.add("WARNING", printable(message) + hint);
       };
       e.onLua = (report) => this.luaReport(report);
-      e.onLuaError = (error) => this.luaError(error);
+      e.onLuaError = (error) => this.luaBatches.luaError(error);
     }
     const source: PanelSource = {
       view: () => this.panelView(),
@@ -2873,7 +2877,7 @@ export class Viewer extends EventEmitter {
     return this.exclusive(async () => {
       if (change) this.extensions.include(change.name, change.on);
       else this.extensions.refresh();
-      this.forgetLuaErrors();
+      this.luaBatches.forgetLuaErrors();
       // Panels wait until the view reads with the new extensions, then start over
       this.panelData.hold(true);
       const filter = this.state.filter;
@@ -2928,42 +2932,6 @@ export class Viewer extends EventEmitter {
       return;
     }
     await this.reloadExtensions({ name, on });
-  }
-
-  /** An extension failed on a packet while a file was read: the agent hears about new ones in batches. */
-  private luaError(e: LuaError): void {
-    const s = this.luaErrs;
-    if (e.file !== s.file) {
-      this.tellLuaErrors();
-      this.forgetLuaErrors(e.file);
-    }
-    if (e.frame === 0) s.more = true;
-    else if (!s.frames.has(e.frame) && s.frames.size < 100_000) {
-      s.frames.add(e.frame);
-      if (!s.example || e.frame < s.example.frame) s.example = e;
-    }
-    // Once they stop coming for 1.5 s (a looping dissector takes 1 s per packet), at most 8 s after the first
-    if (s.timer) clearTimeout(s.timer);
-    else s.since = Date.now();
-    s.timer = setTimeout(() => this.tellLuaErrors(), Math.max(0, Math.min(1500, s.since + 8000 - Date.now())));
-  }
-
-  private tellLuaErrors(): void {
-    const s = this.luaErrs;
-    s.timer = null;
-    const n = s.frames.size - s.told;
-    if (n <= 0 || !s.example) return;
-    const what = `${s.told ? `${n} more packet${n === 1 ? "" : "s"}` : `${n}${s.more ? "+" : ""} packet${n === 1 ? "" : "s"}`} of ${basename(s.file)}`;
-    this.events.add("ERROR", `Lua errors in ${what}, e.g. frame ${s.example.frame}: ${printable(s.example.message)} — fix the extension, check it with extensions(action "test"), then reload`);
-    s.told = s.frames.size;
-    s.example = null;
-  }
-
-  /** New code or another file: its errors are all new. */
-  private forgetLuaErrors(file = this.state.file ?? ""): void {
-    const s = this.luaErrs;
-    if (s.timer) clearTimeout(s.timer);
-    Object.assign(s, { file, frames: new Set<number>(), more: false, told: 0, example: null, timer: null });
   }
 
   /** Loads one extension into a separate sharkd with the open capture and reports what it decodes. */
