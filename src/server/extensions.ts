@@ -1244,6 +1244,13 @@ function alive(pid: number): boolean {
   }
 }
 
+/** Why a sharkd that started without loading the probe plugin has no Lua: as root it loads none, whatever it was built with. */
+export function noLuaReason(uid: number | undefined): string {
+  return uid === 0
+    ? "sharkd does not load Lua plugins when it runs as root (Wireshark's rule); run WireBuddy as an ordinary user to use extensions and Decode As"
+    : "this sharkd has no Lua support";
+}
+
 /** Asks sharkd, through a throwaway plugin, where its global plugins live. */
 function probeSharkd(sharkd: string): Promise<{ globalDir: string }> {
   const config = mkdtempSync(join(tmpdir(), "wirebuddy-probe-"));
@@ -1273,7 +1280,7 @@ function probeSharkd(sharkd: string): Promise<{ globalDir: string }> {
       err += d;
       const m = /WIREBUDDY-PROBE\t([^\n]+)\n/.exec(err);
       if (m) finish({ globalDir: m[1] });
-      else if (/Hello in child/.test(err)) finish(new Error("this sharkd has no Lua support"));
+      else if (/Hello in child/.test(err)) finish(new Error(noLuaReason(process.getuid?.())));
     });
     p.on("error", (e) => finish(e));
     p.on("close", () => finish(new Error("sharkd exited while starting")));

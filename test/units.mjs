@@ -28,6 +28,7 @@ const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Shar
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
+const { noLuaReason } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -2144,6 +2145,12 @@ try {
     // a kill not in place is blamed on the extensions like a crash
     x = session({ answer: (m) => (m === "load" && !x.told.ext.length ? Promise.reject(new SharkdExit("sharkd exited (SIGKILL)", "SIGKILL")) : loads()(m)) });
     assert.equal((await x.s.load(x.made[0], "/c.pcap", "", [])).rolledBack, "reverted");
+  });
+
+  await check("the reason a sharkd shows no Lua: root loads none, others lack the support", () => {
+    assert.equal(noLuaReason(1000), "this sharkd has no Lua support");
+    assert.equal(noLuaReason(undefined), "this sharkd has no Lua support");
+    assert.match(noLuaReason(0), /does not load Lua plugins when it runs as root.*ordinary user/);
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

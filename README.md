@@ -117,6 +117,9 @@ WireBuddy is for working on a capture together with the agent:
 
 - **Node.js ≥ 22**
 
+- **An ordinary user for extensions and Decode As**: Wireshark's `sharkd` loads no Lua plugins
+  when it runs as root, so as root they are unavailable and WireBuddy says so.
+
 Developed on Ubuntu 22.04 with Wireshark 4.6.6; CI runs on Ubuntu 24.04 with the current stable
 Wireshark from the PPA. Other Linux distributions should work; macOS, live capture
 included, was verified only in CI on a hosted runner, not by hand; Windows is untested.
