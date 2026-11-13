@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -32,13 +32,14 @@ import {
 import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
-import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
+import type { CapturedObject, ObjectKind } from "./objects.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
+import { FOLLOW_LIMIT, capturedObjects, follow, saveObjects, type StreamsView } from "./streams.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
-import { launchWireshark } from "./wireshark.ts";
+import { openInWireshark } from "./wireshark.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { VERSION } from "../shared/version.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
@@ -138,16 +139,8 @@ export interface SharkdPhs {
   protos?: SharkdPhs[];
 }
 
-/** Bytes of payload data a follow result may carry before it is cut. */
-const FOLLOW_LIMIT = 4 * 1024 * 1024;
-/** Largest object Export Objects saves (sharkd sends it as base64 JSON). */
-const MAX_OBJECT_SAVE = 128 * 1024 * 1024;
-/** Bytes one save of objects may write. */
-const MAX_OBJECTS_SAVE = 1024 * 1024 * 1024;
 const LIVE_RELOAD_MS = 1000;
 const MAX_MARKS = 10000;
-/** Between two Wireshark launches. */
-const WIRESHARK_GAP_MS = 2000;
 /** Row ranges a selection may consist of. */
 const MAX_ROW_RANGES = 10000;
 const MAX_NOTE = 200;
@@ -268,6 +261,13 @@ export class Viewer extends EventEmitter {
   private readonly profile: string | undefined;
   private readonly editcap: string;
   private readonly mergecap: string;
+  /** What Follow Stream and Export Objects ask of this viewer. */
+  private readonly streamsView: StreamsView = {
+    engine: () => this.engine,
+    requireFile: () => this.requireFile(),
+    codeFolders: () => this.extensions.codeFolders(),
+    notice: (text) => this.notice(text),
+  };
   /** What the statistics and Find ask of this viewer. */
   private readonly statsView: StatsView = {
     engine: () => this.engine,
@@ -2749,147 +2749,38 @@ export class Viewer extends EventEmitter {
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
-    this.requireFile();
-    const r = await this.engine.call<{
-      shost: string;
-      sport: string;
-      chost: string;
-      cport: string;
-      payloads?: { n: number; d: string; s?: number }[];
-    }>("follow", { follow: proto, filter });
-    if (r.shost === "NONE" && r.chost === "NONE" && !r.payloads?.length) throw new Error(`no ${proto} stream matches ${filter}`);
-    const payloads: FollowResult["payloads"] = [];
-    let total = 0;
-    let omittedBytes = 0;
-    let serverBytes = 0;
-    let clientBytes = 0;
-    for (const p of r.payloads ?? []) {
-      const data = Buffer.from(p.d, "base64");
-      if (p.s) serverBytes += data.length;
-      else clientBytes += data.length;
-      const room = limit - total;
-      if (room <= 0) {
-        omittedBytes += data.length;
-        continue;
-      }
-      const part = data.length > room ? data.subarray(0, room) : data;
-      omittedBytes += data.length - part.length;
-      total += part.length;
-      payloads.push({ frame: p.n, server: !!p.s, data: part === data ? p.d : part.toString("base64") });
-    }
-    return {
-      proto,
-      filter,
-      server: { host: r.shost, port: r.sport, bytes: serverBytes },
-      client: { host: r.chost, port: r.cport, bytes: clientBytes },
-      payloads,
-      truncated: omittedBytes > 0,
-      omittedBytes,
-    };
+    return follow(this.streamsView, proto, filter, limit);
   }
 
-  /** Files carried in the traffic (Wireshark's Export Objects) of `kind`. */
   async capturedObjects(kind: ObjectKind, engine = this.engine): Promise<CapturedObject[]> {
-    this.requireFile();
-    type Eo = { pkt: number; hostname?: string; type?: string; filename?: string; _download: string; len: number; sha1?: string };
-    const r = await engine.call<{ taps?: { objects?: Eo[] }[] }>("tap", { tap0: `eo:${kind}` });
-    return (r.taps?.[0]?.objects ?? []).map((o) => ({
-      frame: o.pkt,
-      host: o.hostname ?? "",
-      type: o.type ?? "",
-      filename: o.filename ?? "",
-      size: o.len,
-      sha1: o.sha1 ?? "",
-      token: o._download,
-    }));
+    return capturedObjects(this.streamsView, kind, engine);
   }
 
-  /**
-   * Saves the objects of `kind` into a new folder in `dir`, made once there is
-   * one to save: those `pick.keys` ("frame:sha1") name, else those in
-   * `pick.frames`, else all.
-   */
   async saveObjects(
     kind: ObjectKind,
     pick: { frames?: number[]; keys?: string[] },
     dir: string,
     by: "user" | "agent",
   ): Promise<{ folder: string | null; saved: (CapturedObject & { name: string })[]; skipped: { object: CapturedObject; reason: string }[] }> {
-    const codeFolders = this.extensions.codeFolders();
-    const real = objectDir(dir, codeFolders);
-    // Download tokens belong to the sharkd that listed the objects
-    const engine = this.engine;
-    const all = await this.capturedObjects(kind, engine);
-    const key = (o: CapturedObject): string => `${o.frame}:${o.sha1}`;
-    let chosen: CapturedObject[];
-    if (pick.keys) {
-      const listed = new Set(all.map(key));
-      // A key that names nothing came from another capture or dissection
-      if (pick.keys.some((k) => !listed.has(k))) throw new StaleGenerationError("the capture changed; list the objects again");
-      const want = new Set(pick.keys);
-      chosen = all.filter((o) => want.has(key(o)));
-    } else {
-      const want = pick.frames && new Set(pick.frames);
-      chosen = want ? all.filter((o) => want.has(o.frame)) : all;
-    }
-    if (!all.length) throw new Error(`the capture has no ${kind} objects`);
-    if (!chosen.length) throw new Error(`none of the ${kind} objects is in the given frames`);
-    let folder: string | null = null;
-    const saved: (CapturedObject & { name: string })[] = [];
-    const skipped: { object: CapturedObject; reason: string }[] = [];
-    let total = 0;
-    try {
-      for (const o of chosen) {
-        // Without one, a token a reload moved would save another object unnoticed
-        if (!o.sha1) {
-          skipped.push({ object: o, reason: "sharkd gave no checksum to check it by" });
-          continue;
-        }
-        if (o.size > MAX_OBJECT_SAVE) {
-          skipped.push({ object: o, reason: `larger than ${MAX_OBJECT_SAVE / 2 ** 20} MiB` });
-          continue;
-        }
-        if (total + o.size > MAX_OBJECTS_SAVE) {
-          skipped.push({ object: o, reason: `over the ${MAX_OBJECTS_SAVE / 2 ** 30} GiB one save may write` });
-          continue;
-        }
-        const r = await engine.call<{ data?: string }>("download", { token: o.token });
-        const data = Buffer.from(r.data ?? "", "base64");
-        // Tokens are positions in sharkd's list: a reload may have moved them
-        if (r.data === undefined || createHash("sha1").update(data).digest("hex") !== o.sha1) {
-          throw new Error("the capture changed while saving; list the objects again");
-        }
-        total += data.length;
-        folder ??= newObjectFolder(real, kind, codeFolders);
-        saved.push({ ...o, name: writeObject(folder, objectFileName(o.frame, o.filename), data) });
-      }
-    } catch (err) {
-      // What is already there stays: say where
-      const names = saved.slice(0, 20).map((o) => o.name).join(", ") + (saved.length > 20 ? ", …" : "");
-      const done = saved.length ? ` (${saved.length} saved to ${folder}: ${names})` : "";
-      throw new Error(`${(err as Error).message}${done}`);
-    }
-    if (saved.length && by === "agent") this.notice(`Saved ${saved.length} ${kind.toUpperCase()} object${saved.length === 1 ? "" : "s"} to ${folder}`);
-    return { folder, saved, skipped };
+    return saveObjects(this.streamsView, kind, pick, dir, by);
   }
 
-  /** Opens the capture in Wireshark; returns what doesn't go along, or null. */
   async openInWireshark(frame?: number | null): Promise<string | null> {
-    this.requireFile();
-    if (!this.wiresharkBin) throw new Error("wireshark was not found on PATH");
-    // One window per click, not one per repeated request
-    if (Date.now() - this.wiresharkAt < WIRESHARK_GAP_MS) throw new Error("Wireshark is already starting");
-    this.wiresharkAt = Date.now();
-    const args = ["-r", this.state.file!];
-    if (this.profile) args.push("-C", this.profile);
-    if (this.state.tlsKeylog) args.push("-o", `tls.keylog_file:${this.state.tlsKeylog}`);
-    // Wireshark has none of the view's time references: frame.ref_time goes as their frame numbers
-    if (this.state.filter) args.push("-Y", this.sharkdFilter(this.state.filter));
-    const target = frame ?? this.state.selected;
-    if (target) args.push("-g", String(target));
-    await launchWireshark(this.wiresharkBin, args, this.extensions.env());
-    const { entries } = this.state.decodeAs;
-    return entries.length ? `WireBuddy's Decode As entries don't go along (${entries.map(entryText).join(", ")}); use Analyze › Decode As in Wireshark` : null;
+    return openInWireshark(
+      {
+        bin: this.wiresharkBin,
+        profile: this.profile,
+        state: () => this.state,
+        requireFile: () => this.requireFile(),
+        sharkdFilter: (filter) => this.sharkdFilter(filter),
+        env: () => this.extensions.env(),
+        lastLaunch: () => this.wiresharkAt,
+        launching: (at) => {
+          this.wiresharkAt = at;
+        },
+      },
+      frame,
+    );
   }
 
   private remember(file: string): void {

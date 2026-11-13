@@ -4,6 +4,8 @@ import { closeSync, fstatSync, openSync, readSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { entryText } from "../shared/decodeas.ts";
+import type { ViewState } from "../shared/api.ts";
 
 const run = promisify(execFile);
 
@@ -117,4 +119,40 @@ function startupError(output: string, code: number | null, signal: NodeJS.Signal
   const reason = line?.replace(/^\*\* \(wireshark:\d+\) [\d:.]+ \[[^\]]*\] -- |^wireshark: /, "");
   const how = signal ? `crashed (${signal})` : `exited with code ${code}`;
   return new Error(`Wireshark ${how} at startup${reason ? `: ${reason.slice(0, 300)}` : ""}`);
+}
+
+/** Between two Wireshark launches. */
+const WIRESHARK_GAP_MS = 2000;
+
+/** What opening the capture in Wireshark needs of the viewer. */
+export interface OpenView {
+  /** The Wireshark to start, if one was found. */
+  bin: string | null;
+  profile: string | undefined;
+  state(): Pick<ViewState, "file" | "tlsKeylog" | "filter" | "selected" | "decodeAs">;
+  requireFile(): void;
+  sharkdFilter(filter: string): string;
+  env(): NodeJS.ProcessEnv;
+  /** When the last Wireshark was started (0: none), and noting that one is. */
+  lastLaunch(): number;
+  launching(at: number): void;
+}
+
+/** Opens the capture in Wireshark; returns what doesn't go along, or null. */
+export async function openInWireshark(v: OpenView, frame?: number | null): Promise<string | null> {
+  v.requireFile();
+  if (!v.bin) throw new Error("wireshark was not found on PATH");
+  // One window per click, not one per repeated request
+  if (Date.now() - v.lastLaunch() < WIRESHARK_GAP_MS) throw new Error("Wireshark is already starting");
+  v.launching(Date.now());
+  const args = ["-r", v.state().file!];
+  if (v.profile) args.push("-C", v.profile);
+  if (v.state().tlsKeylog) args.push("-o", `tls.keylog_file:${v.state().tlsKeylog}`);
+  // Wireshark has none of the view's time references: frame.ref_time goes as their frame numbers
+  if (v.state().filter) args.push("-Y", v.sharkdFilter(v.state().filter));
+  const target = frame ?? v.state().selected;
+  if (target) args.push("-g", String(target));
+  await launchWireshark(v.bin, args, v.env());
+  const { entries } = v.state().decodeAs;
+  return entries.length ? `WireBuddy's Decode As entries don't go along (${entries.map(entryText).join(", ")}); use Analyze › Decode As in Wireshark` : null;
 }
