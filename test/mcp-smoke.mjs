@@ -526,11 +526,14 @@ try {
   await call("extensions", { action: "test", name: "acme" }, (t) => {
     assert.match(t, /Extension "acme": loaded/);
     assert.match(t, /^  acme: 20 packets, first 1$/m);
+    assert.doesNotMatch(t, /undecoded payload/);
     assert.match(t, /Sequence: 0/);
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "test", name: "acme_heur" }, (t) => {
     assert.match(t, /^  acme: 19 packets, first 1$/m);
+    // The cut-short packet the heuristic rejects is still payload nobody decoded
+    assert.match(t, /^  1 packet still shows as undecoded payload \("data"\)\.$/m);
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "test", name: "acme_gap" }, (t) => {
@@ -621,6 +624,9 @@ try {
   await call("extensions", { action: "test", name: "acme_tcp" }, (t) => {
     assert.match(t, /Extension "acme_tcp": loaded/);
     assert.match(t, /^  acme: 2 packets, first 1$/m);
+    // Frame 2 holds the start of the split message: no payload nobody decoded, a segment decoded in frame 3
+    assert.match(t, /^  1 packet is a segment of a message reassembled in a later packet \(tcp\.reassembled_in\), decoded there: no hole\.$/m);
+    assert.doesNotMatch(t, /undecoded payload/);
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "reload" }, (t) => assert.match(t, /Extension "acme_tcp" loaded \(protocols: acme\)/));

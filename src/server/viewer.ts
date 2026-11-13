@@ -90,6 +90,8 @@ export interface ExtensionTest {
   crashed?: string;
   /** For an extension without a protocol of its own: the capture's protocols with it, deepest first. */
   hierarchy: string[];
+  /** Packets still showing as undecoded payload ("data"), and, for an extension dissecting over TCP, segments of messages reassembled in a later packet (null: not over TCP). */
+  undecoded?: { data: number; segments: number | null };
 }
 
 /** A sharkd "frames" row: commented packets carry their comments. */
@@ -2444,6 +2446,13 @@ export class Viewer extends EventEmitter {
         } catch (err) {
           result.protocols.push({ name: proto, frames: 0, first: null, error: (err as Error).message });
         }
+      }
+      const found = result.protocols.filter((p) => p.frames && !p.error).map((p) => p.name);
+      if (found.length) {
+        // What its packets are not: payload nobody decoded, and segments whose message is decoded in a later packet
+        const ours = `(${found.join(" || ")})`;
+        const overTcp = (await matchingFrames(sharkd, `tcp && ${ours}`)).length > 0;
+        result.undecoded = { data: (await matchingFrames(sharkd, "data")).length, segments: overTcp ? (await matchingFrames(sharkd, `tcp.reassembled_in && !${ours}`)).length : null };
       }
       const hit = result.protocols.find((p) => p.first !== null);
       if (hit) {

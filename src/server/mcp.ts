@@ -232,6 +232,12 @@ function testText(t: ExtensionTest, entries: DecodeAsEntry[]): string {
     out.push(t.luaErrorCount ? "  No packet shows it because its dissector failed: see the Lua errors below." : "  No packet matched: check the port or heuristic it registers on (query_packets filter \"data\" shows undecoded packets).");
     if (entries.length) out.push(`  WireBuddy's Decode As entries apply here too (${entries.map(entryText).join(", ")}): one on this extension's port takes it over; decode_as action "clear" removes it.`);
   }
+  if (t.undecoded && (t.undecoded.data || t.undecoded.segments)) {
+    const { data, segments } = t.undecoded;
+    const packets = (n: number): string => `${n} packet${n === 1 ? "" : "s"}`;
+    const parts = [data ? `${packets(data)} still ${data === 1 ? "shows" : "show"} as undecoded payload ("data")` : "", segments ? `${packets(segments)} ${segments === 1 ? "is a segment" : "are segments"} of a message reassembled in a later packet (tcp.reassembled_in), decoded there: no hole` : ""];
+    out.push(`  ${parts.filter(Boolean).join("; ")}.`);
+  }
   if (t.sample) out.push("", `Frame ${t.sample.frame}, ${t.sample.protocol}:`, treeText(t.sample.tree, { protocols: [t.sample.protocol], maxLines: 40, showBytes: false }));
   if (t.luaErrorCount) {
     out.push("", `Lua errors in ${t.luaErrorCount} packets:`);
