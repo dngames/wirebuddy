@@ -1605,6 +1605,34 @@ try {
     }
   });
 
+  await check("a comment or mark for one packet goes by its frame number and capture: a display filter set meanwhile doesn't refuse it, another capture does, rows still need their list", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(40, 7502));
+    const s = await keptServer(join(dir, "home"));
+    try {
+      await s.api("/api/open", { path: a });
+      const st = (await s.api("/api/state")).json;
+      const view = { file: a, filter: st.filter, generation: st.generation };
+      // The agent sets a filter while the dialog is open
+      assert.equal((await s.api("/api/filter", { filter: "udp.dstport == 7502 && frame.number > 10" })).json.ok, true);
+      // The packet's own number and its capture, whatever the list shows now: saved
+      assert.deepEqual((await s.api("/api/comments", { comment: "kept text", frame: 6, view: { file: a } })).json.frames, [6]);
+      assert.deepEqual((await s.api("/api/marks", { note: "m", frame: 7, view: { file: a } })).json.frames, [7]);
+      // Rows are of one list, and refused once it changed; with the capture alone they have no list
+      assert.equal((await s.api("/api/comments", { comment: "late", frame: 6, rows: [[0, 0]], view })).status, 409);
+      assert.equal((await s.api("/api/comments", { comment: "x", frame: 6, rows: [[0, 0]], view: { file: a } })).status, 400);
+      // Another capture is the one thing that stops it, with its reason
+      const r = await s.api("/api/comments", { comment: "elsewhere", frame: 6, view: { file: "/elsewhere.pcapng" } });
+      assert.deepEqual([r.status, r.json.error], [409, "the capture changed since you chose the packets; select them again"]);
+      assert.equal((await s.api("/api/comments", { comment: "no such", frame: 9999, view: { file: a } })).status, 400);
+      assert.deepEqual([(await s.api("/api/state")).json.commentEdits, (await s.api("/api/frame?num=6")).json.row.cm], [1, ["kept text"]]);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   await check("investigation: Forget unsets marks, time references and comment edits, re-reads rows and details, removes what was kept and leaves nothing to restore", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
     const own = join(dir, "home");

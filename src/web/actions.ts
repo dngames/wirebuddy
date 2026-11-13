@@ -2,12 +2,32 @@
 
 import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, Mark, ViewState } from "../shared/api.ts";
 import { leftOutText } from "../shared/ownport.ts";
-import type { Ranges } from "../shared/ranges.ts";
+import { countRanges, type Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, captureActive, hooks, knownFrames } from "./app.ts";
 import { confirmDialog } from "./dialog.ts";
 import { toast, toastError } from "./toast.ts";
 import { fmtInt, load, save } from "./util.ts";
+
+/**
+ * The packets a dialog is opened for, as its requests name them. One packet
+ * goes by its frame number and its capture alone: a comment or a mark is
+ * about the packet, not its row, so a display filter set meanwhile (the
+ * agent's, say) must not stop it being saved. Several packets go by their
+ * rows in the list as it is now, which only that list can read.
+ */
+export function packetsAbout(s: ViewState): { frame: number | null; rows?: Ranges; view: { file: string; filter?: string; generation?: number } } {
+  const file = s.file ?? "";
+  const rows = app.selRows;
+  const one = app.selFrame !== null && (rows.length ? countRanges(rows) === 1 && app.selIndex === rows[0][0] : true);
+  if (one) return { frame: app.selFrame, view: { file } };
+  return { frame: app.selFrame, rows, view: { file, filter: s.filter, generation: s.generation } };
+}
+
+/** What a refused (409) request of a dialog about `about` says: the text typed stays in the dialog, so it says why and what to do. */
+export function staleAbout(about: { rows?: Ranges }): string {
+  return about.rows ? "The packet list changed since you chose the packets. Your text is still here; close this, select the packets again and paste it." : "The capture was replaced by another one, so this packet is not in the view any more. Your text is still here to copy.";
+}
 
 // ---------------------------------------------------------------- state sync
 

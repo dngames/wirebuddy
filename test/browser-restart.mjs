@@ -1,11 +1,12 @@
 // The page across a restart of WireBuddy, in headless Chrome: a restart that keeps the session token is picked up by the
 // open page by itself (it shows the new state); a plain offline server dims what is on screen; a server that refuses the
 // page's token (another one, as after a restart with --token) makes the page say so plainly and keep trying, and it recovers
-// when the token works again.
+// when the token works again. And the comment dialog: a display filter set meanwhile doesn't stop saving a comment about
+// one packet, and a capture that changed under it leaves the dialog open with the text typed.
 // Screenshots of the notice go to the folder named by SHOTS, if set.
 // Usage: node test/browser-restart.mjs   (after npm run build; skipped without Chrome)
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,11 +18,15 @@ import { apiFetch, launchChrome, sleep, suite } from "./harness.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const chromeBin = chromeOrSkip();
 if (!chromeBin) process.exit(0);
+const ALT = 1;
+const MOD = process.platform === "darwin" ? 4 : 2;
 
 const work = mkdtempSync(join(tmpdir(), "wirebuddy-restart-"));
 const home = join(work, "home");
 mkdirSync(home);
 const fixture = join(root, "test/fixtures/http.pcapng");
+const other = join(work, "copy.pcapng");
+copyFileSync(fixture, other);
 
 /** A port nothing listens on: the restarted servers use the same one, as a restart of the agent's server does. */
 const port = await new Promise((resolve) => {
@@ -69,6 +74,7 @@ try {
     return d.result;
   };
   const evaluate = async (expression) => (await cdp("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
+  const key = (type, k, code, vk, modifiers = 0) => cdp("Input.dispatchKeyEvent", { type, key: k, code, windowsVirtualKeyCode: vk, modifiers });
   const shot = async (name) => {
     if (!process.env.SHOTS) return;
     mkdirSync(process.env.SHOTS, { recursive: true });
@@ -139,6 +145,51 @@ try {
     await evaluate("[...document.querySelectorAll('.offline-notice button')][0].click()");
     await until("the page to recover", async () => (await connOpen()) && !(await noticeShown()), 40_000);
     await until("the list undimmed", async () => (await mainOpacity()) > 0.95, 3000);
+  });
+
+  // The comment dialog
+  const state = async () => (await server.api("/api/state")).json;
+  const rowCount = () => evaluate("document.querySelectorAll('.pl-row').length");
+  const openDialog = async (frame) => {
+    assert.equal((await server.api("/api/select", { frame })).status, 200);
+    await until(`frame ${frame} selected in the page`, () => evaluate(`document.querySelector('.pl-row.sel .pl-cell')?.textContent === '${frame}'`));
+    await evaluate("document.querySelector('.pl-scroll').focus()");
+    await key("rawKeyDown", "c", "KeyC", 67, MOD | ALT);
+    await key("keyUp", "c", "KeyC", 67, MOD | ALT);
+    await until("the Add Comment dialog", () => evaluate("!!document.querySelector('.dlg-comment textarea')"));
+  };
+  const type = (text) => evaluate(`(() => { const t = document.querySelector('.dlg-comment textarea'); t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); })()`);
+  const save = async () => {
+    await key("rawKeyDown", "Enter", "Enter", 13, MOD);
+    await key("keyUp", "Enter", "Enter", 13, MOD);
+  };
+  await check("Add Comment for one packet: a display filter set while it is open (the agent's) doesn't stop it being saved", async () => {
+    assert.equal((await server.api("/api/open", { path: fixture })).status, 200);
+    await until("the rows", async () => (await rowCount()) > 3);
+    await openDialog(6);
+    await type("typed before the agent filtered");
+    assert.equal((await server.api("/api/filter", { filter: "tcp.port == 80 && frame.number > 4" })).json.ok, true);
+    await until("the new filter in the page", () => evaluate("!/Displayed: 29 /.test(document.querySelector('.sb-pkts').textContent)"));
+    await save();
+    await until("the dialog to close", () => evaluate("!document.querySelector('.dlg-comment')"));
+    assert.deepEqual([(await state()).commentEdits, (await server.api("/api/frame?num=6")).json.row.cm], [1, ["typed before the agent filtered"]]);
+    await server.api("/api/filter", { filter: "" });
+  });
+  await check("Add Comment when the capture changed: the dialog stays open with the text and says why", async () => {
+    await until("the rows", async () => (await rowCount()) > 3);
+    await openDialog(7);
+    await type("this stays");
+    assert.equal((await server.api("/api/open", { path: other })).status, 200);
+    await until("the other capture in the page", async () => (await state()).file === other);
+    await save();
+    assert.equal(await evaluate("document.querySelector('.dlg-comment .goto-hint').textContent"), "To packet 7");
+    await until("the reason", () => evaluate("(document.querySelector('.dlg-comment .of-err')?.textContent ?? '').includes('replaced by another')"));
+    assert.equal(await evaluate("document.querySelector('.dlg-comment textarea').value"), "this stays");
+    assert.equal(await evaluate("!document.querySelector('.dlg-comment .of-err').hidden"), true);
+    await shot("comment-kept.png");
+    // (The copy has the first capture's kept comment on frame 6, as a copy does; frame 7's is not there)
+    assert.equal((await server.api("/api/frame?num=7")).json.row.cm, undefined, "nothing was saved to the other capture");
+    await evaluate("[...document.querySelectorAll('.dlg-comment button')].find((b) => b.textContent === 'Cancel').click()");
   });
 } finally {
   browser?.ws.close();

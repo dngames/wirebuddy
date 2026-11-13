@@ -26,7 +26,7 @@ import { Keeper, type KeptRead } from "./keeper.ts";
 import { MAX_RECENT, parseColumns, parseRecent, readSetting, writeSetting } from "./settings.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
-import { PacketList, clipRanges, listChanged, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
+import { PacketList, clipRanges, listChanged, type AboutView, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
@@ -1777,7 +1777,7 @@ export class Viewer extends EventEmitter {
    * dialog showed, refused once that view is gone), else the selected ones.
    * It wakes the agent's `--watch`, else comes with its next tool result.
    */
-  askAgent(question: string, about?: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): AskResult {
+  askAgent(question: string, about?: { frame: number | null; rows?: Ranges; view: AboutView }): AskResult {
     if (!this.state.agent.attached) throw new Error("no agent is attached");
     const text = printable(question.replace(/\s+/g, " ").trim()).slice(0, MAX_QUESTION);
     if (!text) throw new Error("the question is empty");
@@ -1953,9 +1953,13 @@ export class Viewer extends EventEmitter {
   /**
    * The packets a dialog was opened for: the rows `rows` (else the frame
    * `frame`) of the list `view` showed; refused once that list is gone.
+   * A `view` with the capture alone names a frame, whatever the filter is.
    */
-  framesAbout({ frame, rows, view }: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): Ranges {
-    if (listChanged(view, this.state)) {
+  framesAbout({ frame, rows, view }: { frame: number | null; rows?: Ranges; view: AboutView }): Ranges {
+    if (view.filter === undefined) {
+      if (rows?.length) throw new Error("rows belong to a list: the view needs its filter");
+      if (view.file !== this.state.file) throw new StaleGenerationError("the capture changed since you chose the packets; select them again");
+    } else if (listChanged(view, this.state)) {
       throw new StaleGenerationError("the packet list changed since you chose the packets; select them again");
     }
     if (rows?.length) return this.framesOfRows(this.checkRows(rows));
