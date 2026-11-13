@@ -8,6 +8,8 @@ import { eventLines } from "./events.ts";
 import type { HttpServer } from "./http.ts";
 import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
+import { frameList } from "./edits.ts";
+import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
@@ -105,7 +107,8 @@ function treeText(nodes: TreeNode[], opts: { protocols?: string[]; maxLines: num
   };
   for (const top of nodes) {
     const name = (top.fn ?? "").toLowerCase();
-    const selected = wanted ? wanted.includes(name) : name !== "frame";
+    // A line without a field or children (the mark) has nothing to expand
+    const selected = !top.fn && !top.n?.length ? true : wanted ? wanted.includes(name) : name !== "frame";
     if (selected) walk([top], 0);
     else lines.push(`${top.l}  (collapsed${wanted ? "" : "; pass protocols:[\"frame\"] to expand"})`);
     if (lines.length >= opts.maxLines) {
@@ -355,7 +358,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "open_capture",
     {
-      description: "Open a pcap/pcapng file in the viewer (replaces what the user sees; keeps the display filter if it still applies). The marks, time references and edited packet comments of the capture open before are kept with it, and the ones kept for this capture come back.",
+      description: "Open a pcap/pcapng file in the viewer (replaces what the user sees; keeps the display filter if it still applies, except one on frame.number when another capture opens: those numbers are the other capture's packets, so it is cleared and the user told). The marks, time references and edited packet comments of the capture open before are kept with it, and the ones kept for this capture come back.",
       inputSchema: { path: z.string().describe("Absolute path of the capture file") },
     },
     tool(async ({ path }) => {
@@ -363,7 +366,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const discarded = discardedComments(viewer.droppedEdits);
       viewer.notice(`Opened ${basename(path)}${discarded && ` (${discarded})`}`);
       const s = viewer.state;
-      return `Opened ${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s${s.filter ? `, filter "${s.filter}" shows ${s.displayedFrames}` : ""}${discarded && `; ${discarded}`}`;
+      const cleared = viewer.droppedFilter ? `; the display filter "${viewer.droppedFilter}" was cleared: frame.number names the packets of the capture open before` : "";
+      return `Opened ${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s${s.filter ? `, filter "${s.filter}" shows ${s.displayedFrames}` : ""}${cleared}${discarded && `; ${discarded}`}`;
     }, true, "view"),
   );
 
@@ -425,7 +429,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.slice(0, 3).map((o) => `${o.name} ("${o.text}")`).join(", ")}${s.panelOffers.length > 3 ? ` (${s.panelOffers.length - 3} more not shown)` : ""}`);
       if (c.status !== "idle" || c.filesWritten) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
-        lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
+        lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}${c.leftOutPort === null ? "" : ` (${leftOutText(c.leftOutPort)})`}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
         const active = c.status === "starting" || c.status === "running" || c.status === "stopping";
         const ring = c.ring ? ` (${c.ring.files ? `ring buffer of ${c.ring.files} files` : "new files automatically"}, ${c.filesWritten} written)` : "";
         if (c.currentFile) lines.push(`  ${active ? "writing" : "last file:"} ${c.currentFile}${ring}`);
@@ -645,19 +649,20 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "mark_frames",
     {
-      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip and under Go → Marked Packets).",
+      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip, in the details of the selected packet and under Go → Marked Packets). A frame the user marked gets your mark and note instead; the result names those frames.",
       inputSchema: {
         frames: z.array(z.number().int().min(1)).min(1).max(5000),
         note: z.string().max(200).describe("Why these frames matter, e.g. \"DNS NXDOMAIN\""),
       },
     },
     tool(({ frames, note }) => {
-      const marked = viewer.mark(frames, note, "agent");
+      const { frames: marked, replaced } = viewer.mark(frames, note, "agent");
       const valid = new Set(marked);
       const ignored = [...new Set(frames)].filter((f) => !valid.has(f));
       const known = viewer.state.totalFrames + (viewer.state.tail?.frames ?? 0);
       const skipped = ignored.length ? `; ignored ${ignored.length} frame(s) beyond the ${known} in the capture: ${ignored.slice(0, 20).join(", ")}${ignored.length > 20 ? ", ..." : ""}` : "";
-      return `Marked ${marked.length} frame(s)${skipped}; ${viewer.state.marks.length} marked in total`;
+      const over = replaced.length ? `; replaced the user's mark (and its note) on ${replaced.length === 1 ? "frame" : "frames"} ${frameList(replaced)}` : "";
+      return `Marked ${marked.length} frame(s)${skipped}${over}; ${viewer.state.marks.length} marked in total`;
     }, true, "view"),
   );
 
@@ -773,8 +778,17 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ min_severity, filter, frames_per_item }) => {
       const order = ["Comment", "Chat", "Note", "Warning", "Error"];
       const rank = (sev: string) => order.indexOf(sev === "Warn" ? "Warning" : sev);
-      const items = (await viewer.expert(filter)).filter((e) => rank(e.severity) >= rank(min_severity));
-      if (!items.length) return `No expert items at ${min_severity} or above${filter ? ` for "${filter}"` : ""}`;
+      const all = await viewer.expert(filter);
+      const items = all.filter((e) => rank(e.severity) >= rank(min_severity));
+      // The Expert Information dialog counts every severity: so does the header, which also says what the list below holds
+      const bySeverity = order
+        .map((sev) => [sev, all.filter((e) => rank(e.severity) === rank(sev)).length] as const)
+        .filter(([, n]) => n)
+        .reverse()
+        .map(([sev, n]) => `${n} ${sev}`)
+        .join(", ");
+      const total = `${all.length} expert item${all.length === 1 ? "" : "s"} (${bySeverity || "none"})`;
+      if (!items.length) return `${all.length ? `${total}, none` : "No expert items"} at ${min_severity} or above${filter ? ` for "${filter}"` : ""}`;
       const groups = new Map<string, { severity: string; group: string; protocol: string; message: string; frames: number[] }>();
       for (const e of items) {
         const key = `${e.severity}|${e.group}|${e.protocol}|${e.message}`;
@@ -783,7 +797,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         groups.set(key, g);
       }
       const sorted = [...groups.values()].sort((a, b) => rank(b.severity) - rank(a.severity) || b.frames.length - a.frames.length);
-      const out = [`${items.length} expert items in ${sorted.length} groups${filter ? ` for "${filter}"` : ""} (severity / group / protocol / message: count, frames)`];
+      const listed = items.length === all.length ? "" : `; listing the ${items.length} at ${min_severity} or above,`;
+      const out = [`${total}${listed} in ${sorted.length} groups${filter ? ` for "${filter}"` : ""} (severity / group / protocol / message: count, frames)`];
       for (const g of sorted.slice(0, 60)) {
         const frames = g.frames.slice(0, frames_per_item).join(", ") + (g.frames.length > frames_per_item ? ", ..." : "");
         out.push(`${g.severity} / ${g.group} / ${g.protocol} / ${g.message}: ${g.frames.length}  [${frames}]`);
@@ -991,7 +1006,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         "Start a live capture with dumpcap, like Wireshark's Capture Options, when the user asks for one. The view opens the new file and follows it live. Without a stop condition it runs until stop_capture or the user stops it.",
       inputSchema: {
         interface: z.string().describe("Interface name from list_interfaces, e.g. \"lo\" or \"eth0\" (macOS: \"lo0\", \"en0\")"),
-        filter: z.string().default("").describe("Capture filter in BPF syntax (tcp port 80), not display-filter syntax"),
+        filter: z.string().default("").describe("Capture filter in BPF syntax (tcp port 80), not display-filter syntax. On a loopback interface or any, WireBuddy's own traffic (its TCP port) is left out in addition to this filter"),
         promiscuous: z.boolean().default(true).describe("false: only traffic to and from this host"),
         stop_after_seconds: z.number().int().min(1).optional(),
         stop_after_packets: z.number().int().min(1).optional(),
@@ -1011,10 +1026,11 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const ring = Object.values(newFile).some((v) => v !== undefined) || a.ring_files !== undefined ? { ...newFile, files: a.ring_files } : null;
       const autostop = { durationSec: a.stop_after_seconds, packets: a.stop_after_packets, filesizeKB: a.stop_after_kb, files: a.stop_after_files };
       await viewer.capture.start({ iface: a.interface, filter: a.filter, promiscuous: a.promiscuous, autostop, ring }, "agent");
-      viewer.notice(`Started a capture on ${a.interface}${discarded && ` (${discarded})`}`);
+      const own = viewer.capture.state.leftOutPort;
+      viewer.notice(`Started a capture on ${a.interface}${discarded && ` (${discarded})`}${own === null ? "" : `; ${leftOutText(own)}`}`);
       const c = await captureSettled(viewer, 3000);
       if (c.status === "error") throw new Error(`the capture failed: ${c.error ?? "unknown error"}`);
-      const how = `${a.interface}${c.filter ? ` with the capture filter "${c.filter}"` : ""}${c.promiscuous ? "" : ", not promiscuous"}`;
+      const how = `${a.interface}${c.filter ? ` with the capture filter "${c.filter}"` : ""}${c.promiscuous ? "" : ", not promiscuous"}${c.leftOutPort === null ? "" : ` (${leftOutText(c.leftOutPort)})`}`;
       const lost = discarded && ` The view opened its file: ${discarded}.`;
       if (c.status === "starting") return `The capture on ${how} is starting; get_view_state shows when it runs.${lost}`;
       if (c.status === "idle") return `The capture on ${how} already ended: ${c.packets} packets in ${c.currentFile ?? "no file"}.${lost}`;

@@ -16,7 +16,7 @@ import type { Investigation, InvestigationLimits } from "./investigation.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { printable } from "./text.ts";
 import { MAX_TIME_REFS, refsUpTo } from "./timerefs.ts";
-import type { Mark, TimeRefsChange, ViewState } from "../shared/api.ts";
+import type { Mark, TimeRefsChange, TreeNode, ViewState } from "../shared/api.ts";
 import { countRanges, hasFrame, inRanges, type Ranges } from "../shared/ranges.ts";
 
 export const MAX_MARKS = 10000;
@@ -33,12 +33,24 @@ const byFrame = (a: Mark, b: Mark): number => a.frame - b.frame;
 const tooManyMarks = (): Error => new Error(`at most ${MAX_MARKS} frames can be marked`);
 const tooManyRefs = (): Error => new Error(`at most ${MAX_TIME_REFS} frames can be time references`);
 
+const FRAME_NUMBER = /"(?:\\.|[^"\\])*"|(?<![\w.-])frame\.number(?![\w.-])/g;
+
+/** Whether `filter` tests frame.number (outside quotes): it names packets of the capture it was written for. */
+export function usesFrameNumber(filter: string): boolean {
+  return [...filter.matchAll(FRAME_NUMBER)].some((m) => !m[0].startsWith('"'));
+}
+
+/** Frame numbers for a sentence: the first `max`, then "..." */
+export function frameList(frames: number[], max = 20): string {
+  return frames.slice(0, max).join(", ") + (frames.length > max ? ", ..." : "");
+}
+
 /**
  * `marks` with the frames of `frames` the view knows (up to `known`) marked
- * with `note`, replacing marks they had; the frames that exist, and the note
- * as marks keep it.
+ * with `note`, replacing marks they had; the frames that exist, the note
+ * as marks keep it, and the frames whose mark by the user an agent replaced.
  */
-export function marksWith(marks: readonly Mark[], frames: number[], note: string, by: Mark["by"], known: number): { marks: Mark[]; frames: number[]; note: string } {
+export function marksWith(marks: readonly Mark[], frames: number[], note: string, by: Mark["by"], known: number): { marks: Mark[]; frames: number[]; note: string; replaced: number[] } {
   // Notes become packet comments on export, where editcap takes no control characters
   note = printable(note).slice(0, MAX_NOTE);
   const valid = [...new Set(frames)].filter((f) => Number.isInteger(f) && f >= 1 && f <= known);
@@ -46,7 +58,16 @@ export function marksWith(marks: readonly Mark[], frames: number[], note: string
   const keep = marks.filter((m) => !marked.has(m.frame));
   if (keep.length + valid.length > MAX_MARKS) throw tooManyMarks();
   const added: Mark[] = valid.map((frame) => ({ frame, note, by }));
-  return { marks: [...keep, ...added].sort(byFrame), frames: valid, note };
+  const replaced = by === "agent" ? marks.filter((m) => marked.has(m.frame) && m.by === "user").map((m) => m.frame) : [];
+  return { marks: [...keep, ...added].sort(byFrame), frames: valid, note, replaced };
+}
+
+/**
+ * The first line of a marked packet's details, as the packet list's tooltip
+ * words it. It has no field or filter: no filter, export or column reads it.
+ */
+export function markNode(mark: Mark, agentName: string): TreeNode {
+  return { l: `${mark.by === "agent" ? `Marked by ${agentName}` : "Marked"}${mark.note ? `: ${mark.note}` : ""}`, t: "proto" };
 }
 
 /** `marks` without the ones on `frames`; without any when `frames` is left out. */

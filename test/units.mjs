@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession", "filterhints", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -28,6 +28,13 @@ const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Shar
 const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, refTimeFits, refTimeError, usesRefTime, changeText, SharkdError } = await import(join(out, "units.mjs"));
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
+const { noLuaReason } = await import(join(out, "units.mjs"));
+const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
+const { frameList } = await import(join(out, "units.mjs"));
+const { markNode } = await import(join(out, "units.mjs"));
+const { usesFrameNumber } = await import(join(out, "units.mjs"));
+const { writeRefused, checkTarget } = await import(join(out, "units.mjs"));
+const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -1681,6 +1688,9 @@ try {
     assert.equal(r.note, `a?b?${"x".repeat(MAX_NOTE - 4)}`);
     assert.deepEqual(r.marks.map((m) => [m.frame, m.by]), [[2, "user"], [3, "agent"], [5, "agent"], [7, "agent"]]);
     assert.equal(r.marks[2].note, r.note);
+    assert.deepEqual(r.replaced, [5], "the user's mark on 5 was replaced by the agent");
+    assert.deepEqual(marksWith(r.marks, [3, 5], "x", "agent", 8).replaced, [], "its own marks are not the user's");
+    assert.deepEqual(marksWith(m0, [2, 5], "x", "user", 8).replaced, [], "the user replaces what they like unasked");
     assert.deepEqual(m0.map((m) => m.frame), [5, 2], "the marks given are left as they are");
     const full = Array.from({ length: MAX_MARKS }, (_, i) => ({ frame: i + 1, note: "", by: "user" }));
     assert.equal(marksWith(full, [1, 2], "again", "user", MAX_MARKS + 1).marks.length, MAX_MARKS, "remarking counts once");
@@ -2144,6 +2154,156 @@ try {
     // a kill not in place is blamed on the extensions like a crash
     x = session({ answer: (m) => (m === "load" && !x.told.ext.length ? Promise.reject(new SharkdExit("sharkd exited (SIGKILL)", "SIGKILL")) : loads()(m)) });
     assert.equal((await x.s.load(x.made[0], "/c.pcap", "", [])).rolledBack, "reverted");
+  });
+
+  await check("the reason a sharkd shows no Lua: root loads none, others lack the support", () => {
+    assert.equal(noLuaReason(1000), "this sharkd has no Lua support");
+    assert.equal(noLuaReason(undefined), "this sharkd has no Lua support");
+    assert.match(noLuaReason(0), /does not load Lua plugins when it runs as root.*ordinary user/);
+  });
+
+  await check("capture filter: WireBuddy's own port between the loopback addresses is left out, the user's filter in brackets; none on interfaces that don't see loopback", () => {
+    const own = "tcp port 8765 and ((src host 127.0.0.1 and dst host 127.0.0.1) or (src host ::1 and dst host ::1))";
+    assert.equal(ownTrafficFilter(8765), own);
+    assert.equal(captureFilter("", null), "");
+    assert.equal(captureFilter(" tcp port 80 ", null), "tcp port 80");
+    assert.equal(captureFilter("", 8765), `not (${own})`);
+    assert.equal(captureFilter("udp or tcp port 80", 8765), `(udp or tcp port 80) and not (${own})`);
+    for (const [name, loopback, sees] of [["lo", true, true], ["lo0", true, true], ["lo", false, true], ["lo0", false, true], ["any", false, true], ["Loopback", true, true], ["eth0", false, false], ["en0", false, false], ["local", false, false], ["wlo1", false, false]]) {
+      assert.equal(seesLoopback({ name, loopback }), sees, `${name} ${loopback}`);
+    }
+  });
+
+  await check("capture: dumpcap gets the user's filter with WireBuddy's own port left out on loopback and any, the user's filter alone elsewhere; the state keeps the user's and says the port", async () => {
+    const dir = mkdtempSync(join(out, "cap-"));
+    const log = join(dir, "args.log");
+    const fake = join(dir, "dumpcap");
+    const iface = (name, loopback) => `{"${name}":{"friendly_name":null,"vendor_description":null,"addrs":[],"loopback":${loopback},"extcap":""}}`;
+    // -D lists lo, eth0 and any; -d compiles unless the filter says "bad", or is combined with "nocombine"; a capture writes its arguments and ends
+    writeFileSync(fake, `#!/bin/sh
+case " $* " in
+  *" -D "*) echo '[${iface("lo", true)},${iface("eth0", false)},${iface("any", false)},${iface("nolo", true)}]' ;;
+  *" -d "*)
+    case "$*" in
+      *bad*) echo "dumpcap: Invalid capture filter \\"bad\\" for interface 'lo'!" >&2; exit 1 ;;
+      *"-i nolo"*"not ("*) echo "dumpcap: combined is wrong" >&2; exit 1 ;;
+      *nocombine*"not ("*) echo "dumpcap: combined is wrong" >&2; exit 1 ;;
+    esac
+    echo "(000) ret #1" ;;
+  *) echo "$*" >> "${log}" ;;
+esac
+`, { mode: 0o755 });
+    const cap = new Capture(join(dir, "caps"), fake);
+    const run = async (iface, filter) => {
+      rmSync(log, { force: true });
+      await cap.start({ iface, filter, autostop: {}, ring: null });
+      for (let i = 0; i < 100 && cap.running; i++) await new Promise((r) => setTimeout(r, 20));
+      return readFileSync(log, "utf8");
+    };
+    // Before the server knows its port: the filter as typed
+    assert.match(await run("lo", "tcp"), / -f tcp\n$/);
+    assert.equal(cap.state.leftOutPort, null);
+    cap.ownPort = 8765;
+    const own = ownTrafficFilter(8765);
+    assert.match(await run("lo", "tcp"), new RegExp(` -f \\(tcp\\) and not \\(${own.replace(/[().]/g, "\\$&")}\\)\\n$`));
+    assert.deepEqual([cap.state.filter, cap.state.leftOutPort], ["tcp", 8765]);
+    assert.ok((await run("any", "")).includes(` -f not (${own})\n`));
+    assert.deepEqual([cap.state.filter, cap.state.leftOutPort], ["", 8765]);
+    const eth = await run("eth0", "udp");
+    assert.match(eth, / -f udp\n$/);
+    assert.equal(cap.state.leftOutPort, null);
+    assert.doesNotMatch(await run("eth0", ""), / -f /);
+    // The user's filter is checked as theirs
+    assert.deepEqual(await cap.checkFilter("lo", "tcp"), { ok: true });
+    const bad = await cap.checkFilter("lo", "bad");
+    assert.deepEqual([bad.ok, bad.error], [false, 'Invalid capture filter "bad" for interface \'lo\'!']);
+    // The check judges the user's filter as theirs; a start whose exclusion doesn't compile captures without it and says so
+    assert.deepEqual(await cap.checkFilter("lo", "nocombine"), { ok: true });
+    const notes = [];
+    cap.on("note", (t) => notes.push(t));
+    assert.match(await run("lo", "nocombine"), / -f nocombine\n$/);
+    assert.equal(cap.state.leftOutPort, null);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /^WireBuddy's own traffic \(TCP port 8765\) could not be left out of the capture on lo, so it is recorded: .*combined is wrong/);
+    const bare = await run("nolo", "");
+    assert.doesNotMatch(bare, / -f /);
+    assert.equal(cap.state.leftOutPort, null);
+    assert.equal(notes.length, 2);
+    // Their own filter's error stays theirs
+    await assert.rejects(cap.start({ iface: "lo", filter: "bad", autostop: {}, ring: null }), /^Error: capture filter: Invalid capture filter "bad"/);
+    assert.equal(notes.length, 2);
+  });
+
+  await check("filter hints: a set with spaces between its members asks for commas, others get none", () => {
+    assert.equal(setHint("frame.number in {430 432}"), " (separate the members of a set with commas: {430, 432})");
+    assert.equal(setHint("ip.src == 1.2.3.4 && tcp.port in {80 443 8080 }"), " (separate the members of a set with commas: {80, 443, 8080})");
+    assert.equal(setHint('http.host in {"a.com" "b c"}'), ' (separate the members of a set with commas: {"a.com", "b c"})');
+    assert.equal(setHint("frame.number in {4 .. 6 8}"), " (separate the members of a set with commas: {4..6, 8})");
+    assert.equal(setHint("frame.number in {430, 432}"), "");
+    assert.equal(setHint("frame.number in {4 .. 6, 8}"), "");
+    assert.equal(setHint("frame.number in {430}"), "");
+    assert.equal(setHint('http.host in {"a b", "c d"}'), "");
+    assert.equal(setHint('frame.comment contains "{1 2}"'), "");
+    assert.equal(setHint("tcp"), "");
+  });
+
+  await check("a refused write names the user WireBuddy runs as and the folder; other errors stay as they are", () => {
+    const refused = writeRefused(Object.assign(new Error("EACCES: permission denied, mkdtemp '/x/.wirebuddy-export-'"), { code: "EACCES" }), "/x");
+    assert.match(refused.message, new RegExp(`^permission denied: WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't write to /x \\(a shell`));
+    assert.doesNotMatch(refused.message, /mkdtemp/);
+    assert.match(writeRefused(Object.assign(new Error("EPERM"), { code: "EPERM" }), "/y").message, /can't write to \/y/);
+    const other = Object.assign(new Error("ENOSPC: no space left"), { code: "ENOSPC" });
+    assert.equal(writeRefused(other, "/x"), other);
+  });
+
+  await check("a write into a folder the user can't write says who WireBuddy runs as: export, findings report, saved objects", async () => {
+    if (process.getuid?.() === 0) return;
+    const dir = mkdtempSync(join(out, "ro-"));
+    const closed = join(dir, "closed");
+    mkdirSync(closed, { mode: 0o500 });
+    const me = new RegExp(`WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't write to ${closed.replace(/\W/g, "\\$&")}`);
+    try {
+      await assert.rejects(exportFrames({ editcap: "editcap", mergecap: "mergecap", input: join(root, "test/fixtures/http.pcapng"), output: join(closed, "x.pcapng"), format: "pcapng", ranges: [[1, 2]] }), me);
+      assert.throws(() => writeReport(join(closed, "report.md"), "# x\n", false), me);
+      assert.throws(() => newObjectFolder(closed, "http", []), me);
+    } finally {
+      chmodSync(closed, 0o700);
+    }
+  });
+
+  await check("a target in a folder the user can't enter says who WireBuddy runs as: export, findings report, saved objects", () => {
+    if (process.getuid?.() === 0) return;
+    const dir = mkdtempSync(join(out, "noenter-"));
+    const locked = join(dir, "locked");
+    mkdirSync(join(locked, "in"), { recursive: true });
+    chmodSync(locked, 0o000);
+    const inside = join(locked, "in");
+    const me = new RegExp(`WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't reach ${inside.replace(/\W/g, "\\$&")}`);
+    try {
+      assert.throws(() => checkTarget(join(inside, "x.pcapng"), [], false), me);
+      assert.throws(() => checkReportTarget(join(inside, "report.md"), [], false), me);
+      assert.throws(() => objectDir(inside, []), me);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
+  await check("frame lists in a sentence are cut after 20 frames", () => {
+    assert.equal(frameList([1, 2, 3]), "1, 2, 3");
+    assert.equal(frameList([1, 2, 3, 4], 3), "1, 2, 3, ...");
+    assert.equal(frameList(Array.from({ length: 21 }, (_, i) => i + 1)), `${Array.from({ length: 20 }, (_, i) => i + 1).join(", ")}, ...`);
+  });
+
+  await check("a mark leads the details as one line without a field, worded as the packet list's tooltip", () => {
+    assert.deepEqual(markNode({ frame: 3, note: "slow reply", by: "user" }, "Claude"), { l: "Marked: slow reply", t: "proto" });
+    assert.deepEqual(markNode({ frame: 3, note: "", by: "user" }, "Claude"), { l: "Marked", t: "proto" });
+    assert.deepEqual(markNode({ frame: 3, note: "DNS NXDOMAIN", by: "agent" }, "Claude"), { l: "Marked by Claude: DNS NXDOMAIN", t: "proto" });
+    assert.deepEqual(markNode({ frame: 3, note: "", by: "agent" }, "Agent"), { l: "Marked by Agent", t: "proto" });
+  });
+
+  await check("a display filter tests frame.number: found outside quotes, not in other names", () => {
+    for (const f of ["frame.number in {928, 943}", "tcp && frame.number > 10", "!(frame.number==3)"]) assert.equal(usesFrameNumber(f), true, f);
+    for (const f of ["", "tcp.port == 80", 'frame.comment contains "frame.number"', "myframe.number == 1", "frame.number_x == 1", "frame.numbers == 1"]) assert.equal(usesFrameNumber(f), false, f);
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

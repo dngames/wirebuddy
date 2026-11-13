@@ -136,6 +136,19 @@ try {
     assert.match(t, /cut at about 300 characters; 81329 payload bytes/);
   });
   await call("mark_frames", { frames: [21, 25], note: "404 request/response" }, (t) => assert.match(t, /2 marked in total/));
+  // The user's mark on a frame goes to the agent when it marks it: the result and the notice name the frames
+  assert.equal((await post("/api/marks", { frames: [26, 27], note: "the user's note" })).status, 200);
+  await call("mark_frames", { frames: [26, 27, 28], note: "the agent's note" }, (t) => assert.match(t, /^Marked 3 frame\(s\); replaced the user's mark \(and its note\) on frames 26, 27; \d+ marked in total/));
+  await call("mark_frames", { frames: [26], note: "again" }, (t) => assert.doesNotMatch(t, /replaced/, "its own mark is not the user's"));
+  assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame: again$/);
+  await call("mark_frames", { frames: [27], note: "last" }, () => {});
+  assert.equal((await post("/api/marks", { frames: [29], note: "mine" })).status, 200);
+  await call("mark_frames", { frames: [29], note: "yours" }, () => {});
+  assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame \(replaced the user's mark on frame 29\): yours$/);
+  // The details of a marked packet lead with its mark
+  await call("inspect_frame", { frame: 29, max_lines: 10 }, (t) => assert.match(t, /^Frame 29: .*\nMarked by Agent: yours\n/));
+  await call("inspect_frame", { frame: 29, protocols: ["ip"], max_lines: 10 }, (t) => assert.match(t, /^Frame 29: .*\nMarked by Agent: yours\nFrame 29: .*\(collapsed/));
+  await call("clear_marks", { frames: [26, 27, 28, 29] }, () => {});
   await call("query_packets", { filter: "http", fields: ["http.request.uri", "http.response.code"] }, (t) => {
     assert.match(t, /^No\. \| http\.request\.uri \| http\.response\.code$/m);
     assert.match(t, /^25 \| \/nothere \| 404$/m);
@@ -150,10 +163,13 @@ try {
   });
   await call("set_columns", { columns: [] }, (t) => assert.match(t, /Removed/));
   await call("expert_info", { min_severity: "Note" }, (t) => {
-    assert.match(t, /^4 expert items in 2 groups/);
+    // The Expert Information dialog counts all of them, Chat too
+    assert.match(t, /^12 expert items \(4 Note, 8 Chat\); listing the 4 at Note or above, in 2 groups /);
     assert.match(t, /Note \/ Sequence \/ TCP \/ This frame initiates the connection closing: 2/);
   });
-  await call("expert_info", { min_severity: "Error" }, (t) => assert.match(t, /No expert items/));
+  await call("expert_info", { min_severity: "Chat" }, (t) => assert.match(t, /^12 expert items \(4 Note, 8 Chat\) in \d+ groups /));
+  await call("expert_info", { min_severity: "Error" }, (t) => assert.match(t, /^12 expert items \(4 Note, 8 Chat\), none at Error or above$/));
+  await call("expert_info", { min_severity: "Error", filter: "dns" }, (t) => assert.match(t, /^No expert items at Error or above for "dns"$/));
   await call("io_graph", { filters: ["", "http"], interval_ms: 1 }, (t) => {
     assert.match(t, /packets per 1 ms/);
     assert.match(t, /"all packets": total 29/);
@@ -397,7 +413,13 @@ try {
   // A protocol Wireshark knows on a port it doesn't expect: one decode_as call
   const oddPorts = join(out, "odd-ports.pcap");
   writeOddPortsCapture(oddPorts);
-  await call("open_capture", { path: oddPorts }, (t) => assert.match(t, /11 frames/));
+  // Frame numbers are the other capture's packets: that filter goes, and the result says so
+  await call("set_display_filter", { filter: "frame.number in {1, 2}" }, (t) => assert.match(t, /2 of/));
+  await call("open_capture", { path: oddPorts }, (t) => {
+    assert.match(t, /11 frames/);
+    assert.match(t, /; the display filter "frame\.number in \{1, 2\}" was cleared: frame\.number names the packets of the capture open before/);
+  });
+  await call("get_view_state", {}, (t) => assert.match(t, /^Display filter: \(none\)$/m));
   await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" }, (t) => {
     assert.match(t, /^udp\.port 50000 now decodes as RTP \(before: no dissector, so heuristics or Data\)\. 5 frames match "rtp && udp\.port == 50000"\.$/m);
     assert.match(t, /^Decode As entries \(1, until WireBuddy exits\): udp\.port 50000 → rtp \(agent\)$/m);

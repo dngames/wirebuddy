@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { chmodSync, mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join } from "node:path";
+import { reaching, writeRefused } from "./permission.ts";
 import { inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 
 /** editcap refuses more than 512 selections per run. */
@@ -52,8 +53,8 @@ export function checkTarget(path: string, protectedFiles: string[], overwrite: b
   if (!isAbsolute(path)) throw new Error("the export path must be absolute");
   const ext = extname(path).toLowerCase();
   if (ext !== ".pcapng" && ext !== ".pcap") throw new Error("the export file must end in .pcapng or .pcap");
-  if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
-  const existing = statSync(path, { throwIfNoEntry: false });
+  if (!reaching(dirname(path), () => statSync(dirname(path), { throwIfNoEntry: false }))?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
+  const existing = reaching(dirname(path), () => statSync(path, { throwIfNoEntry: false }));
   if (!existing) return ext === ".pcap" ? "pcap" : "pcapng";
   if (!existing.isFile()) throw new Error(`${path} exists and is not a file`);
   for (const file of protectedFiles) {
@@ -191,7 +192,12 @@ export async function exportFrames(opts: {
   };
   // A folder only the user can open, next to the export (where there is room for it, rather than a small tmpfs):
   // nothing of the export is readable by others, or under a name they could guess, while it is written
-  const dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
+  } catch (err) {
+    throw writeRefused(err, dirname(output));
+  }
   const result = join(dir, `export.${format}`);
   try {
     if (runs.length === 1) await write(runs[0], result, format);

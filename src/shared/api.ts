@@ -575,6 +575,11 @@ export interface CaptureState {
   autostop: CaptureRequest["autostop"];
   ring: CaptureRequest["ring"];
   promiscuous: boolean;
+  /**
+   * The TCP port of WireBuddy's own traffic (the page and the agent talking to its server), which a capture on a
+   * loopback interface or `any` leaves out in addition to {@link filter}; null where it doesn't.
+   */
+  leftOutPort: number | null;
   /** File being written now (the live view shows this file). */
   currentFile: string | null;
   /** Files written by the current or last capture, oldest first: the newest ones of a capture that goes on in new files. */

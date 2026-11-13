@@ -8,6 +8,7 @@
 
 import { closeSync, mkdirSync, openSync, realpathSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
+import { reaching, writeRefused } from "./permission.ts";
 import { rootTrust } from "./trust.ts";
 import { printable } from "./text.ts";
 import type { ObjectKind, ObjectRow } from "../shared/api.ts";
@@ -55,8 +56,8 @@ function placeProblem(real: string, codeFolders: string[]): string | null {
  */
 export function objectDir(dir: string, codeFolders: string[]): string {
   if (!isAbsolute(dir)) throw new Error("the directory must be an absolute path");
-  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`no such directory: ${dir}`);
-  const real = realpathSync(dir);
+  if (!reaching(dir, () => statSync(dir, { throwIfNoEntry: false }))?.isDirectory()) throw new Error(`no such directory: ${dir}`);
+  const real = reaching(dir, () => realpathSync(dir));
   const problem = placeProblem(real, codeFolders);
   if (problem) throw new Error(`${printable(dir)} ${problem}; choose another directory`);
   return real;
@@ -75,7 +76,7 @@ export function newObjectFolder(real: string, kind: ObjectKind, codeFolders: str
       mkdirSync(folder, { mode: 0o700 });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
-      throw err;
+      throw writeRefused(err, real);
     }
     // The folder as made, not where a link swapped in for it leads
     const trust = rootTrust(folder, true);

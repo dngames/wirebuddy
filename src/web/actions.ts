@@ -1,6 +1,7 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
 import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, Mark, ViewState } from "../shared/api.ts";
+import { leftOutText } from "../shared/ownport.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, captureActive, hooks, knownFrames } from "./app.ts";
@@ -54,6 +55,14 @@ export function markResync(): void {
 
 /** The `marks` array of the state `app.marks` was built from. */
 let marksOf: Mark[] | null = null;
+
+/** Whether the mark of `frame` (its note, who set it) differs between two states' marks. */
+function markChanged(before: Mark[], after: Mark[], frame: number): boolean {
+  if (before === after) return false;
+  const a = before.find((m) => m.frame === frame);
+  const b = after.find((m) => m.frame === frame);
+  return a?.by !== b?.by || a?.note !== b?.note;
+}
 
 export function applyState(s: ViewState): void {
   const prev = app.state;
@@ -125,8 +134,8 @@ export function applyState(s: ViewState): void {
 
   bus.emit("state", s, prev);
   if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
-  // A provisional packet read in full now: its exact details; other time references: its times
-  if (app.selFrame !== null && prev?.file === s.file && prev.timeRefsRevision !== s.timeRefsRevision) reloadFrame();
+  // A provisional packet read in full now: its exact details; other time references: its times; another mark on it: its first line
+  if (app.selFrame !== null && prev?.file === s.file && (prev.timeRefsRevision !== s.timeRefsRevision || markChanged(prev.marks, s.marks, app.selFrame))) reloadFrame();
   else if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) {
     // Once: the states that follow while its request is under way leave that request alone
     if (loadingNum !== app.frame.num) reloadFrame();
@@ -530,7 +539,8 @@ export async function startCapture(req: CaptureRequest, asked = false): Promise<
   // The view opens the capture's file
   if (!asked && !(await discardComments("starting a capture"))) return false;
   try {
-    await post("api/capture/start", req);
+    const started = await post<{ leftOutPort: number | null }>("api/capture/start", req);
+    if (started?.leftOutPort != null) toast("info", `${leftOutText(started.leftOutPort)} of this capture`);
     if (app.conn !== "open") void refreshState();
     return true;
   } catch (e) {

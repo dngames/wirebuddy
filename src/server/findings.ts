@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, extname, isAbsolute, join } from "node:path";
 import { TargetExists } from "./export.ts";
 import { cell, codeSpan, quote } from "./markdown.ts";
+import { reaching, writeRefused } from "./permission.ts";
 
 /** Marked packets and commented packets a report lists; more are counted in one line. */
 export const MAX_LISTED = 2000;
@@ -118,8 +119,8 @@ export function buildFindings(f: Findings): string {
 export function checkReportTarget(path: string, protectedFiles: string[], overwrite: boolean): void {
   if (!isAbsolute(path)) throw new Error("the report path must be absolute");
   if (extname(path).toLowerCase() !== ".md") throw new Error("the report file must end in .md");
-  if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
-  const existing = statSync(path, { throwIfNoEntry: false });
+  if (!reaching(dirname(path), () => statSync(dirname(path), { throwIfNoEntry: false }))?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
+  const existing = reaching(dirname(path), () => statSync(path, { throwIfNoEntry: false }));
   if (!existing) return;
   if (!existing.isFile()) throw new Error(`${path} exists and is not a file`);
   for (const file of protectedFiles) {
@@ -141,7 +142,12 @@ export function writeReport(path: string, text: string, overwrite: boolean): num
   if (bytes > MAX_REPORT_BYTES) throw new Error(`the report would be ${(bytes / 1024 / 1024).toFixed(1)} MiB, more than the ${MAX_REPORT_BYTES / 1024 / 1024} MiB allowed`);
   const tmp = join(dirname(path), `.wirebuddy-findings-${randomBytes(8).toString("hex")}.tmp`);
   try {
-    const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    let fd: number;
+    try {
+      fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    } catch (err) {
+      throw writeRefused(err, dirname(path));
+    }
     try {
       writeSync(fd, text);
       fsyncSync(fd);

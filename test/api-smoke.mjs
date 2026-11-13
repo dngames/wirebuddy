@@ -168,6 +168,28 @@ try {
     assert.deepEqual((await api("/api/state")).json.marks.map((m) => m.frame), [12]);
   });
 
+  await check("a mark is the first line of the packet's details, without a field or filter, and goes with the mark", async () => {
+    const first = async () => (await api("/api/frame?num=4")).json.tree[0];
+    assert.equal((await first()).fn, "frame");
+    await api("/api/marks", { frames: [4], note: "slow reply" });
+    assert.deepEqual(await first(), { l: "Marked: slow reply", t: "proto" });
+    await api("/api/marks", { frames: [4], note: "" });
+    assert.deepEqual(await first(), { l: "Marked", t: "proto" });
+    // Not a field: no filter finds it, no export carries it
+    assert.equal((await api("/api/filter", { filter: "frame.number == 4" })).status, 200);
+    assert.equal((await api("/api/state")).json.displayedFrames, 1);
+    await api("/api/filter", { filter: "" });
+    await api("/api/marks/clear", { frames: [4] });
+    assert.equal((await first()).fn, "frame");
+  });
+
+  await check("a set whose members are separated by spaces gets a hint to use commas", async () => {
+    const bad = await api("/api/filter/check?filter=" + encodeURIComponent("frame.number in {4 6}"));
+    assert.equal(bad.json.ok, false);
+    assert.match(bad.json.error, /unexpected in this context.* \(separate the members of a set with commas: \{4, 6\}\)$/);
+    assert.equal((await api("/api/filter/check?filter=" + encodeURIComponent("frame.number in {4, 6}"))).json.ok, true);
+  });
+
   await check("stats", async () => {
     const phs = (await api("/api/stats/phs")).json;
     assert.equal(phs[0].proto, "frame");
@@ -1312,6 +1334,48 @@ try {
       assert.equal((await s.api("/api/open", { path: a })).status, 200);
       assert.deepEqual((await eventsSince(s, quiet)).filter((t) => /Restored|not restored/.test(t)), []);
       assert.equal((await s.api("/api/state")).json.commentEdits, 0);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("opening another capture drops a display filter on frame.number and says so; the restore notice says how many marks the filter hides", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const [a, b, copy] = [join(dir, "a.pcapng"), join(dir, "b.pcapng"), join(dir, "copy of a.pcapng")];
+    writeFileSync(a, udpCapture(200, 7502));
+    writeFileSync(b, udpCapture(50, 7600));
+    copyFileSync(a, copy);
+    const s = await keptServer(own);
+    const filterOf = async () => (await s.api("/api/state")).json.filter;
+    try {
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      await s.api("/api/marks", { frames: [3, 5], note: "m" });
+      await s.api("/api/marks", { frames: [150], note: "" });
+      assert.equal((await s.api("/api/filter", { filter: "frame.number in {100, 101}" })).status, 200);
+      // The same capture (a reload, a copy of it): the filter stays
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal(await filterOf(), "frame.number in {100, 101}");
+      assert.equal((await s.api("/api/open", { path: copy })).status, 200);
+      assert.equal(await filterOf(), "frame.number in {100, 101}");
+      // Another one: its frame numbers are other packets
+      let since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: b })).status, 200);
+      assert.equal(await filterOf(), "");
+      assert.equal((await s.api("/api/state")).json.displayedFrames, 50);
+      assert.deepEqual((await eventsSince(s, since)).filter((t) => /display filter/.test(t)), ['INFO The display filter "frame.number in {100, 101}" names packets of copy of a.pcapng, so it was cleared for b.pcapng']);
+      // A filter that doesn't name them stays, and hides the marks that come back
+      assert.equal((await s.api("/api/filter", { filter: "udp.dstport == 7600" })).status, 200);
+      since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal(await filterOf(), "udp.dstport == 7600");
+      assert.deepEqual((await eventsSince(s, since)).filter((t) => /Restored|display filter/.test(t)), ["INFO Restored 3 marks kept for this capture; the display filter hides all of them"]);
+      // Some of them: the filter shows frame 3 only
+      assert.equal((await s.api("/api/filter", { filter: "frame.time_relative < 0.0035" })).status, 200);
+      since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.deepEqual((await eventsSince(s, since)).filter((t) => /Restored/.test(t)), ["INFO Restored 3 marks kept for this capture; the display filter hides 2 of them"]);
     } finally {
       await s.stop();
       rmSync(dir, { recursive: true, force: true });

@@ -19,6 +19,7 @@ import { basename } from "node:path";
 import type { PanelView } from "../shared/api.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import type { EventLog } from "./events.ts";
+import { setHint } from "./filterhints.ts";
 import { FrameStore } from "./framestore.ts";
 import { findLayer, parse, Parsed, type Layer } from "./layers.ts";
 import { COLUMN_FIELD, matchingFrames, Sharkd, SharkdError, SharkdTooLarge } from "./sharkd.ts";
@@ -578,7 +579,7 @@ export class PanelData {
     if (!error) return;
     const unknown = /not a valid protocol or protocol field|neither a field nor/.test(error);
     if (what === "field") throw new ApiError(400, "bad-args", `unknown field "${filter}": ${printable(error)}`, unknown ? { hint: LUA_HINT } : {});
-    throw new ApiError(400, "filter", `invalid display filter "${printable(filter).slice(0, 200)}": ${printable(error)}`, unknown ? { hint: LUA_HINT } : {});
+    throw new ApiError(400, "filter", `invalid display filter "${printable(filter).slice(0, 200)}": ${printable(error)}${setHint(filter)}`, unknown ? { hint: LUA_HINT } : {});
   }
 
   /** The frames a display filter matches in the loaded file, and the filter as sharkd matched it (frame.ref_time spelled out). */

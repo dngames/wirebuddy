@@ -69,7 +69,9 @@ The viewer itself works like Wireshark:
   text and renders as nothing else.
 - **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
   checked as you type, new files automatically, a ring buffer and stop conditions; the view
-  updates about once a second.
+  updates about once a second. On a loopback interface or `any`, WireBuddy's own traffic (the
+  page and the agent talking to its server, TCP on its port) is left out of the capture, or it
+  would record itself; your capture filter is combined with that, and says so when you start.
 
 ![WireBuddy screenshot: a reassembled HTTP response, with frames marked by the agent](docs/screenshot.png)
 
@@ -116,6 +118,9 @@ WireBuddy is for working on a capture together with the agent:
   On macOS it needs read access to `/dev/bpf*`, which Wireshark's ChmodBPF sets up.
 
 - **Node.js ≥ 22**
+
+- **An ordinary user for extensions and Decode As**: Wireshark's `sharkd` loads no Lua plugins
+  when it runs as root, so as root they are unavailable and WireBuddy says so.
 
 Developed on Ubuntu 22.04 with Wireshark 4.6.6; CI runs on Ubuntu 24.04 with the current stable
 Wireshark from the PPA. Other Linux distributions should work; macOS, live capture
@@ -378,7 +383,7 @@ solution; `solution/ctseries` is the panel.
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
-| `mark_frames` / `clear_marks` | Highlight frames with a note (listed under Go → Marked Packets) |
+| `mark_frames` / `clear_marks` | Highlight frames with a note (first line of the packet's details, listed under Go → Marked Packets) |
 | `time_references` | Set or unset time references (`*REF*`), which the Time column counts from, or clear them |
 | `packet_comments` | Add, replace or delete packet comments in the user's view (kept by exports to pcapng) |
 | `set_columns` | Show fields as extra columns in the user's packet list |

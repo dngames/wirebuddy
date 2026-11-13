@@ -9,8 +9,9 @@ import { commentsOf, withCommentNode, withComments, type CommentsView, type Edit
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type SharkdStatus } from "./enginesession.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
-import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs } from "./edits.ts";
+import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
+import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
 import { Extensions } from "./extensions.ts";
@@ -386,6 +387,7 @@ export class Viewer extends EventEmitter {
       this.scheduleReload();
       this.tailTimer ??= setInterval(() => void this.tailTick(), LIVE_RELOAD_MS);
     });
+    this.capture.on("note", (text: string) => this.events.add("INFO", text));
     this.capture.on("stopped", () => {
       this.captureStoppedAt = Date.now();
       // A capture shorter than the head that names it is kept once it stopped growing
@@ -415,6 +417,9 @@ export class Viewer extends EventEmitter {
       if (this.keeper.changed()) this.keeper.keepSoon();
     });
   }
+
+  /** The display filter the last open cleared because it named packets of the capture open before ("" if none). */
+  droppedFilter = "";
 
   /** Packets whose comments were edited and not exported in the capture the view left last, if they weren't kept; else 0. */
   get droppedEdits(): number {
@@ -587,6 +592,12 @@ export class Viewer extends EventEmitter {
         const read = this.keeper.held();
         const head = fileHead(file);
         let kept = this.keeper.read(file, head, EDIT_LIMITS);
+        // Frame numbers mean the packets of the capture open now: another capture's are other packets (a live capture's next file goes on)
+        const before = this.state.file;
+        const other = !!before && !next && file !== before && !(kept.key && kept.key === read.key);
+        const named = other && usesFrameNumber(filter) ? filter : "";
+        if (named) filter = "";
+        this.droppedFilter = named;
         const refs = kept.investigation?.timeRefs ?? [];
         // As a reload with these time references: frame.ref_time stands for them, or the filter goes, like one that doesn't apply
         if (refs.length && usesRefTime(filter)) {
@@ -617,6 +628,11 @@ export class Viewer extends EventEmitter {
         if (inv) this.store.merge({ ...this.edits.restore(inv), timeRefsRevision: this.state.timeRefsRevision + (inv.timeRefs.length ? 1 : 0) });
         this.applyLoad(file, filter, result, false);
         this.remember(file);
+        if (named) {
+          const text = `The display filter "${noticeText(named)}" names packets of ${basename(before!)}, so it was cleared for ${basename(file)}`;
+          this.events.add("INFO", text);
+          this.emit("toast", "info", text);
+        }
         this.restored(file, kept);
         if (next && last && edits) {
           const where = keptLast ? `are kept with ${basename(last)}, not carried over to ${basename(file)}, where the capture went on` : `are gone: the capture went on in ${basename(file)}`;
@@ -1153,7 +1169,7 @@ export class Viewer extends EventEmitter {
       return r.warning ? { ok: true, warning: r.warning } : { ok: true };
     } catch (err) {
       const message = (err as Error).message.replace(/^Filter invalid - /, "");
-      return { ok: false, error: message + bpfHint(filter) };
+      return { ok: false, error: message + bpfHint(filter) + setHint(filter) };
     }
   }
 
@@ -1486,14 +1502,16 @@ export class Viewer extends EventEmitter {
     return this.list.selectedOrCurrent(this.state, this.geometry());
   }
 
-  /** Marks frames and returns the frame numbers that exist. */
-  mark(frames: number[], note: string, by: "user" | "agent"): number[] {
+  /** Marks frames; returns the frame numbers that exist and those whose mark by the user an agent replaced. */
+  mark(frames: number[], note: string, by: "user" | "agent"): { frames: number[]; replaced: number[] } {
     this.requireFile();
     const marked = marksWith(this.state.marks, frames, note, by, this.known());
     this.store.set({ marks: marked.marks });
     const n = marked.frames.length;
-    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${marked.note ? `: ${marked.note}` : ""}`);
-    return marked.frames;
+    // Before the note: the banner cuts a long line at its end
+    const replaced = marked.replaced.length ? ` (replaced the user's mark on ${marked.replaced.length === 1 ? "frame" : "frames"} ${frameList(marked.replaced)})` : "";
+    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${replaced}${marked.note ? `: ${marked.note}` : ""}`);
+    return { frames: marked.frames, replaced: marked.replaced };
   }
 
   clearMarks(frames?: number[]): void {
@@ -1704,8 +1722,11 @@ export class Viewer extends EventEmitter {
     return withComments(rows, this.edits.edited(), short);
   }
 
+  /** Frame `num`'s `tree` with its comments as edited here and, first of all, its mark. */
   private withCommentNode(num: number, tree: TreeNode[]): TreeNode[] {
-    return withCommentNode(num, tree, this.edits.edited(), this.commentEtts);
+    const withComments = withCommentNode(num, tree, this.edits.edited(), this.commentEtts);
+    const mark = this.state.marks.find((m) => m.frame === num);
+    return mark ? [markNode(mark, this.state.agent.name), ...withComments] : withComments;
   }
 
   /** Tells what came back of the investigation kept for `file` (`kept`, as read at open), or why nothing did. */
@@ -1714,7 +1735,11 @@ export class Viewer extends EventEmitter {
     if (kept.problem) return;
     const what = keptSummary(this.state.marks.length, this.state.timeRefs.length, this.edits.editedPackets());
     if (!what) return;
-    const text = `Restored ${what} kept for this capture`;
+    // A mark the display filter hides reads as lost
+    const marks = this.state.marks.length;
+    const hidden = this.state.filter ? this.state.marks.filter((m) => m.frame <= this.state.totalFrames && this.indexOf(m.frame) < 0).length : 0;
+    const hides = !hidden ? "" : hidden === marks ? `; the display filter hides ${marks === 1 ? "it" : "all of them"}` : `; the display filter hides ${hidden} of them`;
+    const text = `Restored ${what} kept for this capture${hides}`;
     this.events.add("INFO", text);
     this.emit("toast", "info", text);
   }

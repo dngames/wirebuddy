@@ -432,6 +432,27 @@ try {
     assert.doesNotMatch(seen, /ResizeObserver/);
   });
 
+  await check("browser: a mark is the first line of the selected packet's details and changes with it; Go › Marked Packets shows a long note in full", async () => {
+    const first = () => evaluate("document.querySelector('.dt-label')?.textContent");
+    const who = (await state()).agent.name;
+    const long = `a long note ${"that has to wrap ".repeat(9)}to the end`;
+    await call("goto_frame", { frame: 4 });
+    await until("frame 4's details", () => evaluate("document.querySelector('.dt-label')?.textContent.startsWith('Frame 4:') === true"));
+    await call("mark_frames", { frames: [4], note: "short" });
+    await until("the mark as the first line", async () => (await first()) === `Marked by ${who}: short`);
+    await call("mark_frames", { frames: [4], note: long });
+    await until("the new note", async () => (await first()) === `Marked by ${who}: ${long}`);
+    await fromMenuBar("Go", "Marked Packets");
+    await until("the note in the menu", async () => !!(await box(`[...document.querySelectorAll('.menu-detail')].find((d) => d.textContent === ${JSON.stringify(long)})`)));
+    // Wrapped over lines, none of it cut off
+    const detail = await evaluate(`(() => { const d = [...document.querySelectorAll('.menu-detail')].find((e) => e.textContent === ${JSON.stringify(long)}); return { lines: Math.round(d.getBoundingClientRect().height / parseFloat(getComputedStyle(d).lineHeight || '15')), cut: d.scrollWidth > d.clientWidth + 1 }; })()`);
+    assert.ok(detail.lines >= 2 && !detail.cut, JSON.stringify(detail));
+    await key("Escape", "Escape", 27);
+    await key("Escape", "Escape", 27);
+    await call("clear_marks", { frames: [4] });
+    await until("no mark line", async () => /^Frame 4:/.test(await first()));
+  }).finally(() => call("clear_marks", {}));
+
   await check("browser: with the agent attached, an error the user runs into shows in the page and the agent hears it once, whether the server refused the request or only the page knew", async () => {
     const gone = join(home, "gone.pcapng");
     copyFileSync(join(root, "test/fixtures/http.pcapng"), gone);

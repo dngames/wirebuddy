@@ -346,8 +346,10 @@ try {
     assert.deepEqual((await api("/api/comments", { frames: [num], comment: "on a provisional packet" })).frames, [num]);
     const commented = await api(`/api/frame?num=${num}`);
     await stillProvisional(num, commented.provisional === true, `frame ${num} is not provisional`);
-    assert.deepEqual([commented.tree[0].fn, commented.tree[0].n[0].l, commented.row.cm], ["pkt_comment", "on a provisional packet", ["on a provisional packet"]]);
-    assert.match(commented.tree[1].l, new RegExp(`^Frame ${num}:`));
+    // Its mark leads, then the comments, then the frame
+    assert.deepEqual(commented.tree[0], { l: "Marked: provisional", t: "proto" });
+    assert.deepEqual([commented.tree[1].fn, commented.tree[1].n[0].l, commented.row.cm], ["pkt_comment", "on a provisional packet", ["on a provisional packet"]]);
+    assert.match(commented.tree[2].l, new RegExp(`^Frame ${num}:`));
     const s = await state();
     assert.equal(s.selected, num);
     assert.equal(s.selectedIndex, s.displayedFrames + (num - s.totalFrames - 1));
@@ -581,7 +583,7 @@ try {
     const d = await api(`/api/frame?num=${marked}`);
     assert.equal(d.provisional, undefined);
     assert.equal(d.bytes, markedBytes);
-    assert.deepEqual([d.tree[0].n[0].l, d.row.cm], ["on a provisional packet", ["on a provisional packet"]], "its comment stays");
+    assert.deepEqual([d.tree[0].l, d.tree[1].n[0].l, d.row.cm], ["Marked: provisional", "on a provisional packet", ["on a provisional packet"]], "its mark and comment stay");
     if (!browser) return;
     let left;
     for (const end = Date.now() + 10_000; left !== 0 && Date.now() < end; await sleep(200)) left = await browser.evaluate("document.querySelectorAll('.pl-row.prov').length + (document.querySelector('.sb-live').hidden ? 0 : 1)");
