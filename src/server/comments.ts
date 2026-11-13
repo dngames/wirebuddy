@@ -9,6 +9,7 @@ import type { LiveTail, RowView } from "./livetail.ts";
 import { page, type Sharkd } from "./sharkd.ts";
 import type { SharkdRow } from "./viewer.ts";
 import type { PacketRow, TreeNode } from "../shared/api.ts";
+import { hasFrame } from "../shared/ranges.ts";
 
 /** Lines of a comment the details list, as Wireshark's frame.max_comment_lines. */
 const COMMENT_LINES = 30;
@@ -150,17 +151,4 @@ function labelText(text: string): string {
 /** `text` as a display filter string, escaped as Wireshark does. */
 function filterString(text: string): string {
   return `"${text.replace(/[\u0007\b\f\n\r\t\v\\"]/g, (c) => `\\${ESCAPES[c] ?? c}`)}"`;
-}
-
-/** Whether ascending `frames` hold `f`. */
-export function hasFrame(frames: Int32Array, f: number): boolean {
-  let lo = 0;
-  let hi = frames.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (frames[mid] === f) return true;
-    if (frames[mid] < f) lo = mid + 1;
-    else hi = mid - 1;
-  }
-  return false;
 }
