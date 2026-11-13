@@ -1,5 +1,6 @@
 // Unit checks of the panel data's parts (frame sets, the layer finder, raw matches, the page format, sharkd's answer limit),
-// export runs, saved objects, the event log, the cleanup of slice folders, Decode As entries and investigations kept per capture.
+// export runs, saved objects, the event log, the cleanup of slice folders, Decode As entries, investigations kept per capture
+// and the marks, time references and comment edits laid over a capture.
 // Usage: node test/units.mjs   (bundles the sources itself)
 import { build } from "esbuild";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -19,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -31,9 +32,10 @@ const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
-const { machineTag, interfaceSignature, availableMemory } = await import(join(out, "units.mjs"));
+const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
+const { Edits, marksWith, marksWithout, toggledMarks, displayedMarks, refsWith, toggledRefs, refsChange, commentText, commentAt, MAX_MARKS, MAX_NOTE, MAX_TIME_REFS, StaleGenerationError } = await import(join(out, "units.mjs"));
 const { codeSpan, cell, quote, escapeLine, checkSummary, MAX_SUMMARY_BYTES, buildFindings, checkReportTarget, writeReport, MAX_LISTED, MAX_REPORT_BYTES, TargetExists } = await import(join(out, "units.mjs"));
 
 const { check, finish } = suite();
@@ -1643,6 +1645,244 @@ try {
     assert.deepEqual(changedFields({ a: null }, { a: { b: 1 } }, jsonOf), { a: '{"b":1}' });
     assert.deepEqual(JSON.parse(patchMessage(7, { filter: '"tcp"', capture: '{"n":2}' })), { type: "patch", seq: 7, patch: { filter: "tcp", capture: { n: 2 } } });
     assert.deepEqual(JSON.parse(patchMessage(8, {})), { type: "patch", seq: 8, patch: {} });
+  });
+  await check("view store: set applies a patch, runs the rules and tells once; merge tells nobody; a rule may change the state; what the patch leaves alone keeps its identity", () => {
+    const marks = [{ frame: 1 }];
+    const told = [];
+    const store = new ViewStore({ file: null, kept: true, marks, n: 0 }, (state) => told.push(state));
+    store.merge({ n: 1 });
+    assert.equal(told.length, 0);
+    assert.equal(store.state.n, 1);
+    store.set({ file: "a.pcap" });
+    assert.equal(told.length, 1);
+    assert.equal(told[0], store.state);
+    assert.equal(store.state.marks, marks);
+    const seen = [];
+    store.after((state) => (seen.push(state.n), state.kept && state.file === "b.pcap" ? { ...state, kept: false } : state));
+    store.set({ n: 2 });
+    assert.deepEqual(seen, [2]);
+    assert.equal(store.state.kept, true);
+    store.set({ file: "b.pcap" });
+    assert.equal(store.state.kept, false);
+    assert.equal(store.state.file, "b.pcap");
+    assert.equal(told.length, 3);
+    assert.equal(told[2], store.state);
+    assert.equal(store.state.marks, marks);
+  });
+  /** Edits with a fake viewer: a capture is open while `open.file`, the state's revision is `open.revision`. */
+  const editsOf = (open = { file: true, revision: 0 }) => ({ open, edits: new Edits({ requireFile: () => { if (!open.file) throw new Error("no capture is open"); }, revision: () => open.revision }) });
+  /** Comments as read for `frames`: the file's from `file` (frame -> list), as comments.ts reads them. */
+  const read = (frames, file = {}) => new Map(frames.map((f) => [f, { list: file[f] ?? [], own: (file[f] ?? []).length }]));
+  await check("edits: marks from requests: frames the view knows, deduplicated and sorted, notes printable and cut, others' marks replaced; at most 10,000", () => {
+    const m0 = [{ frame: 5, note: "old", by: "user" }, { frame: 2, note: "", by: "user" }];
+    const r = marksWith(m0, [7, 3, 3, 0, 1.5, 9, 5], `a\u0001b\n${"x".repeat(300)}`, "agent", 8);
+    assert.deepEqual(r.frames, [7, 3, 5]);
+    assert.equal(r.note, `a?b?${"x".repeat(MAX_NOTE - 4)}`);
+    assert.deepEqual(r.marks.map((m) => [m.frame, m.by]), [[2, "user"], [3, "agent"], [5, "agent"], [7, "agent"]]);
+    assert.equal(r.marks[2].note, r.note);
+    assert.deepEqual(m0.map((m) => m.frame), [5, 2], "the marks given are left as they are");
+    const full = Array.from({ length: MAX_MARKS }, (_, i) => ({ frame: i + 1, note: "", by: "user" }));
+    assert.equal(marksWith(full, [1, 2], "again", "user", MAX_MARKS + 1).marks.length, MAX_MARKS, "remarking counts once");
+    assert.throws(() => marksWith(full, [MAX_MARKS + 1], "", "user", MAX_MARKS + 1), /at most 10000 frames can be marked/);
+    assert.deepEqual(marksWithout(r.marks, [3, 7, 99]).map((m) => m.frame), [2, 5]);
+    assert.deepEqual(marksWithout(r.marks), []);
+    const t = toggledMarks(m0, [[1, 2], [5, 6]], "agent");
+    assert.deepEqual(t, [{ frame: 1, note: "", by: "agent" }, { frame: 6, note: "", by: "agent" }]);
+    assert.equal(toggledMarks(full, [[1, 1]], "user").length, MAX_MARKS - 1);
+    assert.throws(() => toggledMarks(full, [[MAX_MARKS + 1, MAX_MARKS + 1]], "user"), /at most 10000/);
+    // A list of rows 0..3 showing frames 2, 4, 6, 8
+    const shownFrames = [2, 4, 6, 8];
+    const list = { rows: 4, shown: (f) => shownFrames.includes(f), frames: ([[a, b]]) => shownFrames.slice(a, b + 1).map((f) => [f, f]) };
+    const on = displayedMarks([{ frame: 4, note: "kept", by: "user" }, { frame: 5, note: "", by: "user" }], true, "agent", list);
+    assert.deepEqual(on.map((m) => [m.frame, m.note, m.by]), [[2, "", "agent"], [4, "kept", "user"], [5, "", "user"], [6, "", "agent"], [8, "", "agent"]]);
+    assert.deepEqual(displayedMarks(on, false, "agent", list).map((m) => m.frame), [5]);
+    assert.deepEqual(displayedMarks(on, true, "agent", { ...list, rows: 0 }), on, "an empty list marks nothing");
+    assert.throws(() => displayedMarks(full.slice(0, MAX_MARKS - 1), true, "user", { rows: 2, shown: () => false, frames: () => [[MAX_MARKS, MAX_MARKS + 1]] }), /at most 10000/);
+  });
+  await check("edits: time references from requests: known frames, sorted, toggled, at most 10,000; what a change set and unset", () => {
+    assert.deepEqual(refsWith([4, 9], [7, 1, 1, 12, 2.5, 0], true, 10), [1, 4, 7, 9]);
+    assert.deepEqual(refsWith([1, 4, 7, 9], [4, 9, 12], false, 10), [1, 7]);
+    assert.deepEqual(refsWith([1, 4], [12], false, 10), [1, 4], "unknown frames are left out");
+    const full = Array.from({ length: MAX_TIME_REFS }, (_, i) => i + 1);
+    assert.equal(refsWith(full, [1], true, MAX_TIME_REFS + 1).length, MAX_TIME_REFS);
+    assert.throws(() => refsWith(full, [MAX_TIME_REFS + 1], true, MAX_TIME_REFS + 1), /at most 10000 frames can be time references/);
+    assert.deepEqual(toggledRefs([2, 5, 9], [[1, 2], [5, 6]]), [1, 6, 9]);
+    assert.deepEqual(toggledRefs([], [[3, 3]]), [3]);
+    assert.equal(toggledRefs(full, [[1, 1]]).length, MAX_TIME_REFS - 1);
+    assert.throws(() => toggledRefs(full, [[MAX_TIME_REFS + 1, MAX_TIME_REFS + 1]]), /at most 10000/);
+    assert.deepEqual(refsChange([2, 5, 9], [1, 6, 9]), { set: [1, 6], unset: [2, 5] });
+    assert.deepEqual(refsChange([3], [3]), { set: [], unset: [] });
+  });
+  await check("edits: a comment as editcap writes it, and the comment an edit names only while it still reads the same", () => {
+    assert.equal(commentText("a\r\nb\rc\nd\te "), "a\nb\nc\nd?e?");
+    assert.throws(() => commentText("x".repeat(2001)), /at most 2000 characters/);
+    assert.equal(commentAt(["a", "b"], 3, 1, "b"), 1);
+    assert.throws(() => commentAt(["a"], 3, 1, "a"), /frame 3 has no comment 2/);
+    assert.throws(() => commentAt(["a"], 3, 0, "b"), (err) => err instanceof StaleGenerationError && /comment 1 of frame 3 changed meanwhile/.test(err.message));
+  });
+  await check("edits: comment edits, Delete All and what isn't exported come back from a snapshot as they were", () => {
+    const { open, edits } = editsOf({ file: true, revision: 6 });
+    const file = { 2: ["file 2"], 4: ["file 4a", "file 4b"], 8: ["file 8"] };
+    const added = edits.edit([2, 3], read([2, 3], file), (now) => [...now, "mine"]);
+    assert.deepEqual(added.frames, [2, 3]);
+    assert.deepEqual(added.patch, { commentEdits: 2, commentsEdited: 2, commentRevision: 7 });
+    assert.deepEqual(edits.edit([2, 3], read([2, 3]), (now) => now), { frames: [], patch: null }, "unchanged frames are left out");
+    open.revision = 7;
+    const cleared = edits.clearAll(Int32Array.from([2, 4, 8, 12]), 10);
+    assert.deepEqual(cleared.frames, [2, 3, 4, 8], "the file's comments of known frames, and the edited ones");
+    assert.deepEqual(cleared.patch, { commentEdits: 4, commentsEdited: 3, commentRevision: 8 });
+    open.revision = 8;
+    // Frame 4 gets a comment again, its file's own ones gone
+    edits.edit([4], new Map([[4, { list: [], own: 0 }]]), () => ["again"]);
+    const marks = [{ frame: 1, note: "n", by: "user" }];
+    const inv = edits.snapshot(marks, [3]);
+    assert.deepEqual(inv, {
+      marks,
+      timeRefs: [3],
+      comments: { edited: [{ frame: 4, list: ["again"], own: 0 }], cleared: 10, clearedFrames: [2, 4, 8], unexported: [2, 3, 4], clearedUnexported: true },
+    });
+    const before = edits.summary(10);
+    assert.deepEqual(before, { packets: 3, cleared: 10, frames: 1, list: [[4, ["again"]]] });
+    const back = editsOf({ file: true, revision: 20 }).edits;
+    back.dropAll();
+    assert.deepEqual(back.restore(JSON.parse(JSON.stringify(inv))), { marks, timeRefs: [3], commentEdits: 4, commentsEdited: 3, commentRevision: 21 });
+    assert.deepEqual(back.snapshot(marks, [3]), inv);
+    assert.deepEqual(back.summary(10), before);
+    assert.deepEqual(back.edited().cleared, 10);
+    assert.deepEqual(back.edited().comments.get(4), { list: ["again"], own: 0 });
+    // Exported before Delete All: only the frames edited since count
+    const exported = editsOf().edits;
+    exported.restore({ marks: [], timeRefs: [], comments: { edited: [{ frame: 5, list: ["x"], own: 1 }], cleared: 3, clearedFrames: [1, 3], unexported: [5], clearedUnexported: false } });
+    assert.equal(exported.snapshot([], []).comments.clearedUnexported, false);
+    assert.deepEqual(exported.forExport([[1, 10]]).edited, 3, "an export still writes the comments Delete All took");
+  });
+  await check("edits: pruning to a shorter capture drops the marks, references and comments past it; dropping all leaves edits queued before refused", async () => {
+    const { open, edits } = editsOf({ file: true, revision: 1 });
+    edits.edit([2, 6, 9], read([2, 6, 9]), () => ["c"]);
+    open.revision = 2;
+    edits.clearAll(new Int32Array(0), 7);
+    open.revision = 3;
+    edits.edit([3, 8], read([3, 8]), () => ["d"]);
+    open.revision = 4;
+    const marks = [{ frame: 1, note: "", by: "user" }, { frame: 8, note: "", by: "agent" }];
+    const refs = [2, 7];
+    const same = edits.prune(9, marks, refs);
+    assert.deepEqual(same.marks, marks);
+    assert.equal(same.timeRefs, refs, "references up to the end stay the same array");
+    assert.equal(same.commentEdits, undefined, "nothing of the comments went: the state hears nothing of them");
+    const p = edits.prune(5, marks, refs);
+    assert.deepEqual(p, { marks: [marks[0]], timeRefs: [2], commentEdits: 2, commentsEdited: 1, commentRevision: 5 });
+    const s = edits.snapshot([], []).comments;
+    assert.deepEqual([s.edited.map((e) => e.frame), s.cleared, s.clearedFrames, s.unexported], [[3], 5, [], [2, 3]]);
+    // Queued behind a slow edit of this capture: the capture goes meanwhile
+    const capture = edits.capture();
+    let release;
+    const slow = edits.queue(capture, () => new Promise((r) => (release = r)));
+    const later = edits.queue(capture, async () => "ran");
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(edits.dropAll(), { marks: [], timeRefs: [], commentEdits: 0, commentsEdited: 0, commentRevision: 5 });
+    assert.equal(edits.isCapture(capture), false);
+    assert.throws(() => edits.sameCapture(capture), StaleGenerationError);
+    release("slow");
+    assert.equal(await slow, "slow");
+    await assert.rejects(later, (err) => err instanceof StaleGenerationError && /closed or another one opened/.test(err.message));
+    assert.deepEqual(edits.snapshot([], []).comments, { edited: [], cleared: 0, clearedFrames: [], unexported: [], clearedUnexported: false });
+    open.file = false;
+    await assert.rejects(edits.queue(edits.capture(), async () => "x"), /no capture is open/, "no capture: refused before anything else");
+    open.file = true;
+    assert.equal(await edits.queue(edits.capture(), async () => "x"), "x", "a failed edit doesn't hold up the next");
+  });
+  await check("edits: an export of every packet counts the edits it wrote as exported, later ones still count; the edited packets stay; the file's commented frames are read once per full read", async () => {
+    const { edits } = editsOf();
+    edits.edit([1, 2], read([1, 2], { 2: ["own"] }), (now) => [...now, "a"]);
+    const at = edits.checkpoint();
+    edits.edit([3], read([3]), () => ["b"]);
+    const out = edits.forExport([[2, 3]]);
+    assert.deepEqual([...out.comments], [[2, { own: true, texts: ["a"] }], [3, { own: undefined, texts: ["b"] }]]);
+    assert.equal(out.edited, 2);
+    assert.equal(edits.exported(at), 1, "frame 3 was edited after the export started");
+    assert.equal(edits.editedPackets(), 3);
+    assert.equal(edits.exported(edits.checkpoint()), 0);
+    assert.equal(edits.summary(1).packets, 3);
+    assert.deepEqual(edits.snapshot([], []).comments.unexported, []);
+    // Delete All after the export: it counts until the next one, its frames once with the ones edited since
+    edits.clearAll(Int32Array.from([5, 6]), 6);
+    edits.edit([6], new Map([[6, { list: [], own: 0 }]]), () => ["c"]);
+    assert.equal(edits.exported({ capture: edits.capture(), edit: 0 }), 5, "1, 2, 3 and 6 edited since, and 5, which Delete All took");
+    const stale = edits.checkpoint();
+    edits.dropAll();
+    assert.equal(edits.exported(stale), null, "an export of a capture the view left");
+    // The file's commented frames: once for each full read, again after dropAll
+    let reads = 0;
+    const fileRead = async () => (reads++, Int32Array.from([4]));
+    assert.equal(edits.fileCommentsKnown(1), false);
+    assert.deepEqual([...(await edits.fileCommented(1, fileRead))], [4]);
+    await edits.fileCommented(1, fileRead);
+    assert.equal(edits.fileCommentsKnown(1), true);
+    await edits.fileCommented(2, fileRead);
+    edits.dropAll();
+    await edits.fileCommented(2, fileRead);
+    assert.equal(reads, 3);
+    edits.edit([1, 4], read([1, 4], { 4: ["file"] }), (now) => (now.length ? [] : ["new"]));
+    assert.deepEqual(await edits.commented(fileRead), [1], "frame 4's file comment was deleted here");
+    edits.left(false, 7);
+    assert.equal(edits.dropped(), 7);
+    edits.left(true, 7);
+    assert.equal(edits.dropped(), 0);
+  });
+  await check("packet list: rows and frames with and without a display filter and a tail, refused row ranges, clipping, startsWith", () => {
+    const tail = { frames: 5, filter: "x", held: null, listed: () => 2, indexOf: (f) => ({ 103: 0, 105: 1 })[f] ?? -1, frameAt: (i) => [103, 105][i], unchecked: (f) => f === 104 };
+    const list = new PacketList();
+    const plain = { totalFrames: 100, displayedFrames: 100, tail: null };
+    assert.equal(list.indexOf(7, plain), 6);
+    assert.equal(list.indexOf(101, plain), -1);
+    assert.equal(list.indexOf(null, plain), -1);
+    assert.deepEqual(list.framesOfRows([[0, 2], [9, 9]], plain), [[1, 3], [10, 10]]);
+    list.setDisplayed(Int32Array.from([5, 6, 9, 40]));
+    const filtered = { totalFrames: 100, displayedFrames: 4, tail: null };
+    assert.equal(list.indexOf(9, filtered), 2);
+    assert.equal(list.indexOf(7, filtered), -1);
+    assert.deepEqual(list.framesOfRows([[0, 2], [3, 3]], filtered), [[5, 6], [9, 9], [40, 40]]);
+    const live = { totalFrames: 100, displayedFrames: 4, tail };
+    assert.equal(list.known(live), 105);
+    assert.equal(list.length(live), 6);
+    assert.equal(list.indexOf(105, live), 5);
+    assert.equal(list.indexOf(104, live), -1);
+    assert.deepEqual(list.framesOfRows([[2, 5]], live), [[9, 9], [40, 40], [103, 103], [105, 105]]);
+    assert.deepEqual(list.rowFrames(live).exact, 100);
+    assert.deepEqual(Array.from({ length: 6 }, (_, i) => list.rowFrames(live).at(i)), [5, 6, 9, 40, 103, 105]);
+    assert.deepEqual(list.page(3, 10, live), { count: 3, exact: 1 });
+    assert.deepEqual(list.page(0, 1000, { totalFrames: 9000, displayedFrames: 9000, tail: null }), { count: 500, exact: 500 });
+    assert.deepEqual(list.select(105, [[4, 5]], live), { selectedIndex: 5, selectedRows: [[4, 5]] });
+    assert.deepEqual(list.select(9, undefined, live), { selectedIndex: 2, selectedRows: [[2, 2]] });
+    assert.deepEqual(list.select(null, undefined, live), { selectedIndex: -1, selectedRows: [] });
+    assert.throws(() => list.select(104, undefined, live) && list.select(104.5, undefined, live), /no frame 104.5/);
+    assert.throws(() => list.select(104, undefined, { ...live, tail: null }), /no frame 104/);
+    assert.throws(() => list.select(0, undefined, live), /no frame 0/);
+    assert.throws(() => list.checkRows([[0, 6]], live), /invalid row range \[0, 6\] \(6 rows are displayed\)/);
+    assert.throws(() => list.checkRows([[2, 1]], live), /invalid row range \[2, 1\]/);
+    assert.throws(() => list.checkRows([[-1, 1]], live), /invalid row range \[-1, 1\]/);
+    assert.throws(() => list.checkRows([[0.5, 1]], live), /invalid row range/);
+    assert.throws(() => list.checkRows(Array.from({ length: 10001 }, (_, i) => [i, i]), { totalFrames: 20000, displayedFrames: 20000, tail: null }), /at most 10000 row ranges can be selected/);
+    assert.deepEqual(list.checkRows([[3, 4], [0, 1], [1, 2]], live), [[0, 4]]);
+    // the list got shorter: the selection is cut to the rows that remain
+    assert.deepEqual(clipRanges([[0, 1], [3, 9], [12, 14]], 5), [[0, 1], [3, 4]]);
+    assert.deepEqual(list.selectedFrames([[0, 1], [3, 9]], filtered), [[5, 6], [40, 40]]);
+    assert.deepEqual(list.selectedOrCurrent({ selectedCount: 0, selectedRows: [], selected: 9 }, filtered), [[9, 9]]);
+    assert.deepEqual(list.selectedOrCurrent({ selectedCount: 0, selectedRows: [], selected: null }, filtered), []);
+    assert.deepEqual(list.selectedOrCurrent({ selectedCount: 1, selectedRows: [[0, 0]], selected: 9 }, filtered), [[5, 5]]);
+    assert.equal(list.unlisted(104, live), "not checked against the display filter yet");
+    assert.equal(list.unlisted(7, live), "hidden by the current display filter");
+    assert.equal(list.unlisted(104, { ...live, tail: { ...tail, held: "a stream index" } }), "listed once read in full, as a stream index");
+    const rows = (frames) => ({ length: frames.length, at: (i) => frames[i] });
+    assert.equal(startsWith(rows([1, 2, 3, 4]), rows([1, 2, 3])), true);
+    assert.equal(startsWith(rows([1, 2]), rows([1, 2, 3])), false);
+    assert.equal(startsWith(rows([1, 9, 3]), rows([1, 2, 3])), false);
+    assert.deepEqual(rowOf(-1), []);
+    assert.equal(listChanged({ file: "a", filter: "", generation: 5 }, { file: "a", filter: "", rowsSince: 5 }), false);
+    assert.equal(listChanged({ file: "a", filter: "", generation: 4 }, { file: "a", filter: "", rowsSince: 5 }), true);
+    assert.equal(listChanged({ file: "a", filter: "" }, { file: "a", filter: "", rowsSince: 5 }), false);
+    assert.equal(listChanged({ file: "b", filter: "" }, { file: "a", filter: "", rowsSince: 0 }), true);
   });
 } finally {
   rmSync(out, { recursive: true, force: true });

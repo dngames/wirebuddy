@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -6,38 +5,30 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { COLUMN_FIELD, matchingFrames, page, Sharkd, SharkdError, SharkdExit, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { fileHead, looksLikeCapture, safeSize } from "./capturefile.ts";
-import { commentsOf, hasFrame, withCommentNode, withComments, type CommentsView, type Edited, type EditedComments } from "./comments.ts";
+import { commentsOf, withCommentNode, withComments, type CommentsView, type EditedComments } from "./comments.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
+import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
 import { Extensions } from "./extensions.ts";
-import {
-  INVESTIGATION_HEAD,
-  investigationContent,
-  InvalidInvestigation,
-  investigationKey,
-  keptSummary,
-  nothingToKeep,
-  pruneInvestigations,
-  readInvestigation,
-  setAsideName,
-  type Investigation,
-} from "./investigation.ts";
+import { keptSummary, pruneInvestigations } from "./investigation.ts";
 import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
-import { Keeper } from "./keeper.ts";
+import { Keeper, type KeptRead } from "./keeper.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
+import { PacketList, clipRanges, listChanged, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
 import { FOLLOW_LIMIT, capturedObjects, follow, saveObjects, type StreamsView } from "./streams.ts";
 import { printable } from "./text.ts";
-import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
+import { changeText, framesWithRefs, refBefore, refsOf, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
+import { initialState, ViewStore } from "./viewstore.ts";
 import { openInWireshark } from "./wireshark.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { VERSION } from "../shared/version.ts";
@@ -129,15 +120,6 @@ export interface SharkdPhs {
 }
 
 const LIVE_RELOAD_MS = 1000;
-const MAX_MARKS = 10000;
-/** Row ranges a selection may consist of. */
-const MAX_ROW_RANGES = 10000;
-const MAX_NOTE = 200;
-/** Packets whose comments the viewer holds edited. */
-const MAX_COMMENTED = 10_000;
-const MAX_COMMENT = 2000;
-/** What an investigation read back may hold: what the view can. */
-const INVESTIGATION_LIMITS = { marks: MAX_MARKS, note: MAX_NOTE, timeRefs: MAX_TIME_REFS, commented: MAX_COMMENTED, comment: MAX_COMMENT };
 const MAX_QUESTION = 2000;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
@@ -208,12 +190,12 @@ export class Viewer extends EventEmitter {
   private readonly sharkdBin: string;
   /** Problems and user activity for the agent. */
   readonly events = new EventLog(
-    (pending) => this.set({ agent: { ...this.state.agent, pending } }),
-    (watching) => this.set({ agent: { ...this.state.agent, watching } }),
+    (pending) => this.store.set({ agent: { ...this.state.agent, pending } }),
+    (watching) => this.store.set({ agent: { ...this.state.agent, watching } }),
   );
   private active = 0;
-  /** Frame numbers matching the filter; null means all frames 1..totalFrames. */
-  private displayed: Int32Array | null = null;
+  /** The frames the display filter shows, and which row is which frame. */
+  private readonly list = new PacketList();
   private mutation: Promise<unknown> = Promise.resolve();
   private reloadTimer: NodeJS.Timeout | null = null;
   private liveFailures = 0;
@@ -231,7 +213,7 @@ export class Viewer extends EventEmitter {
   /** The panels offered for the open file. */
   private readonly offers = new PanelOffers({
     state: () => this.state,
-    set: (patch) => this.set(patch),
+    set: (patch) => this.store.set(patch),
     offers: () => this.extensions.offers(),
     checkFilter: (filter) => this.checkFilter(filter),
     warn: (text) => this.events.add("WARNING", text),
@@ -248,7 +230,7 @@ export class Viewer extends EventEmitter {
   /** What reading the comments asks of this viewer. */
   private readonly commentsView: CommentsView = {
     totalFrames: () => this.state.totalFrames,
-    fileCommentsKnown: () => this.commentedFrames?.loads === this.loads,
+    fileCommentsKnown: () => this.edits.fileCommentsKnown(this.loads),
     fileCommented: () => this.fileCommented(),
     engine: () => this.engine,
     listedTail: () => this.listedTail,
@@ -258,11 +240,16 @@ export class Viewer extends EventEmitter {
   private readonly keeper = new Keeper({
     dir: () => this.investigations,
     state: () => this.state,
-    set: (patch) => this.set(patch),
-    investigation: () => this.investigation(),
+    set: (patch) => this.store.set(patch),
+    investigation: () => this.edits.snapshot(this.state.marks, this.state.timeRefs),
     loadedHead: () => this.loadedHead,
     growing: (file) => this.capture.running && this.capture.state.currentFile === file,
     warn: (text) => this.events.add("WARNING", text),
+  });
+  /** Marks, time references and the packet comments edited here, of the open capture. */
+  private readonly edits = new Edits({
+    requireFile: () => this.requireFile(),
+    revision: () => this.state.commentRevision,
   });
   /** What Follow Stream and Export Objects ask of this viewer. */
   private readonly streamsView: StreamsView = {
@@ -317,35 +304,16 @@ export class Viewer extends EventEmitter {
   private keptFrames = 0;
   /** Provisional rows, details or filter passes that failed in a row. */
   private tailFailures = 0;
-  /** Packet comments edited in the viewer, by frame: they stand for the file's. */
-  private readonly comments = new Map<number, EditedComments>();
-  /** Frames up to this one lost the file's comments (Delete All Packet Comments), unless edited since. */
-  private cleared = 0;
-  /** The frames that had comments then. */
-  private clearedFrames = new Int32Array(0);
-  /** The edit that cleared them, until every packet was exported to pcapng since; else 0. */
-  private clearedEdit = 0;
-  /** Frames changed since every packet was last exported to pcapng, with the edit that changed them last. */
-  private readonly unexported = new Map<number, number>();
-  private commentEdit = 0;
-  /** Edits of comments run one at a time, each from what the frames have then. */
-  private commenting: Promise<unknown> = Promise.resolve();
-  /** Changes when the edited comments go with their file: edits read before go too. */
-  private commentsFile = 0;
   /** When the last capture ended (0: none did). */
   private captureStoppedAt = 0;
   /** sharkd's etts of comment nodes, for the ones made here; others until it showed some. */
   private readonly commentEtts = { node: -1, item: -2 };
-  /** Frames of the file with comments, as the full read `loads` found them. */
-  private commentedFrames: { loads: number; frames: Int32Array } | null = null;
   /** Where the marks, time references and edited comments of each capture are kept; null: nowhere. */
   private readonly investigations: string | null;
-  /** Packets whose comments were edited and not exported in the capture the view left last, if they weren't kept; else 0. */
-  droppedEdits = 0;
   readonly capture: Capture;
   readonly recent: string[] = [];
 
-  state: ViewState;
+  private readonly store: ViewStore;
 
   constructor(opts: {
     captureDir: string;
@@ -365,7 +333,7 @@ export class Viewer extends EventEmitter {
     this.extensions = opts.extensions ?? new Extensions();
     this.panels = new Panels(this.extensions, this.events, opts.panelRuntime ?? "");
     this.panels.on("change", () => {
-      this.set({ panels: this.panels.list() });
+      this.store.set({ panels: this.panels.list() });
       this.offers.showOffers();
     });
     this.sharkdBin = opts.sharkd ?? "sharkd";
@@ -390,13 +358,13 @@ export class Viewer extends EventEmitter {
       live: () => this.followingCapture() && this.capture.running,
       totalFrames: () => this.state.totalFrames,
       displayed: () => ({
-        set: this.panelSet("displayed", [this.displayed, this.state.totalFrames], () => (this.displayed ? FrameSet.fromSorted(this.displayed) : FrameSet.all(this.state.totalFrames))),
+        set: this.panelSet("displayed", [this.list.shown(), this.state.totalFrames], () => (this.list.shown() ? FrameSet.fromSorted(this.list.shown()!) : FrameSet.all(this.state.totalFrames))),
         filter: this.sharkdFilter(this.state.filter),
       }),
       selected: () => {
         const s = this.state;
-        return this.panelSet("selected", [s.selectedRows, s.selected, this.displayed, s.displayedFrames], () =>
-          s.selectedCount ? FrameSet.fromRows(clipRanges(s.selectedRows, s.displayedFrames), this.displayed) : FrameSet.fromSorted(s.selected === null ? [] : [s.selected]),
+        return this.panelSet("selected", [s.selectedRows, s.selected, this.list.shown(), s.displayedFrames], () =>
+          s.selectedCount ? FrameSet.fromRows(clipRanges(s.selectedRows, s.displayedFrames), this.list.shown()) : FrameSet.fromSorted(s.selected === null ? [] : [s.selected]),
         );
       },
       marked: () => this.panelSet("marked", [this.state.marks], () => FrameSet.fromSorted(this.state.marks.map((m) => m.frame).sort((a, b) => a - b))),
@@ -412,49 +380,15 @@ export class Viewer extends EventEmitter {
     this.mergecap = opts.mergecap ?? "mergecap";
     this.wiresharkBin = opts.wireshark ?? null;
     this.capture = new Capture(opts.captureDir, opts.dumpcap);
-    this.state = {
-      file: null,
-      fileSize: 0,
-      loading: false,
-      loadError: null,
-      // Unique per process so a restarted server never reuses a generation the UI has cached
-      generation: Date.now() % 1_000_000_000,
-      instance: randomBytes(6).toString("hex"),
-      columns: [],
-      totalFrames: 0,
-      displayedFrames: 0,
-      duration: 0,
-      filter: "",
-      selected: null,
-      selectedIndex: -1,
-      selectedBy: null,
-      selectSeq: 0,
-      selectedRows: [],
-      selectedCount: 0,
-      rowsSince: 0,
-      marks: [],
-      timeRefs: [],
-      timeRefsRevision: 0,
-      commentEdits: 0,
-      commentsEdited: 0,
-      commentRevision: 0,
-      kept: false,
-      capture: this.capture.state,
-      agentNotice: null,
-      agent: { attached: false, pending: 0, name: "Agent", watching: false },
-      wiresharkAvailable: !!this.wiresharkBin,
-      customColumns: [],
-      tlsKeylog: null,
-      decodeAs: { entries: [], unavailable: this.extensions.unavailable },
-      extensions: { active: 0, failing: 0, revision: 0 },
-      panels: [],
-      panelOffers: [],
-      epoch: 1,
-      tail: null,
-    };
+    this.store = new ViewStore(
+      initialState({ capture: this.capture.state, wiresharkAvailable: !!this.wiresharkBin, decodeAsUnavailable: this.extensions.unavailable }),
+      (state) => this.emit("state", state),
+    );
+    // Changed since it was last kept: not kept until the next save
+    this.store.after((state) => (state.kept && this.keeper.changed() ? { ...state, kept: false } : state));
     this.capture.on("change", (capture: CaptureState) => {
       if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
-      this.set({ capture });
+      this.store.set({ capture });
     });
     this.capture.on("file", (file: string) => {
       // A new capture takes over the view; later ring files only if the view still follows it
@@ -491,8 +425,13 @@ export class Viewer extends EventEmitter {
       }
     }
     this.on("state", () => {
-      if (this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.keeper.keepSoon();
+      if (this.keeper.changed()) this.keeper.keepSoon();
     });
+  }
+
+  /** Packets whose comments were edited and not exported in the capture the view left last, if they weren't kept; else 0. */
+  get droppedEdits(): number {
+    return this.edits.dropped();
   }
 
   /** Whether the view shows the live capture's current file (or `file`). */
@@ -504,11 +443,9 @@ export class Viewer extends EventEmitter {
     return this.engines[this.active];
   }
 
-  private set(patch: Partial<ViewState>): void {
-    this.state = { ...this.state, ...patch };
-    // Changed since it was last kept: not kept until the next save
-    if (this.state.kept && this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.state = { ...this.state, kept: false };
-    this.emit("state", this.state);
+  /** The view's state; only the store replaces it. */
+  get state(): ViewState {
+    return this.store.state;
   }
 
   /** Packets read before may read differently now: panels start over. */
@@ -559,33 +496,23 @@ export class Viewer extends EventEmitter {
     return this.tail?.active ? this.tail : null;
   }
 
+  /** What the packet list reads of the view. */
+  private geometry(): ListView {
+    return { totalFrames: this.state.totalFrames, displayedFrames: this.state.displayedFrames, tail: this.listedTail };
+  }
+
   /** Frames the view knows: read in full, then provisional ones. */
   private known(): number {
-    return this.state.totalFrames + (this.listedTail?.frames ?? 0);
+    return this.list.known(this.geometry());
   }
 
   /** Rows of the list: exact ones, then provisional ones. */
   private listLength(): number {
-    return this.state.displayedFrames + (this.listedTail?.listed() ?? 0);
+    return this.list.length(this.geometry());
   }
 
   private indexOf(frame: number | null): number {
-    if (frame === null) return -1;
-    if (frame > this.state.totalFrames) {
-      const i = this.listedTail?.indexOf(frame) ?? -1;
-      return i < 0 ? -1 : this.state.displayedFrames + i;
-    }
-    if (!this.displayed) return frame >= 1 && frame <= this.state.totalFrames ? frame - 1 : -1;
-    let lo = 0;
-    let hi = this.displayed.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      const v = this.displayed[mid];
-      if (v === frame) return mid;
-      if (v < frame) lo = mid + 1;
-      else hi = mid - 1;
-    }
-    return -1;
+    return this.list.indexOf(frame, this.geometry());
   }
 
   /**
@@ -691,7 +618,7 @@ export class Viewer extends EventEmitter {
     if (this.tail && !this.capture.running && this.tail.count <= status.frames) this.dropTail();
     if (!this.listedTail) this.paused = null;
     this.readFailed = null;
-    this.displayed = displayed;
+    this.list.setDisplayed(displayed);
     this.baseColumns = status.columns;
     this.columnFormats = (status.column_info ?? []).map((c) => c.format);
     this.loads++;
@@ -700,8 +627,7 @@ export class Viewer extends EventEmitter {
     if (why === "file" || why === "rewritten" || totalFrames >= this.keptFrames) this.keptFrames = 0;
     const known = Math.max(totalFrames + (this.listedTail?.frames ?? 0), this.keptFrames);
     const selected = keepSelection && this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
-    this.state = {
-      ...this.state,
+    this.store.merge({
       file,
       fileSize: status.filesize ?? safeSize(file),
       loading: false,
@@ -709,9 +635,7 @@ export class Viewer extends EventEmitter {
       columns: [...status.columns, ...this.state.customColumns.map((c) => c.title)],
       totalFrames,
       displayedFrames: displayed ? displayed.length : totalFrames,
-      marks: this.state.marks.filter((m) => m.frame <= known),
-      timeRefs: refsUpTo(this.state.timeRefs, known),
-      ...this.pruneComments(known),
+      ...this.edits.prune(known, this.state.marks, this.state.timeRefs),
       duration: status.duration ?? 0,
       filter,
       selected,
@@ -719,24 +643,18 @@ export class Viewer extends EventEmitter {
       generation: this.state.generation + 1,
       epoch,
       tail: this.tailState(),
-    };
+    });
     this.tail?.setRefs(this.state.timeRefs);
     // A shorter file is a rewritten one, filtered or not
     const keepRows = keepSelection && status.frames >= before.exact && startsWith(this.rowFrames(), before);
     const selectedIndex = this.indexOf(selected);
     const rows = keepRows ? clipRanges(this.state.selectedRows, this.listLength()) : rowOf(selectedIndex);
-    this.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
+    this.store.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
   }
 
-  /** The list's rows as frame numbers, copied: exact rows (of `exact` frames read in full), then provisional ones. */
+  /** The list's rows as frame numbers, copied (see PacketList.rowFrames). */
   private rowFrames(): { exact: number; length: number; at: (i: number) => number } {
-    const displayed = this.displayed;
-    const n = this.state.displayedFrames;
-    const tail = this.listedTail;
-    const listed = tail?.listed() ?? 0;
-    const matches = tail?.filter ? Int32Array.from({ length: listed }, (_, i) => tail.frameAt(i)) : null;
-    const base = this.state.totalFrames;
-    return { exact: base, length: n + listed, at: (i) => (i < n ? (displayed ? displayed[i] : i + 1) : matches ? matches[i - n] : base + 1 + i - n) };
+    return this.list.rowFrames(this.geometry());
   }
 
   /**
@@ -748,7 +666,7 @@ export class Viewer extends EventEmitter {
   open(file: string, next = false): Promise<void> {
     file = resolve(file);
     return this.exclusive(async () => {
-      this.set({ loading: true, loadError: null });
+      this.store.set({ loading: true, loadError: null });
       const standby = 1 - this.active;
       let filter = this.state.filter;
       try {
@@ -758,9 +676,9 @@ export class Viewer extends EventEmitter {
         if (!this.capture.state.files.includes(file) && !(await looksLikeCapture(file))) throw new Error(`not a capture file: ${file}`);
         // Kept first: reopened, the capture (or a copy) comes back as it is now
         this.keeper.keepNow();
-        const read = this.keeper.kept;
+        const read = this.keeper.held();
         const head = fileHead(file);
-        let kept = this.keptFor(file, head);
+        let kept = this.keeper.read(file, head, EDIT_LIMITS);
         const refs = kept.investigation?.timeRefs ?? [];
         // As a reload with these time references: frame.ref_time stands for them, or the filter goes, like one that doesn't apply
         if (refs.length && usesRefTime(filter)) {
@@ -775,7 +693,7 @@ export class Viewer extends EventEmitter {
         filter = result.filter;
         const keptLast = this.keeper.keepNow();
         // Changed while this one loaded, and the same capture: what it has now (rows read with the references they have anyway)
-        if (kept.key && this.keeper.kept.key === kept.key && this.keeper.kept !== read) kept = this.keptFor(file, head);
+        if (kept.key && this.keeper.held().key === kept.key && this.keeper.held() !== read) kept = this.keeper.read(file, head, EDIT_LIMITS);
         this.active = standby;
         this.forgetTypes();
         this.lastReadMs = 0;
@@ -785,13 +703,13 @@ export class Viewer extends EventEmitter {
         this.loadedIno = st.ino;
         this.loadedHead = fileHead(file);
         const [last, edits] = [this.state.file, this.state.commentEdits];
-        this.droppedEdits = keptLast ? 0 : edits;
+        this.edits.left(keptLast, edits);
         const inv = kept.investigation;
-        this.state = { ...this.state, marks: inv?.marks ?? [], timeRefs: inv?.timeRefs ?? [], ...this.dropComments(), selected: null, selectedBy: null };
-        if (inv) this.state = { ...this.state, ...this.restoreComments(inv), timeRefsRevision: this.state.timeRefsRevision + (inv.timeRefs.length ? 1 : 0) };
+        this.store.merge({ ...this.edits.dropAll(), selected: null, selectedBy: null });
+        if (inv) this.store.merge({ ...this.edits.restore(inv), timeRefsRevision: this.state.timeRefsRevision + (inv.timeRefs.length ? 1 : 0) });
         this.applyLoad(file, filter, result, false);
         this.remember(file);
-        this.restored(file, kept.key, kept.problem);
+        this.restored(file, kept);
         if (next && last && edits) {
           const where = keptLast ? `are kept with ${basename(last)}, not carried over to ${basename(file)}, where the capture went on` : `are gone: the capture went on in ${basename(file)}`;
           const text = `The packet comments edited in ${edits} packet${edits === 1 ? "" : "s"} of ${basename(last)} weren't exported and ${where}`;
@@ -801,7 +719,7 @@ export class Viewer extends EventEmitter {
         void this.offers.checkOffers(true);
       } catch (err) {
         const message = printable((err as Error).message);
-        this.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
+        this.store.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
         throw err;
       }
     });
@@ -832,7 +750,7 @@ export class Viewer extends EventEmitter {
       const text = `Not enough free memory for a second copy of ${basename(file)}: WireBuddy reads it again in place of the one it has, so the packet list waits until it has`;
       this.events.add("WARNING", text);
       this.emit("toast", "info", text);
-      this.set({ loading: true });
+      this.store.set({ loading: true });
       // Requests in flight are answered first
       await this.engines[target].idle(RESTART_WAIT_MS);
       this.engines[target].restart();
@@ -850,7 +768,7 @@ export class Viewer extends EventEmitter {
       throw err;
     } finally {
       this.readStartedAt = 0;
-      if (inPlace) this.set({ loading: false });
+      if (inPlace) this.store.set({ loading: false });
     }
     if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
     this.lastReadMs = Date.now() - started;
@@ -873,7 +791,7 @@ export class Viewer extends EventEmitter {
     this.loadedHead = head;
     if (redissect || result.rolledBack) void this.filterTail();
     if (result.rolledBack) {
-      this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
+      this.store.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
       this.refreshExtensions();
     }
     return { dropped, rolledBack: result.rolledBack };
@@ -914,34 +832,31 @@ export class Viewer extends EventEmitter {
     const retry = this.finalRead ? "The full read after the capture's end tries again" : "View › Reload tries again";
     const loadError = `${this.readFailed[0].toUpperCase()}${this.readFailed.slice(1)}${listed}. ${retry}`;
     if (!inPlace) {
-      this.set({ loadError, tail: this.tailState() });
+      this.store.set({ loadError, tail: this.tailState() });
       this.events.add("ERROR", loadError);
       return;
     }
     tail?.rebase(0);
-    this.displayed = this.state.filter ? new Int32Array(0) : null;
+    this.list.setDisplayed(this.state.filter ? new Int32Array(0) : null);
     this.loads++;
     const known = tail?.count ?? 0;
     const selected = this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
     const generation = this.state.generation + 1;
-    this.state = {
-      ...this.state,
+    this.store.merge({
       loading: false,
       loadError,
       totalFrames: 0,
       displayedFrames: 0,
-      marks: this.state.marks.filter((m) => m.frame <= known),
-      timeRefs: refsUpTo(this.state.timeRefs, known),
-      ...this.pruneComments(known),
+      ...this.edits.prune(known, this.state.marks, this.state.timeRefs),
       selected,
       selectedBy: selected === null ? null : this.state.selectedBy,
       generation,
       rowsSince: generation,
       tail: this.tailState(),
-    };
+    });
     tail?.setRefs(this.state.timeRefs);
     const selectedIndex = this.indexOf(selected);
-    this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+    this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
     this.events.add("ERROR", loadError);
     void this.filterTail();
   }
@@ -1116,9 +1031,9 @@ export class Viewer extends EventEmitter {
   /** Provisional matches listed before changed: the list's rows are read again, the selection stays on its packet. */
   private tailRevised(): void {
     const generation = this.state.generation + 1;
-    this.state = { ...this.state, tail: this.tailState(), generation, rowsSince: generation };
+    this.store.merge({ tail: this.tailState(), generation, rowsSince: generation });
     const selectedIndex = this.indexOf(this.state.selected);
-    this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+    this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
   }
 
   /** Publishes the tail as it is now; the list's generation moves when its rows grew. */
@@ -1132,7 +1047,7 @@ export class Viewer extends EventEmitter {
     const { selected, selectedIndex, selectedRows } = this.state;
     const index = grew && selectedIndex < 0 && selected !== null && selected > this.state.totalFrames ? this.indexOf(selected) : -1;
     const selection = index >= 0 ? { selectedIndex: index, ...(selectedRows.length ? {} : rowSelection(rowOf(index))) } : {};
-    this.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}), ...selection });
+    this.store.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}), ...selection });
   }
 
   /**
@@ -1147,18 +1062,15 @@ export class Viewer extends EventEmitter {
     this.keptFrames = keep > s.totalFrames ? keep : 0;
     const generation = s.generation + 1;
     const selected = s.selected !== null && s.selected <= keep ? s.selected : null;
-    this.state = {
-      ...s,
+    this.store.merge({
       tail: null,
       generation,
       rowsSince: s.tail.displayed ? generation : s.rowsSince,
       selected,
       selectedBy: selected === null ? null : s.selectedBy,
-      marks: s.marks.filter((m) => m.frame <= keep),
-      timeRefs: refsUpTo(s.timeRefs, keep),
-      ...this.pruneComments(keep),
-    };
-    this.set({ selectedIndex: this.indexOf(selected), ...rowSelection(clipRanges(s.selectedRows, s.displayedFrames)) });
+      ...this.edits.prune(keep, s.marks, s.timeRefs),
+    });
+    this.store.set({ selectedIndex: this.indexOf(selected), ...rowSelection(clipRanges(s.selectedRows, s.displayedFrames)) });
   }
 
   /** Provisional rows, details or a filter pass failed: a warning now and then; after a few in a row the tail is turned off. */
@@ -1295,13 +1207,13 @@ export class Viewer extends EventEmitter {
 
   close(): Promise<void> {
     return this.exclusive(async () => {
-      this.droppedEdits = this.keeper.keepNow() ? 0 : this.state.commentEdits;
-      this.keeper.kept = { key: "", content: "" };
+      this.edits.left(this.keeper.keepNow(), this.state.commentEdits);
+      this.keeper.leave();
       // A restarted sharkd needn't read the closed file again
       for (const e of this.engines) e.forgetFile();
       this.dropTail();
-      this.displayed = null;
-      this.set({
+      this.list.setDisplayed(null);
+      this.store.set({
         file: null,
         fileSize: 0,
         loading: false,
@@ -1314,9 +1226,7 @@ export class Viewer extends EventEmitter {
         selectedIndex: -1,
         selectedBy: null,
         ...rowSelection([]),
-        marks: [],
-        timeRefs: [],
-        ...this.dropComments(),
+        ...this.edits.dropAll(),
         generation: this.state.generation + 1,
         rowsSince: this.state.generation + 1,
         epoch: this.newEpoch("closed"),
@@ -1354,20 +1264,19 @@ export class Viewer extends EventEmitter {
           displayed = filter ? await matchingFrames(this.engine, refTimeFilter(filter, refs)) : null;
           held = this.listedTail ? await this.heldReason(filter) : null;
         } while (refs !== this.state.timeRefs && usesRefTime(filter));
-        this.displayed = displayed;
+        this.list.setDisplayed(displayed);
         this.listedTail?.setFilter(filter, held);
-        this.state = {
-          ...this.state,
+        this.store.merge({
           filter,
           displayedFrames: displayed ? displayed.length : this.state.totalFrames,
           generation: this.state.generation + 1,
           tail: this.tailState(),
-        };
+        });
         const selectedIndex = this.indexOf(this.state.selected);
-        this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)), rowsSince: this.state.generation });
+        this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)), rowsSince: this.state.generation });
         void this.filterTail();
       } else {
-        this.set({ filter });
+        this.store.set({ filter });
       }
       if (by === "agent") this.notice(filter ? `Applied display filter: ${filter}` : "Cleared the display filter");
       return check;
@@ -1391,9 +1300,10 @@ export class Viewer extends EventEmitter {
     // A list that shows its end: the rows it gains are read ahead for a while
     if (start + count >= displayedFrames + (this.state.tail?.displayed ?? 0) - WARM_ROWS) this.newestAskedAt = Date.now();
     const tail = this.listedTail;
-    count = Math.max(0, Math.min(count, 500, this.listLength() - start));
+    const shown = this.list.page(start, count, this.geometry());
+    count = shown.count;
     if (count === 0 || start < 0) return { generation, start, rows: [] };
-    const exact = Math.max(0, Math.min(count, displayedFrames - start));
+    const exact = shown.exact;
     const params = page(start, exact);
     const refs = this.state.timeRefs;
     const sharkd = refTimeFilter(filter, refs);
@@ -1481,7 +1391,7 @@ export class Viewer extends EventEmitter {
     if (!refs.length || limit <= 0) return () => [];
     let frames: Int32Array;
     if (!filter) frames = Int32Array.from({ length: Math.max(0, Math.min(limit, this.state.totalFrames - offset)) }, (_, i) => offset + 1 + i);
-    else if (filter === this.state.filter && this.displayed) frames = this.displayed.subarray(offset, offset + limit);
+    else if (filter === this.state.filter && this.list.shown()) frames = this.list.shown()!.subarray(offset, offset + limit);
     else frames = Int32Array.from(await this.engine.call<{ num: number }[]>("frames", { filter: sharkd, ...page(offset, limit), column0: "frame.number:0" }), (r) => r.num);
     return (from, to) => refsOf(refs, frames.subarray(from, to));
   }
@@ -1513,7 +1423,7 @@ export class Viewer extends EventEmitter {
         // Provisional rows renumber frame-number fields
         await this.fieldType(c.field);
       }
-      this.set({
+      this.store.set({
         customColumns,
         columns: this.state.file ? [...this.baseColumns, ...customColumns.map((c) => c.title)] : [],
         generation: this.state.generation + 1,
@@ -1628,15 +1538,11 @@ export class Viewer extends EventEmitter {
    */
   select(frame: number | null, by: "user" | "agent", rows?: Ranges, view?: { file: string; filter: string; generation?: number }): void {
     // Rows clicked, or a frame found, in a list the view has replaced or changed in place since
-    if (view && (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince)) {
+    if (view && listChanged(view, this.state)) {
       throw new StaleGenerationError("the selection belongs to another view");
     }
-    if (frame !== null && (!Number.isInteger(frame) || frame < 1 || frame > this.known())) {
-      throw new Error(`no frame ${frame}`);
-    }
-    const selectedIndex = this.indexOf(frame);
-    const selectedRows = rows ? this.checkRows(rows) : rowOf(selectedIndex);
-    this.set({
+    const { selectedIndex, selectedRows } = this.list.select(frame, rows, this.geometry());
+    this.store.set({
       selected: frame,
       selectedIndex,
       selectedBy: frame === null ? null : by,
@@ -1649,137 +1555,69 @@ export class Viewer extends EventEmitter {
     }
   }
 
-  /** Why the list has no row for `frame`, a frame the view knows: "hidden by the current display filter", or why it isn't listed yet. */
+  /** Why the list has no row for `frame`, a frame the view knows. */
   unlisted(frame: number): string {
-    const tail = this.listedTail;
-    if (tail && frame > this.state.totalFrames) {
-      if (tail.held) return `listed once read in full, as ${tail.held}`;
-      if (tail.unchecked(frame)) return "not checked against the display filter yet";
-    }
-    return "hidden by the current display filter";
+    return this.list.unlisted(frame, this.geometry());
   }
 
-  /** Checks row ranges against the displayed list and merges them. */
   private checkRows(rows: Ranges): Ranges {
-    if (rows.length > MAX_ROW_RANGES) throw new Error(`at most ${MAX_ROW_RANGES} row ranges can be selected`);
-    const n = this.listLength();
-    for (const [a, b] of rows) {
-      if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || a > b || b >= n) throw new Error(`invalid row range [${a}, ${b}] (${n} rows are displayed)`);
-    }
-    return mergeRanges(rows);
+    return this.list.checkRows(rows, this.geometry());
   }
 
   /** Frame ranges of the user's selected rows. */
   selectedFrames(): Ranges {
-    return this.framesOfRows(clipRanges(this.state.selectedRows, this.listLength()));
+    return this.list.selectedFrames(this.state.selectedRows, this.geometry());
   }
 
-  /** Frame ranges of displayed rows, provisional ones too. */
   private framesOfRows(rows: Ranges): Ranges {
-    const displayed = this.displayed;
-    const n = this.state.displayedFrames;
-    const tail = this.listedTail;
-    // Without a filter, row i is frame i + 1 throughout
-    if (!displayed && !tail?.filter) return rows.map(([a, b]) => [a + 1, b + 1]);
-    const out: Ranges = [];
-    for (const [a, b] of rows) {
-      for (let i = a; i <= b; i++) {
-        const frame = i < n ? (displayed ? displayed[i] : i + 1) : tail!.frameAt(i - n);
-        const last = out[out.length - 1];
-        if (last && frame === last[1] + 1) last[1] = frame;
-        else out.push([frame, frame]);
-      }
-    }
-    return out;
+    return this.list.framesOfRows(rows, this.geometry());
   }
 
   /** Frames of the selected rows, else the selected frame. */
   selectedOrCurrent(): Ranges {
-    if (this.state.selectedCount) return this.selectedFrames();
-    const frame = this.state.selected;
-    return frame === null ? [] : [[frame, frame]];
+    return this.list.selectedOrCurrent(this.state, this.geometry());
   }
 
   /** Marks frames and returns the frame numbers that exist. */
   mark(frames: number[], note: string, by: "user" | "agent"): number[] {
     this.requireFile();
-    // Notes become packet comments on export, where editcap takes no control characters
-    note = printable(note).slice(0, MAX_NOTE);
-    const known = this.known();
-    const valid = [...new Set(frames)].filter((f) => Number.isInteger(f) && f >= 1 && f <= known);
-    const marked = new Set(valid);
-    const keep = this.state.marks.filter((m) => !marked.has(m.frame));
-    if (keep.length + valid.length > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
-    const added: Mark[] = valid.map((frame) => ({ frame, note, by }));
-    this.set({ marks: [...keep, ...added].sort((a, b) => a.frame - b.frame) });
-    if (by === "agent" && valid.length) {
-      this.notice(`Marked ${valid.length} frame${valid.length === 1 ? "" : "s"}${note ? `: ${note}` : ""}`);
-    }
-    return valid;
+    const marked = marksWith(this.state.marks, frames, note, by, this.known());
+    this.store.set({ marks: marked.marks });
+    const n = marked.frames.length;
+    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${marked.note ? `: ${marked.note}` : ""}`);
+    return marked.frames;
   }
 
   clearMarks(frames?: number[]): void {
-    const drop = frames && new Set(frames);
-    this.set({ marks: drop ? this.state.marks.filter((m) => !drop.has(m.frame)) : [] });
+    this.store.set({ marks: marksWithout(this.state.marks, frames) });
   }
 
   /** Wireshark's Mark/Unmark Packet(s): flips the mark of each selected frame. */
   toggleMarks(by: "user" | "agent"): void {
     const frames = this.selectedOrCurrent();
     if (!frames.length) return;
-    const marks = this.state.marks;
-    const removed = marks.filter((m) => inRanges(frames, m.frame)).length;
-    if (marks.length - removed + countRanges(frames) - removed > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
-    const had = new Set(marks.map((m) => m.frame));
-    const added: Mark[] = [];
-    for (const [a, b] of frames) for (let f = a; f <= b; f++) if (!had.has(f)) added.push({ frame: f, note: "", by });
-    this.set({ marks: [...marks.filter((m) => !inRanges(frames, m.frame)), ...added].sort((a, b) => a.frame - b.frame) });
+    this.store.set({ marks: toggledMarks(this.state.marks, frames, by) });
   }
 
   /** Wireshark's Mark All Displayed (`on`) / Unmark All Displayed; existing marks keep their notes. */
   markDisplayed(on: boolean, by: "user" | "agent"): void {
     this.requireFile();
-    const marks = this.state.marks;
-    const shown = (m: Mark) => this.indexOf(m.frame) >= 0;
-    if (!on) {
-      this.set({ marks: marks.filter((m) => !shown(m)) });
-      return;
-    }
-    const n = this.listLength();
-    if (marks.length + n - marks.filter(shown).length > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
-    const had = new Set(marks.map((m) => m.frame));
-    const added: Mark[] = [];
-    for (const [a, b] of n ? this.framesOfRows([[0, n - 1]]) : []) {
-      for (let frame = a; frame <= b; frame++) if (!had.has(frame)) added.push({ frame, note: "", by });
-    }
-    this.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
+    const list = { rows: this.listLength(), shown: (frame: number) => this.indexOf(frame) >= 0, frames: (rows: Ranges) => this.framesOfRows(rows) };
+    this.store.set({ marks: displayedMarks(this.state.marks, on, by, list) });
   }
 
   /** Sets (`on`) or unsets time references on `frames`; frames the view doesn't know are left out. */
   setTimeRefs(frames: number[], on: boolean, by: "user" | "agent"): Promise<TimeRefsChange> {
     this.requireFile();
     const known = this.known();
-    const given = new Set(frames.filter((f) => Number.isInteger(f) && f >= 1 && f <= known));
-    return this.changeRefs((refs) => {
-      if (!on) return refs.filter((f) => !given.has(f));
-      const all = new Set([...refs, ...given]);
-      if (all.size > MAX_TIME_REFS) throw new Error(`at most ${MAX_TIME_REFS} frames can be time references`);
-      return [...all].sort((a, b) => a - b);
-    }, by);
+    return this.changeRefs((refs) => refsWith(refs, frames, on, known), by);
   }
 
   /** Wireshark's Set/Unset Time Reference: flips the reference of each selected frame, else of the current one. */
   toggleTimeRefs(by: "user" | "agent"): Promise<TimeRefsChange> {
     this.requireFile();
     const frames = this.selectedOrCurrent();
-    return this.changeRefs((refs) => {
-      const removed = refs.filter((f) => inRanges(frames, f)).length;
-      if (refs.length - 2 * removed + countRanges(frames) > MAX_TIME_REFS) throw new Error(`at most ${MAX_TIME_REFS} frames can be time references`);
-      const had = new Set(refs);
-      const added: number[] = [];
-      for (const [a, b] of frames) for (let f = a; f <= b; f++) if (!had.has(f)) added.push(f);
-      return [...refs.filter((f) => !inRanges(frames, f)), ...added].sort((a, b) => a - b);
-    }, by);
+    return this.changeRefs((refs) => toggledRefs(refs, frames), by);
   }
 
   /** Wireshark's Unset All Time References. */
@@ -1798,9 +1636,7 @@ export class Viewer extends EventEmitter {
       for (;;) {
         const before = this.state.timeRefs;
         const refs = next(before);
-        const had = new Set(before);
-        const now = new Set(refs);
-        const change = { set: refs.filter((f) => !had.has(f)), unset: before.filter((f) => !now.has(f)) };
+        const change = refsChange(before, refs);
         if (!change.set.length && !change.unset.length) return change;
         const filter = this.state.filter;
         const displayed = this.state.file && usesRefTime(filter) ? await matchingFrames(this.engine, refTimeFilter(filter, refs)) : null;
@@ -1808,13 +1644,13 @@ export class Viewer extends EventEmitter {
         if (this.state.timeRefs !== before) continue;
         this.tail?.setRefs(refs);
         const generation = this.state.generation + 1;
-        const was = this.displayed;
+        const was = this.list.shown();
         if (displayed && !(was && was.length === displayed.length && was.every((f, i) => f === displayed[i]))) {
-          this.displayed = displayed;
-          this.state = { ...this.state, timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, displayedFrames: displayed.length, generation, rowsSince: generation };
+          this.list.setDisplayed(displayed);
+          this.store.merge({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, displayedFrames: displayed.length, generation, rowsSince: generation });
           const selectedIndex = this.indexOf(this.state.selected);
-          this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
-        } else this.set({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, generation });
+          this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+        } else this.store.set({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, generation });
         if (by === "agent") {
           const text = changeText(change);
           this.notice(notice ?? text[0].toUpperCase() + text.slice(1));
@@ -1848,7 +1684,7 @@ export class Viewer extends EventEmitter {
     const text = commentText(comment);
     if (!text) return this.deleteComment(frame, index, old, by);
     const changed = await this.editComments(this.oneFrame(frame), (now) => {
-      const at = this.commentAt(now, frame, index, old);
+      const at = commentAt(now, frame, index, old);
       return now.map((c, i) => (i === at ? text : c));
     });
     if (by === "agent" && changed.length) this.notice(`Edited a packet comment of frame ${frame}: ${noticeText(text)}`);
@@ -1858,7 +1694,7 @@ export class Viewer extends EventEmitter {
   /** Wireshark's Delete "…": comment `index` of `frame`, if still `old`. */
   async deleteComment(frame: number, index: number, old: string, by: "user" | "agent"): Promise<number[]> {
     const changed = await this.editComments(this.oneFrame(frame), (now) => {
-      const at = this.commentAt(now, frame, index, old);
+      const at = commentAt(now, frame, index, old);
       return now.filter((_, i) => i !== at);
     });
     if (by === "agent" && changed.length) this.notice(`Deleted a packet comment of frame ${frame}`);
@@ -1877,23 +1713,13 @@ export class Viewer extends EventEmitter {
    * the view knows; returns the frames that had comments.
    */
   async clearComments(by: "user" | "agent"): Promise<number[]> {
-    const file = this.commentsFile;
-    const changed = await this.commentQueue(file, async () => {
+    const capture = this.edits.capture();
+    const changed = await this.edits.queue(capture, async () => {
       const commented = await this.fileCommented();
-      this.sameCapture(file);
-      const known = this.known();
-      const shown = (f: number): boolean => (this.comments.get(f)?.list.length ?? (f > this.cleared ? 1 : 0)) > 0;
-      const gone = commented.filter((f) => f <= known && shown(f));
-      const added = [...this.comments.keys()].filter((f) => shown(f) && !hasFrame(commented, f));
-      if (!gone.length && !added.length) return [];
-      const edit = ++this.commentEdit;
-      for (const f of added) this.unexported.set(f, edit);
-      this.clearedFrames = this.cleared ? Int32Array.from(new Set([...this.clearedFrames, ...gone])).sort() : gone;
-      this.clearedEdit = edit;
-      this.cleared = known;
-      this.comments.clear();
-      this.commentsChanged();
-      return [...gone, ...added].sort((a, b) => a - b);
+      this.edits.sameCapture(capture);
+      const cleared = this.edits.clearAll(commented, this.known());
+      this.commentsChanged(cleared.patch);
+      return cleared.frames;
     });
     if (by === "agent" && changed.length) this.notice(`Deleted all packet comments (${frameCount(changed)})`);
     return changed;
@@ -1906,13 +1732,12 @@ export class Viewer extends EventEmitter {
    */
   async forgetKept(): Promise<ForgetResult> {
     this.requireFile();
-    const file = this.commentsFile;
-    const gone: ForgetResult = { marks: this.state.marks.length, timeRefs: this.state.timeRefs.length, comments: this.editedPackets() };
+    const capture = this.edits.capture();
+    const gone: ForgetResult = { marks: this.state.marks.length, timeRefs: this.state.timeRefs.length, comments: this.edits.editedPackets() };
     // As the user unsetting them all: sharkd counts from the first packet again, a frame.ref_time filter is matched again
     await this.clearTimeRefs("user");
-    await this.commentQueue(file, async () => {
-      this.dropComments();
-      this.set({ marks: [], commentEdits: this.editCount(), commentsEdited: 0, commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
+    await this.edits.queue(capture, async () => {
+      this.store.set({ ...this.edits.forget(), generation: this.state.generation + 1 });
     });
     this.keeper.keepNow();
     return gone;
@@ -1924,23 +1749,13 @@ export class Viewer extends EventEmitter {
    * frames edited since, the first `max` with their comments.
    */
   editedComments(max: number): { packets: number; cleared: number; frames: number; list: [number, string[]][] } {
-    const frames = [...this.comments.keys()].sort((a, b) => a - b);
-    const both = frames.filter((f) => hasFrame(this.clearedFrames, f)).length;
-    const list = frames.slice(0, max).map((f): [number, string[]] => [f, this.comments.get(f)!.list]);
-    return { packets: frames.length + this.clearedFrames.length - both, cleared: this.cleared, frames: frames.length, list };
+    return this.edits.summary(max);
   }
 
   /** `frame`, a frame the view knows, as ranges. */
   private oneFrame(frame: number): Ranges {
     if (!Number.isInteger(frame) || frame < 1 || frame > this.known()) throw new Error(`no frame ${frame}`);
     return [[frame, frame]];
-  }
-
-  /** `index`, a comment `frame` has now (`comments`), as long as it still reads `old`. */
-  private commentAt(comments: string[], frame: number, index: number, old: string): number {
-    if (!Number.isInteger(index) || index < 0 || index >= comments.length) throw new Error(`frame ${frame} has no comment ${index + 1}`);
-    if (comments[index] !== old) throw new StaleGenerationError(`comment ${index + 1} of frame ${frame} changed meanwhile`);
-    return index;
   }
 
   /**
@@ -1951,192 +1766,49 @@ export class Viewer extends EventEmitter {
    */
   private editComments(frames: Ranges, change: (now: string[], frame: number) => string[]): Promise<number[]> {
     if (countRanges(frames) > MAX_COMMENTED) throw new Error(`comments of at most ${MAX_COMMENTED} packets can be changed at once`);
-    const file = this.commentsFile;
-    return this.commentQueue(file, async () => {
+    const capture = this.edits.capture();
+    return this.edits.queue(capture, async () => {
       const known = this.known();
       const valid = mergeRanges(frames).flatMap(([a, b]) => Array.from({ length: Math.max(0, Math.min(b, known) - Math.max(a, 1) + 1) }, (_, i) => Math.max(a, 1) + i));
       const now = await this.commentsOf(valid);
-      this.sameCapture(file);
-      const lists = new Map<number, EditedComments>();
-      for (const f of valid) {
-        const was = now.get(f) ?? { list: [], own: 0 };
-        const list = change(was.list, f);
-        if (list.length === was.list.length && list.every((c, i) => c === was.list[i])) continue;
-        // While the file's own comments lead, exports keep them and add the rest
-        const own = was.own >= 0 && was.list.slice(0, was.own).every((c, i) => c === list[i]) ? was.own : -1;
-        lists.set(f, { list, own });
-      }
-      this.setComments(lists);
-      return [...lists.keys()];
+      this.edits.sameCapture(capture);
+      const edited = this.edits.edit(valid, now, change);
+      this.commentsChanged(edited.patch);
+      return edited.frames;
     });
   }
 
-  /** Runs `fn` after the edits of comments before it, if the capture whose comments were `file` is still open. */
-  private commentQueue<T>(file: number, fn: () => Promise<T>): Promise<T> {
-    const run = (): Promise<T> => {
-      this.requireFile();
-      this.sameCapture(file);
-      return fn();
-    };
-    const next = this.commenting.then(run, run);
-    this.commenting = next.catch(() => {});
-    return next;
-  }
-
-  /** Refuses to edit comments once their capture is gone. */
-  private sameCapture(file: number): void {
-    if (file !== this.commentsFile) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
-  }
-
-  /** Puts `lists` in place of the frames' comments. */
-  private setComments(lists: Map<number, EditedComments>): void {
-    if (!lists.size) return;
-    let added = 0;
-    for (const f of lists.keys()) if (!this.comments.has(f)) added++;
-    if (this.comments.size + added > MAX_COMMENTED) {
-      throw new Error(`the viewer holds the comments of at most ${MAX_COMMENTED} packets; export the capture to pcapng and open that file to change more`);
-    }
-    const edit = ++this.commentEdit;
-    for (const [f, e] of lists) {
-      this.comments.set(f, e);
-      this.unexported.set(f, edit);
-    }
-    this.commentsChanged();
-  }
-
-  /** The list's rows read differently now, in the same places. */
-  private commentsChanged(): void {
-    this.set({ commentEdits: this.editCount(), commentsEdited: this.editedPackets(), commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
-  }
-
-  /** Packets whose comments read otherwise than the capture file's, as edited here (exported or not). */
-  private editedPackets(): number {
-    return this.editedComments(0).packets;
-  }
-
-  /** Packets whose comments changed since every packet was last exported to pcapng. */
-  private editCount(): number {
-    if (!this.clearedEdit) return this.unexported.size;
-    let both = 0;
-    for (const f of this.unexported.keys()) if (hasFrame(this.clearedFrames, f)) both++;
-    return this.unexported.size + this.clearedFrames.length - both;
+  /** The list's rows read differently now, in the same places: what the comments say of the state (`patch`, null for no change) is told. */
+  private commentsChanged(patch: Partial<ViewState> | null): void {
+    if (patch) this.store.set({ ...patch, generation: this.state.generation + 1 });
   }
 
   private async commentsOf(frames: number[]): Promise<Map<number, EditedComments>> {
-    return commentsOf(this.commentsView, this.edited(), frames);
+    return commentsOf(this.commentsView, this.edits.edited(), frames);
   }
 
   /** Frames read in full that have comments in the file. */
-  private async fileCommented(): Promise<Int32Array> {
-    const { loads } = this;
-    if (this.commentedFrames?.loads === loads) return this.commentedFrames.frames;
-    const frames = await matchingFrames(this.engine, "frame.comment");
-    this.commentedFrames = { loads, frames };
-    return frames;
+  private fileCommented(): Promise<Int32Array> {
+    return this.edits.fileCommented(this.loads, () => matchingFrames(this.engine, "frame.comment"));
   }
 
   private withComments(rows: PacketRow[], short = false): PacketRow[] {
-    return withComments(rows, this.edited(), short);
+    return withComments(rows, this.edits.edited(), short);
   }
 
   private withCommentNode(num: number, tree: TreeNode[]): TreeNode[] {
-    return withCommentNode(num, tree, this.edited(), this.commentEtts);
+    return withCommentNode(num, tree, this.edits.edited(), this.commentEtts);
   }
 
-  private edited(): Edited {
-    return { comments: this.comments, cleared: this.cleared };
-  }
-
-  /** Drops the comments edited for frames after `last`; what the state says then. */
-  private pruneComments(last: number): Partial<ViewState> {
-    let gone = 0;
-    for (const f of this.comments.keys()) {
-      if (f <= last) continue;
-      this.comments.delete(f);
-      gone++;
-    }
-    for (const f of this.unexported.keys()) if (f > last) this.unexported.delete(f);
-    if (this.cleared > last) {
-      this.cleared = last;
-      this.clearedFrames = this.clearedFrames.filter((f) => f <= last);
-      gone++;
-    }
-    return gone ? { commentEdits: this.editCount(), commentsEdited: this.editedPackets(), commentRevision: this.state.commentRevision + 1 } : {};
-  }
-
-  /** The edited comments go with their file, and edits under way with them. */
-  private dropComments(): Partial<ViewState> {
-    this.commentsFile++;
-    this.commentedFrames = null;
-    this.clearedEdit = 0;
-    return this.pruneComments(0);
-  }
-
-  /**
-   * The investigation kept for `file` (whose first bytes are `head`), its
-   * key, and why one that is there can't be used; nothing for a file still
-   * growing into the bytes that name it.
-   */
-  private keptFor(file: string, head: Buffer): { key: string; investigation: Investigation | null; problem: string | null } {
-    const dir = this.investigations;
-    const growing = this.capture.running && this.capture.state.currentFile === file;
-    if (!dir || !head.length || (head.length < INVESTIGATION_HEAD && growing)) return { key: "", investigation: null, problem: null };
-    const key = investigationKey(head);
-    try {
-      return { key, investigation: readInvestigation(dir, key, INVESTIGATION_LIMITS), problem: null };
-    } catch (err) {
-      if (err instanceof InvalidInvestigation) this.keeper.refused.add(key);
-      return { key, investigation: null, problem: (err as Error).message };
-    }
-  }
-
-  /** Puts the comments kept in `inv` in place of none, as the edits that made them left them; what the state says then. */
-  private restoreComments(inv: Investigation): Partial<ViewState> {
-    const c = inv.comments;
-    // Only which edits came after the last export of every packet matters, not their order
-    const edit = ++this.commentEdit;
-    for (const e of c.edited) this.comments.set(e.frame, { list: [...e.list], own: e.own });
-    for (const f of c.unexported) this.unexported.set(f, edit);
-    this.cleared = c.cleared;
-    this.clearedFrames = Int32Array.from(c.clearedFrames);
-    this.clearedEdit = c.clearedUnexported ? edit : 0;
-    return { commentEdits: this.editCount(), commentsEdited: this.editedPackets(), commentRevision: this.state.commentRevision + 1 };
-  }
-
-  /** Tells what came back of the investigation kept for `file` (under `key`), or why nothing did. */
-  private restored(file: string, key: string, problem: string | null): void {
-    const inv = this.investigation();
-    this.keeper.kept = { key, content: key && !problem && !nothingToKeep(inv) ? investigationContent(inv) : "" };
-    this.keeper.keptOf = this.keeper.keepingOf();
-    // What the view has is what is kept: nothing, or what was read
-    if (this.state.kept !== !!key) this.set({ kept: !!key });
-    if (problem) {
-      const dir = this.investigations!;
-      const aside = this.keeper.refused.has(key) ? `; it stays as it is until something is kept for this capture, then it is moved to ${setAsideName(dir, key)}` : "";
-      this.events.add("WARNING", `The marks, time references and packet comments kept for ${basename(file)} were not restored: ${problem} (${join(dir, `${key}.json`)})${aside}`);
-      return;
-    }
-    const what = keptSummary(this.state.marks.length, this.state.timeRefs.length, this.editedPackets());
+  /** Tells what came back of the investigation kept for `file` (`kept`, as read at open), or why nothing did. */
+  private restored(file: string, kept: KeptRead): void {
+    this.keeper.adopt(file, kept);
+    if (kept.problem) return;
+    const what = keptSummary(this.state.marks.length, this.state.timeRefs.length, this.edits.editedPackets());
     if (!what) return;
     const text = `Restored ${what} kept for this capture`;
     this.events.add("INFO", text);
     this.emit("toast", "info", text);
-  }
-
-  /** The marks, time references and edited comments the view has, as investigation.ts keeps them. */
-  private investigation(): Investigation {
-    const ascending = (frames: Iterable<number>): number[] => [...new Set(frames)].sort((a, b) => a - b);
-    return {
-      marks: this.state.marks,
-      timeRefs: this.state.timeRefs,
-      comments: {
-        edited: ascending(this.comments.keys()).map((frame) => ({ frame, list: this.comments.get(frame)!.list, own: this.comments.get(frame)!.own })),
-        cleared: this.cleared,
-        clearedFrames: ascending(this.clearedFrames),
-        unexported: ascending(this.unexported.keys()),
-        clearedUnexported: this.clearedEdit > 0,
-      },
-    };
   }
 
   /** Keeps the open capture's marks, time references and comment edits now; whether they are kept (see ViewState.kept). */
@@ -2146,7 +1818,7 @@ export class Viewer extends EventEmitter {
 
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
   attachAgent(name = this.state.agent.name): void {
-    this.set({ agent: { ...this.state.agent, attached: true, name } });
+    this.store.set({ agent: { ...this.state.agent, attached: true, name } });
   }
 
   /**
@@ -2189,14 +1861,14 @@ export class Viewer extends EventEmitter {
     if (!this.followingCapture() || !pressedInCapture) throw new Error("Now works while the view follows a running capture");
     if (this.capture.state.ring) throw new Error("Now works in a capture that stays in one file");
     const end = endMs / 1000;
-    const file = this.commentsFile;
+    const capture = this.edits.capture();
     const path = this.state.file!;
     let times: LiveTimes | null = null;
     let frames: number[] = [];
     let spanned = 0;
     // Again when the live tail closed meanwhile (the final read landed): then from the packets read in full
     for (let tries = 0; tries < 3; tries++) {
-      times = await this.liveTimes(end, file);
+      times = await this.liveTimes(end, capture);
       if (!times?.complete) break;
       try {
         const last = await framesBefore(times, end, true);
@@ -2216,11 +1888,11 @@ export class Viewer extends EventEmitter {
     else frames.forEach((f, i) => texts.set(f, i ? "WireBuddy Now: held until here" : `WireBuddy Now: held ${secs} from here`));
     let commented: number[] = [];
     if (frames.length) {
-      await this.whenState(() => this.known() >= frames[frames.length - 1] || this.commentsFile !== file, NOW_VIEW_MS);
-      if (this.commentsFile === file) commented = await this.editComments(toRanges(frames), (now, f) => [...now, texts.get(f)!]).catch(() => []);
+      await this.whenState(() => this.known() >= frames[frames.length - 1] || !this.edits.isCapture(capture), NOW_VIEW_MS);
+      if (this.edits.isCapture(capture)) commented = await this.editComments(toRanges(frames), (now, f) => [...now, texts.get(f)!]).catch(() => []);
     }
     // The user opened another file meanwhile: these numbers aren't its packets
-    const left = !times || this.commentsFile !== file;
+    const left = !times || !this.edits.isCapture(capture);
     if (left) frames = [];
     const about = left
       ? `the view left ${basename(path)}`
@@ -2261,14 +1933,14 @@ export class Viewer extends EventEmitter {
   /**
    * Capture times of the live file's packets once it has one from after `t`
    * (or NOW_FILE_MS passed, or the capture's final read landed); null once
-   * another file is open than the one whose comments were `file`.
+   * another file is open than the one whose comments were of `capture`.
    */
-  private async liveTimes(t: number, file: number): Promise<LiveTimes | null> {
+  private async liveTimes(t: number, capture: number): Promise<LiveTimes | null> {
     const deadline = Date.now() + NOW_FILE_MS;
     for (;;) {
       // Taken first: the packets read in full are all there then
       const ended = !this.capture.running && !this.finalRead;
-      if (this.commentsFile !== file) return null;
+      if (!this.edits.isCapture(capture)) return null;
       const tail = this.tail?.file === this.state.file ? this.tail : null;
       if (tail) await tail.update();
       // Not sliceable: only the packets read in full
@@ -2280,7 +1952,7 @@ export class Viewer extends EventEmitter {
             timeOf: async (f: number) => Number((await engine.call<PacketRow[]>("frames", { ...page(f - 1, 1), column0: "frame.time_epoch:0" }))[0]?.c[0] ?? NaN),
           };
       const after = times.count > 0 && (await times.timeOf(times.count).catch(() => NaN)) > t;
-      if (after || ended || Date.now() >= deadline) return this.commentsFile === file ? { ...times, complete: after || ended || !!tail } : null;
+      if (after || ended || Date.now() >= deadline) return this.edits.isCapture(capture) ? { ...times, complete: after || ended || !!tail } : null;
       await sleep(100);
     }
   }
@@ -2307,7 +1979,7 @@ export class Viewer extends EventEmitter {
    * `frame`) of the list `view` showed; refused once that list is gone.
    */
   framesAbout({ frame, rows, view }: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): Ranges {
-    if (view.file !== this.state.file || view.filter !== this.state.filter || (view.generation ?? Infinity) < this.state.rowsSince) {
+    if (listChanged(view, this.state)) {
       throw new StaleGenerationError("the packet list changed since you chose the packets; select them again");
     }
     if (rows?.length) return this.framesOfRows(this.checkRows(rows));
@@ -2323,7 +1995,7 @@ export class Viewer extends EventEmitter {
   }
 
   notice(text: string): void {
-    this.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
+    this.store.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
   }
 
   async phs(filter?: string): Promise<PhsNode[]> {
@@ -2359,7 +2031,7 @@ export class Viewer extends EventEmitter {
     try {
       const r = await this.engine.call<{ prefs?: Record<string, { s?: string }> }>("dumpconf", { pref: "tls.keylog_file" });
       const path = r.prefs?.["tls.keylog_file"]?.s;
-      if (path && !this.state.tlsKeylog) this.set({ tlsKeylog: path });
+      if (path && !this.state.tlsKeylog) this.store.set({ tlsKeylog: path });
     } catch {
       // older sharkd without dumpconf
     }
@@ -2373,7 +2045,7 @@ export class Viewer extends EventEmitter {
     }
     // With the reloads: a sharkd restarting meanwhile would miss the key
     await this.exclusive(async () => {
-      this.set({ tlsKeylog: path });
+      this.store.set({ tlsKeylog: path });
       await this.redissectNow("tls.keylog_file", path ?? "", "tls");
     });
   }
@@ -2392,7 +2064,7 @@ export class Viewer extends EventEmitter {
       this.panelData.setPref(name, value);
       await this.reloadNow(true, false, true, false, rollback);
     } finally {
-      this.set({ epoch: this.newEpoch(why) });
+      this.store.set({ epoch: this.newEpoch(why) });
       this.panelData.hold(false);
       // A panel's offer may need a protocol only this brings
       void this.offers.checkOffers(true);
@@ -2447,7 +2119,7 @@ export class Viewer extends EventEmitter {
         }
         set = { entry, was: s.was, now: s.now, frames: null };
       }
-      this.set({ decodeAs: { ...this.state.decodeAs, entries: next } });
+      this.store.set({ decodeAs: { ...this.state.decodeAs, entries: next } });
       if (set) set.frames = await this.countMatching(countFilter(set.entry)).catch(() => null);
       if (by === "agent") this.notice(set ? `Decode As: ${set.entry.table} ${set.entry.value} as ${set.now}` : removed ? `Removed Decode As ${entryText(removed)}` : "Removed all Decode As entries");
       return { entries: next, ...(set ? { set } : {}), ...(removed ? { removed } : {}) };
@@ -2482,10 +2154,11 @@ export class Viewer extends EventEmitter {
       leftOut = known - this.state.totalFrames;
     } else if (req.filter !== undefined || req.which === "all") ranges = everything;
     else if (req.which === "displayed") {
-      ranges = this.displayed ? toRanges(this.displayed) : everything;
+      const shown = this.list.shown();
+      ranges = shown ? toRanges(shown) : everything;
       // Its provisional matches, and newer packets not checked against it
       const tail = this.listedTail;
-      if (this.displayed && tail) leftOut = tail.held ? tail.frames : tail.listed() + tail.unfiltered();
+      if (shown && tail) leftOut = tail.held ? tail.frames : tail.listed() + tail.unfiltered();
     } else if (req.which === "marked") ranges = toRanges(this.state.marks.map((m) => m.frame));
     else if (req.which === "selected") ranges = req.about ? this.framesAbout(req.about) : this.selectedOrCurrent();
     else if (req.which === "range") ranges = parseRange(String(req.range ?? ""), known);
@@ -2496,16 +2169,11 @@ export class Viewer extends EventEmitter {
     const read = this.state.totalFrames;
     const provisional = ranges.reduce((n, [a, b]) => n + Math.max(0, b - Math.max(a, read + 1) + 1), 0);
     // Comments as edited here, then marks, which Wireshark shows as packet comments
-    const comments = new Map<number, FrameComments>();
+    let comments = new Map<number, FrameComments>();
     let marks = 0;
     let edited = 0;
     if (format === "pcapng") {
-      for (const [f, e] of this.comments) {
-        if (!inRanges(ranges, f)) continue;
-        comments.set(f, { own: e.own < 0 ? false : e.own ? true : undefined, texts: e.list.slice(Math.max(e.own, 0)) });
-        edited++;
-      }
-      for (const f of this.clearedFrames) if (!this.comments.has(f) && inRanges(ranges, f)) edited++;
+      ({ comments, edited } = this.edits.forExport(ranges));
       for (const m of req.markComments ? this.state.marks : []) {
         if (!inRanges(ranges, m.frame)) continue;
         const text = `WireBuddy mark (${m.by === "agent" ? this.state.agent.name : "user"})${m.note ? `: ${m.note}` : ""}`;
@@ -2515,14 +2183,12 @@ export class Viewer extends EventEmitter {
         marks++;
       }
     }
-    const [file, edit] = [this.commentsFile, this.commentEdit];
-    const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges, comments, cleared: this.cleared });
+    const at = this.edits.checkpoint();
+    const size = await exportFrames({ editcap: this.editcap, mergecap: this.mergecap, input, output: req.path, format, ranges, comments, cleared: this.edits.edited().cleared });
     // Every packet in pcapng: the comments edited until then are kept in a file
-    if (format === "pcapng" && frames >= known && file === this.commentsFile) {
-      for (const [f, e] of this.unexported) if (e <= edit) this.unexported.delete(f);
-      if (this.clearedEdit <= edit) this.clearedEdit = 0;
-      const edits = this.editCount();
-      if (edits !== this.state.commentEdits) this.set({ commentEdits: edits });
+    if (format === "pcapng" && frames >= known) {
+      const edits = this.edits.exported(at);
+      if (edits !== null && edits !== this.state.commentEdits) this.store.set({ commentEdits: edits });
     }
     if (by === "agent") {
       this.agentExports.add(resolve(req.path));
@@ -2538,10 +2204,7 @@ export class Viewer extends EventEmitter {
    */
   private async findingsFrames(): Promise<{ marks: Mark[]; commented: number[] }> {
     const marks = [...this.state.marks].sort((a, b) => a.frame - b.frame);
-    const frames = new Set<number>();
-    for (const [f, e] of this.comments) if (e.list.length) frames.add(f);
-    for (const f of await this.fileCommented()) if (f > this.cleared && !this.comments.has(f)) frames.add(f);
-    return { marks, commented: [...frames].sort((a, b) => a - b) };
+    return { marks, commented: await this.edits.commented(() => this.fileCommented()) };
   }
 
   /** What a findings report would list now: marked packets and packets with comments. */
@@ -2574,7 +2237,7 @@ export class Viewer extends EventEmitter {
     const summary = req.summary === undefined ? "" : checkSummary(String(req.summary));
     const input = this.state.file!;
     checkReportTarget(path, [input, ...this.capture.state.files], !!req.overwrite);
-    const file = this.commentsFile;
+    const capture = this.edits.capture();
     const { marks, commented } = await this.findingsFrames();
     const read = this.state.totalFrames;
     const markedOut: MarkedPacket[] = [];
@@ -2587,7 +2250,7 @@ export class Viewer extends EventEmitter {
       if (comments.length) commentedOut.push({ frame: f, comments, provisional: f > read, row: await this.rowSummary(f) });
     }
     // The capture the report is about must still be the one open
-    this.sameCapture(file);
+    this.edits.sameCapture(capture);
     if (this.state.file !== input) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
     const s = this.state;
     const text = buildFindings({
@@ -2696,7 +2359,7 @@ export class Viewer extends EventEmitter {
       if (typeof a !== "number" || !Number.isInteger(a) || a < 1 || a > this.known()) throw new ApiError(400, "bad-args", `wb.select: no frame ${printable(String(a)).slice(0, 40)} in this capture`);
       this.select(a, "user");
       // The packet list scrolls to it, as to the agent's selections
-      this.set({ selectSeq: this.state.selectSeq + 1 });
+      this.store.set({ selectSeq: this.state.selectSeq + 1 });
       this.notice(`Panel "${title}" selected frame ${a}`);
       this.panels.acted(name, `selected frame ${a}`);
       return { ok: true };
@@ -2715,7 +2378,7 @@ export class Viewer extends EventEmitter {
   refreshExtensions(): void {
     const active = this.extensions.active();
     const failing = this.extensions.failing();
-    if (active !== this.state.extensions.active || failing !== this.state.extensions.failing) this.set({ extensions: { ...this.state.extensions, active, failing } });
+    if (active !== this.state.extensions.active || failing !== this.state.extensions.failing) this.store.set({ extensions: { ...this.state.extensions, active, failing } });
   }
 
   private luaReport(report: LuaReport): void {
@@ -2756,7 +2419,7 @@ export class Viewer extends EventEmitter {
           this.forgetTypes();
         }
       } finally {
-        this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
+        this.store.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
         this.panelData.hold(false);
         this.refreshExtensions();
         void this.offers.checkOffers(true);
@@ -2892,12 +2555,6 @@ function clip(value: string): string {
   return value.length > MAX_COLUMN_VALUE ? value.slice(0, MAX_COLUMN_VALUE - 1) + "…" : value;
 }
 
-/** A packet comment as editcap writes it: lines end in "\n", other control characters become "?". */
-function commentText(text: string): string {
-  if (text.length > MAX_COMMENT) throw new Error(`a packet comment holds at most ${MAX_COMMENT} characters`);
-  return text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/g, "?");
-}
-
 /** "frame 4" or "3 frames". */
 function frameCount(frames: number[]): string {
   return frames.length === 1 ? `frame ${frames[0]}` : `${frames.length} frames`;
@@ -2923,27 +2580,6 @@ async function framesBefore({ count, timeOf }: LiveTimes, t: number, orAt: boole
     else hi = mid - 1;
   }
   return lo;
-}
-
-/** The row at `index` alone, or no rows for -1. */
-function rowOf(index: number): Ranges {
-  return index >= 0 ? [[index, index]] : [];
-}
-
-function rowSelection(rows: Ranges): Pick<ViewState, "selectedRows" | "selectedCount"> {
-  return { selectedRows: rows, selectedCount: countRanges(rows) };
-}
-
-/** Cuts merged `ranges` to 0..n-1. */
-function clipRanges(ranges: Ranges, n: number): Ranges {
-  return ranges.filter(([a]) => a < n).map(([a, b]) => [a, Math.min(b, n - 1)]);
-}
-
-/** Whether every row of `before` shows the same frame in `after` (a growing live capture). */
-function startsWith(after: { length: number; at: (i: number) => number }, before: { length: number; at: (i: number) => number }): boolean {
-  if (after.length < before.length) return false;
-  for (let i = 0; i < before.length; i++) if (before.at(i) !== after.at(i)) return false;
-  return true;
 }
 
 /** Points out capture-filter (BPF) syntax used where a display filter belongs. */
