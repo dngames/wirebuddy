@@ -38,6 +38,8 @@ export async function follow(v: StreamsView, proto: string, filter: string, limi
     payloads?: { n: number; d: string; s?: number }[];
   }>("follow", { follow: proto, filter });
   if (r.shost === "NONE" && r.chost === "NONE" && !r.payloads?.length) throw new Error(`no ${proto} stream matches ${filter}`);
+  // sharkd numbers the two sides of a TLS follow the other way round from a TCP, HTTP or UDP one: the server is its "client" and the GET travels "server -> client"
+  const swap = proto === "TLS" && (await tlsSidesSwapped(v.engine(), filter, r.cport, r.sport));
   const payloads: FollowResult["payloads"] = [];
   let total = 0;
   let omittedBytes = 0;
@@ -45,7 +47,8 @@ export async function follow(v: StreamsView, proto: string, filter: string, limi
   let clientBytes = 0;
   for (const p of r.payloads ?? []) {
     const data = Buffer.from(p.d, "base64");
-    if (p.s) serverBytes += data.length;
+    const fromServer = !!p.s !== swap;
+    if (fromServer) serverBytes += data.length;
     else clientBytes += data.length;
     const room = limit - total;
     if (room <= 0) {
@@ -55,17 +58,39 @@ export async function follow(v: StreamsView, proto: string, filter: string, limi
     const part = data.length > room ? data.subarray(0, room) : data;
     omittedBytes += data.length - part.length;
     total += part.length;
-    payloads.push({ frame: p.n, server: !!p.s, data: part === data ? p.d : part.toString("base64") });
+    payloads.push({ frame: p.n, server: fromServer, data: part === data ? p.d : part.toString("base64") });
   }
   return {
     proto,
     filter,
-    server: { host: r.shost, port: r.sport, bytes: serverBytes },
-    client: { host: r.chost, port: r.cport, bytes: clientBytes },
+    server: swap ? { host: r.chost, port: r.cport, bytes: serverBytes } : { host: r.shost, port: r.sport, bytes: serverBytes },
+    client: swap ? { host: r.shost, port: r.sport, bytes: clientBytes } : { host: r.chost, port: r.cport, bytes: clientBytes },
     payloads,
     truncated: omittedBytes > 0,
     omittedBytes,
   };
+}
+
+/**
+ * Whether a TLS follow of `filter` names the sides the wrong way round: the
+ * client is the sender of the stream's Client Hello, whose port is `cport` in
+ * sharkd's answer when it got them right. Without a Client Hello nothing says.
+ */
+async function tlsSidesSwapped(engine: Sharkd, filter: string, cport: string, sport: string): Promise<boolean> {
+  try {
+    const rows = await engine.call<{ c: string[] }[]>("frames", { filter: `(${filter}) && tls.handshake.type == 1`, limit: 1, column0: "tcp.srcport:0" });
+    const client = rows[0]?.c[0];
+    return !!client && client !== cport && client === sport;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a followed stream carries TLS, whether or not it is decrypted. */
+export async function carriesTls(v: StreamsView, filter: string): Promise<boolean> {
+  v.requireFile();
+  const rows = await v.engine().call<unknown[]>("frames", { filter: `(${filter}) && tls`, limit: 1 });
+  return rows.length > 0;
 }
 
 /** Files carried in the traffic (Wireshark's Export Objects) of `kind`. */

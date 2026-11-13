@@ -30,7 +30,7 @@ import { PacketList, clipRanges, listChanged, rowOf, rowSelection, startsWith, t
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
-import { FOLLOW_LIMIT, capturedObjects, follow, saveObjects, type StreamsView } from "./streams.ts";
+import { FOLLOW_LIMIT, capturedObjects, carriesTls, follow, saveObjects, type StreamsView } from "./streams.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, refBefore, refsOf, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
 import { initialState, ViewStore } from "./viewstore.ts";
@@ -2256,6 +2256,11 @@ export class Viewer extends EventEmitter {
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
     return follow(this.streamsView, proto, filter, limit);
+  }
+
+  /** Whether the packets `filter` names (a followed stream) carry TLS. */
+  async carriesTls(filter: string): Promise<boolean> {
+    return carriesTls(this.streamsView, filter);
   }
 
   async capturedObjects(kind: ObjectKind, engine = this.engine): Promise<CapturedObject[]> {

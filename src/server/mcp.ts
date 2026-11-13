@@ -599,6 +599,10 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const out = [
         `${proto} stream (${filter}): client ${r.client.host}:${r.client.port} sent ${r.client.bytes} bytes, server ${r.server.host}:${r.server.port} sent ${r.server.bytes} bytes`,
       ];
+      // The TCP view of a TLS connection is its ciphertext, key log or not
+      if (proto === "TCP" && viewer.state.tlsKeylog && (await viewer.carriesTls(filter))) {
+        out[0] += `\nThis stream carries TLS and a key log is set: the bytes below are the encrypted ones. The decrypted stream comes with protocol "TLS" (or "HTTP" for the HTTP inside it), e.g. follow_stream {protocol: "TLS", stream: N} with the tcp.stream index.`;
+      }
       // Consecutive payloads in one direction share a header, keeping small-packet streams compact
       let size = out[0].length;
       let i = 0;

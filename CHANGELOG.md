@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows
 - A page whose token the server refuses (another token, a session that ended) says so in a notice over the page, with where the current address comes from, and keeps trying; a page that lost its server dims what it shows after a few seconds
 - A restart keeps the custom columns and the recent files list (the display filter and the questions are not kept, which the README now says)
 - A question about packets of a capture that is not open any more names that capture in the page, in `get_view_state` and in the result of `answer_question`, which refuses a `frame` with it
+- The agent's `follow_stream` of a TLS stream names the client and the server the right way round (the page's Follow dialog too), and a TCP follow of a stream that carries TLS, with a key log set, says that the decrypted stream comes with protocol TLS or HTTP
 - The background watcher prints the activity before the problem or question too, as the server instructions say
 
 ## [0.17.0] - 2026-11-13

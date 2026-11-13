@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -41,6 +41,7 @@ const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback, watchLines } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
+const { follow, carriesTls } = await import(join(out, "units.mjs"));
 const { settingsDir, keptToken, readSetting, writeSetting, parseRecent, parseColumns } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
@@ -1202,6 +1203,37 @@ try {
     }
   });
 
+  await check("follow: a TLS stream's sides are the client that sent the Client Hello and its server, whichever way sharkd numbers them; other protocols are as sharkd says", async () => {
+    const b64 = (t) => Buffer.from(t).toString("base64");
+    // sharkd 4.6 on a TLS follow: the server as "client", and the request's payload flagged as the server's
+    const swapped = { shost: "127.0.0.1", sport: "42828", chost: "127.0.0.1", cport: "18443", payloads: [{ n: 8, d: b64("GET / HTTP/1.1\r\n\r\n"), s: 1 }, { n: 9, d: b64("HTTP/1.1 200 OK\r\n\r\n"), s: 0 }] };
+    const right = { shost: "127.0.0.1", sport: "18443", chost: "127.0.0.1", cport: "42828", payloads: [{ n: 8, d: b64("GET / HTTP/1.1\r\n\r\n"), s: 0 }, { n: 9, d: b64("HTTP/1.1 200 OK\r\n\r\n"), s: 1 }] };
+    const view = (follows, hello) => ({
+      requireFile() {},
+      engine: () => ({
+        call: async (method, params) => {
+          if (method === "follow") return follows;
+          assert.equal(method, "frames");
+          assert.match(params.filter, /tls\.handshake\.type == 1/);
+          if (hello instanceof Error) throw hello;
+          return hello === null ? [] : [{ c: [hello], num: 4 }];
+        },
+      }),
+    });
+    const sides = (r) => [`${r.client.port} ${r.client.bytes}`, `${r.server.port} ${r.server.bytes}`, r.payloads.map((p) => `${p.frame}${p.server ? "S" : "C"}`).join(" ")];
+    // Swapped by sharkd: the Client Hello came from 42828
+    assert.deepEqual(sides(await follow(view(swapped, "42828"), "TLS", "tls.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
+    // Already right (another sharkd): left alone
+    assert.deepEqual(sides(await follow(view(right, "42828"), "TLS", "tls.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
+    // No Client Hello in the capture, or the lookup failing: sharkd's answer stands
+    assert.deepEqual(sides(await follow(view(swapped, null), "TLS", "tls.stream eq 0")), ["18443 19", "42828 18", "8S 9C"]);
+    assert.deepEqual(sides(await follow(view(swapped, new Error("no")), "TLS", "tls.stream eq 0"))[2], "8S 9C");
+    // HTTP and TCP follows are taken as they come, with no lookup
+    const plain = { call: async (method) => (assert.equal(method, "follow"), right) };
+    assert.deepEqual(sides(await follow({ requireFile() {}, engine: () => plain }, "HTTP", "tcp.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
+    assert.equal(await carriesTls({ requireFile() {}, engine: () => ({ call: async (_m, p) => (assert.equal(p.filter, "(tcp.stream eq 0) && tls"), [{ num: 4 }]) }) }, "tcp.stream eq 0"), true);
+    assert.equal(await carriesTls({ requireFile() {}, engine: () => ({ call: async () => [] }) }, "tcp.stream eq 1"), false);
+  });
   await check("watcher: prints the events that woke the agent, then up to ten before them it saw already", () => {
     const ev = (seq, level, text) => ({ seq, time: `2026-11-13T12:00:${String(seq).padStart(2, "0")}.000Z`, level, text });
     const log = Array.from({ length: 14 }, (_, i) => ev(i + 1, "INFO", `did ${i + 1}`));
