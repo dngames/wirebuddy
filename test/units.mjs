@@ -30,6 +30,7 @@ const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFil
 const { checkPanel } = await import(join(out, "units.mjs"));
 const { noLuaReason } = await import(join(out, "units.mjs"));
 const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
+const { frameList } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -1683,6 +1684,9 @@ try {
     assert.equal(r.note, `a?b?${"x".repeat(MAX_NOTE - 4)}`);
     assert.deepEqual(r.marks.map((m) => [m.frame, m.by]), [[2, "user"], [3, "agent"], [5, "agent"], [7, "agent"]]);
     assert.equal(r.marks[2].note, r.note);
+    assert.deepEqual(r.replaced, [5], "the user's mark on 5 was replaced by the agent");
+    assert.deepEqual(marksWith(r.marks, [3, 5], "x", "agent", 8).replaced, [], "its own marks are not the user's");
+    assert.deepEqual(marksWith(m0, [2, 5], "x", "user", 8).replaced, [], "the user replaces what they like unasked");
     assert.deepEqual(m0.map((m) => m.frame), [5, 2], "the marks given are left as they are");
     const full = Array.from({ length: MAX_MARKS }, (_, i) => ({ frame: i + 1, note: "", by: "user" }));
     assert.equal(marksWith(full, [1, 2], "again", "user", MAX_MARKS + 1).marks.length, MAX_MARKS, "remarking counts once");
@@ -2211,6 +2215,12 @@ esac
     const combined = await cap.checkFilter("lo", "nocombine");
     assert.deepEqual([combined.ok, combined.error], [false, "WireBuddy's own traffic can't be left out of this capture: combined is wrong"]);
     await assert.rejects(cap.start({ iface: "lo", filter: "nocombine", autostop: {}, ring: null }), /capture filter: WireBuddy's own traffic can't be left out/);
+  });
+
+  await check("frame lists in a sentence are cut after 20 frames", () => {
+    assert.equal(frameList([1, 2, 3]), "1, 2, 3");
+    assert.equal(frameList([1, 2, 3, 4], 3), "1, 2, 3, ...");
+    assert.equal(frameList(Array.from({ length: 21 }, (_, i) => i + 1)), `${Array.from({ length: 20 }, (_, i) => i + 1).join(", ")}, ...`);
   });
 
 } finally {

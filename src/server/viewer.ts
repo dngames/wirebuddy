@@ -9,7 +9,7 @@ import { commentsOf, withCommentNode, withComments, type CommentsView, type Edit
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type SharkdStatus } from "./enginesession.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
-import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs } from "./edits.ts";
+import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
@@ -1486,14 +1486,15 @@ export class Viewer extends EventEmitter {
     return this.list.selectedOrCurrent(this.state, this.geometry());
   }
 
-  /** Marks frames and returns the frame numbers that exist. */
-  mark(frames: number[], note: string, by: "user" | "agent"): number[] {
+  /** Marks frames; returns the frame numbers that exist and those whose mark by the user an agent replaced. */
+  mark(frames: number[], note: string, by: "user" | "agent"): { frames: number[]; replaced: number[] } {
     this.requireFile();
     const marked = marksWith(this.state.marks, frames, note, by, this.known());
     this.store.set({ marks: marked.marks });
     const n = marked.frames.length;
-    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${marked.note ? `: ${marked.note}` : ""}`);
-    return marked.frames;
+    const replaced = marked.replaced.length ? `; replaced the user's mark on ${marked.replaced.length === 1 ? "frame" : "frames"} ${frameList(marked.replaced)}` : "";
+    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${marked.note ? `: ${marked.note}` : ""}${replaced}`);
+    return { frames: marked.frames, replaced: marked.replaced };
   }
 
   clearMarks(frames?: number[]): void {

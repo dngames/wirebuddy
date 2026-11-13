@@ -8,6 +8,7 @@ import { eventLines } from "./events.ts";
 import type { HttpServer } from "./http.ts";
 import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
+import { frameList } from "./edits.ts";
 import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
@@ -646,19 +647,20 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "mark_frames",
     {
-      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip and under Go → Marked Packets).",
+      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip and under Go → Marked Packets). A frame the user marked gets your mark and note instead; the result names those frames.",
       inputSchema: {
         frames: z.array(z.number().int().min(1)).min(1).max(5000),
         note: z.string().max(200).describe("Why these frames matter, e.g. \"DNS NXDOMAIN\""),
       },
     },
     tool(({ frames, note }) => {
-      const marked = viewer.mark(frames, note, "agent");
+      const { frames: marked, replaced } = viewer.mark(frames, note, "agent");
       const valid = new Set(marked);
       const ignored = [...new Set(frames)].filter((f) => !valid.has(f));
       const known = viewer.state.totalFrames + (viewer.state.tail?.frames ?? 0);
       const skipped = ignored.length ? `; ignored ${ignored.length} frame(s) beyond the ${known} in the capture: ${ignored.slice(0, 20).join(", ")}${ignored.length > 20 ? ", ..." : ""}` : "";
-      return `Marked ${marked.length} frame(s)${skipped}; ${viewer.state.marks.length} marked in total`;
+      const over = replaced.length ? `; replaced the user's mark (and its note) on ${replaced.length === 1 ? "frame" : "frames"} ${frameList(replaced)}` : "";
+      return `Marked ${marked.length} frame(s)${skipped}${over}; ${viewer.state.marks.length} marked in total`;
     }, true, "view"),
   );
 

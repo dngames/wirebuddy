@@ -136,6 +136,16 @@ try {
     assert.match(t, /cut at about 300 characters; 81329 payload bytes/);
   });
   await call("mark_frames", { frames: [21, 25], note: "404 request/response" }, (t) => assert.match(t, /2 marked in total/));
+  // The user's mark on a frame goes to the agent when it marks it: the result and the notice name the frames
+  assert.equal((await post("/api/marks", { frames: [26, 27], note: "the user's note" })).status, 200);
+  await call("mark_frames", { frames: [26, 27, 28], note: "the agent's note" }, (t) => assert.match(t, /^Marked 3 frame\(s\); replaced the user's mark \(and its note\) on frames 26, 27; \d+ marked in total/));
+  await call("mark_frames", { frames: [26], note: "again" }, (t) => assert.doesNotMatch(t, /replaced/, "its own mark is not the user's"));
+  assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame: again$/);
+  await call("mark_frames", { frames: [27], note: "last" }, () => {});
+  assert.equal((await post("/api/marks", { frames: [29], note: "mine" })).status, 200);
+  await call("mark_frames", { frames: [29], note: "yours" }, () => {});
+  assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame: yours; replaced the user's mark on frame 29$/);
+  await call("clear_marks", { frames: [26, 27, 28, 29] }, () => {});
   await call("query_packets", { filter: "http", fields: ["http.request.uri", "http.response.code"] }, (t) => {
     assert.match(t, /^No\. \| http\.request\.uri \| http\.response\.code$/m);
     assert.match(t, /^25 \| \/nothere \| 404$/m);
