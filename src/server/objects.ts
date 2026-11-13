@@ -8,6 +8,7 @@
 
 import { closeSync, mkdirSync, openSync, realpathSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
+import { writeRefused } from "./permission.ts";
 import { rootTrust } from "./trust.ts";
 import { printable } from "./text.ts";
 import type { ObjectKind, ObjectRow } from "../shared/api.ts";
@@ -75,7 +76,7 @@ export function newObjectFolder(real: string, kind: ObjectKind, codeFolders: str
       mkdirSync(folder, { mode: 0o700 });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
-      throw err;
+      throw writeRefused(err, real);
     }
     // The folder as made, not where a link swapped in for it leads
     const trust = rootTrust(folder, true);

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { chmodSync, mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join } from "node:path";
+import { writeRefused } from "./permission.ts";
 import { inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 
 /** editcap refuses more than 512 selections per run. */
@@ -191,7 +192,12 @@ export async function exportFrames(opts: {
   };
   // A folder only the user can open, next to the export (where there is room for it, rather than a small tmpfs):
   // nothing of the export is readable by others, or under a name they could guess, while it is written
-  const dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(dirname(output), ".wirebuddy-export-"));
+  } catch (err) {
+    throw writeRefused(err, dirname(output));
+  }
   const result = join(dir, `export.${format}`);
   try {
     if (runs.length === 1) await write(runs[0], result, format);

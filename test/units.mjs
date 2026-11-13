@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -33,6 +33,7 @@ const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(
 const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
 const { usesFrameNumber } = await import(join(out, "units.mjs"));
+const { writeRefused } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -2217,6 +2218,30 @@ esac
     const combined = await cap.checkFilter("lo", "nocombine");
     assert.deepEqual([combined.ok, combined.error], [false, "WireBuddy's own traffic can't be left out of this capture: combined is wrong"]);
     await assert.rejects(cap.start({ iface: "lo", filter: "nocombine", autostop: {}, ring: null }), /capture filter: WireBuddy's own traffic can't be left out/);
+  });
+
+  await check("a refused write names the user WireBuddy runs as and the folder; other errors stay as they are", () => {
+    const refused = writeRefused(Object.assign(new Error("EACCES: permission denied, mkdtemp '/x/.wirebuddy-export-'"), { code: "EACCES" }), "/x");
+    assert.match(refused.message, new RegExp(`^permission denied: WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't write to /x \\(a shell`));
+    assert.doesNotMatch(refused.message, /mkdtemp/);
+    assert.match(writeRefused(Object.assign(new Error("EPERM"), { code: "EPERM" }), "/y").message, /can't write to \/y/);
+    const other = Object.assign(new Error("ENOSPC: no space left"), { code: "ENOSPC" });
+    assert.equal(writeRefused(other, "/x"), other);
+  });
+
+  await check("a write into a folder the user can't write says who WireBuddy runs as: export, findings report, saved objects", async () => {
+    if (process.getuid?.() === 0) return;
+    const dir = mkdtempSync(join(out, "ro-"));
+    const closed = join(dir, "closed");
+    mkdirSync(closed, { mode: 0o500 });
+    const me = new RegExp(`WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't write to ${closed.replace(/\W/g, "\\$&")}`);
+    try {
+      await assert.rejects(exportFrames({ editcap: "editcap", mergecap: "mergecap", input: join(root, "test/fixtures/http.pcapng"), output: join(closed, "x.pcapng"), format: "pcapng", ranges: [[1, 2]] }), me);
+      assert.throws(() => writeReport(join(closed, "report.md"), "# x\n", false), me);
+      assert.throws(() => newObjectFolder(closed, "http", []), me);
+    } finally {
+      chmodSync(closed, 0o700);
+    }
   });
 
   await check("frame lists in a sentence are cut after 20 frames", () => {
