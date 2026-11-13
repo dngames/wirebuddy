@@ -160,23 +160,15 @@ export class Capture extends EventEmitter {
     return this.ownPort !== null && seesLoopback(iface) ? this.ownPort : null;
   }
 
-  /** Compiles the capture filter for the interface without capturing. */
+  /** Compiles the user's capture filter for the interface without capturing; their filter alone, as theirs. */
   async checkFilter(iface: string, filter: string): Promise<FilterCheck> {
     if (!filter.trim()) return { ok: true };
     try {
-      return await this.checkGiven(await this.requireInterface(iface), filter.trim());
+      await this.requireInterface(iface);
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
-  }
-
-  /** Compiles what dumpcap gets for the user's `filter` (also none) on `iface`; an error of the user's own filter says so alone. */
-  private async checkGiven(iface: CaptureInterface, filter: string): Promise<FilterCheck> {
-    const given = captureFilter(filter, this.leftOut(iface));
-    const check = await this.compile(iface.name, given);
-    if (check.ok || given === filter) return check;
-    const alone = filter ? await this.compile(iface.name, filter) : check;
-    return alone.ok || !filter ? { ok: false, error: `WireBuddy's own traffic can't be left out of this capture: ${check.error}` } : alone;
+    return this.compile(iface, filter.trim());
   }
 
   private async compile(iface: string, filter: string): Promise<FilterCheck> {
@@ -276,12 +268,19 @@ export class Capture extends EventEmitter {
   private async prepare(req: CaptureRequest) {
     const info = await this.requireInterface(req.iface);
     const filter = (req.filter ?? "").trim();
-    const leftOutPort = this.leftOut(info);
-    // What dumpcap gets, checked as such: the user's filter, and the exclusion of WireBuddy's own traffic
-    const given = captureFilter(filter, leftOutPort);
+    let leftOutPort = this.leftOut(info);
+    // What dumpcap gets, compiled as such: the user's filter with the exclusion of WireBuddy's own traffic
+    let given = captureFilter(filter, leftOutPort);
     if (given) {
-      const check = await this.checkGiven(info, filter);
-      if (!check.ok) throw new Error(`capture filter: ${check.error}`);
+      const check = await this.compile(info.name, given);
+      if (!check.ok) {
+        // Their own filter's error is theirs; if it is the exclusion that fails, capture without it and say so
+        const alone: FilterCheck = leftOutPort === null ? check : filter ? await this.compile(info.name, filter) : { ok: true };
+        if (!alone.ok) throw new Error(`capture filter: ${alone.error}`);
+        this.emit("note", `WireBuddy's own traffic (TCP port ${leftOutPort}) could not be left out of the capture on ${info.name}, so it is recorded: dumpcap did not accept the filter for it (${check.error})`);
+        leftOutPort = null;
+        given = filter;
+      }
     }
     const autostop = {
       durationSec: positiveInt(req.autostop?.durationSec, "auto-stop duration"),

@@ -2182,10 +2182,11 @@ try {
     // -D lists lo, eth0 and any; -d compiles unless the filter says "bad", or is combined with "nocombine"; a capture writes its arguments and ends
     writeFileSync(fake, `#!/bin/sh
 case " $* " in
-  *" -D "*) echo '[${iface("lo", true)},${iface("eth0", false)},${iface("any", false)}]' ;;
+  *" -D "*) echo '[${iface("lo", true)},${iface("eth0", false)},${iface("any", false)},${iface("nolo", true)}]' ;;
   *" -d "*)
     case "$*" in
       *bad*) echo "dumpcap: Invalid capture filter \\"bad\\" for interface 'lo'!" >&2; exit 1 ;;
+      *"-i nolo"*"not ("*) echo "dumpcap: combined is wrong" >&2; exit 1 ;;
       *nocombine*"not ("*) echo "dumpcap: combined is wrong" >&2; exit 1 ;;
     esac
     echo "(000) ret #1" ;;
@@ -2212,13 +2213,25 @@ esac
     assert.match(eth, / -f udp\n$/);
     assert.equal(cap.state.leftOutPort, null);
     assert.doesNotMatch(await run("eth0", ""), / -f /);
-    // The filter is checked as dumpcap gets it; an error of the user's own filter doesn't show the combination
+    // The user's filter is checked as theirs
     assert.deepEqual(await cap.checkFilter("lo", "tcp"), { ok: true });
     const bad = await cap.checkFilter("lo", "bad");
     assert.deepEqual([bad.ok, bad.error], [false, 'Invalid capture filter "bad" for interface \'lo\'!']);
-    const combined = await cap.checkFilter("lo", "nocombine");
-    assert.deepEqual([combined.ok, combined.error], [false, "WireBuddy's own traffic can't be left out of this capture: combined is wrong"]);
-    await assert.rejects(cap.start({ iface: "lo", filter: "nocombine", autostop: {}, ring: null }), /capture filter: WireBuddy's own traffic can't be left out/);
+    // The check judges the user's filter as theirs; a start whose exclusion doesn't compile captures without it and says so
+    assert.deepEqual(await cap.checkFilter("lo", "nocombine"), { ok: true });
+    const notes = [];
+    cap.on("note", (t) => notes.push(t));
+    assert.match(await run("lo", "nocombine"), / -f nocombine\n$/);
+    assert.equal(cap.state.leftOutPort, null);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /^WireBuddy's own traffic \(TCP port 8765\) could not be left out of the capture on lo, so it is recorded: .*combined is wrong/);
+    const bare = await run("nolo", "");
+    assert.doesNotMatch(bare, / -f /);
+    assert.equal(cap.state.leftOutPort, null);
+    assert.equal(notes.length, 2);
+    // Their own filter's error stays theirs
+    await assert.rejects(cap.start({ iface: "lo", filter: "bad", autostop: {}, ring: null }), /^Error: capture filter: Invalid capture filter "bad"/);
+    assert.equal(notes.length, 2);
   });
 
   await check("filter hints: a set with spaces between its members asks for commas, others get none", () => {

@@ -387,6 +387,7 @@ export class Viewer extends EventEmitter {
       this.scheduleReload();
       this.tailTimer ??= setInterval(() => void this.tailTick(), LIVE_RELOAD_MS);
     });
+    this.capture.on("note", (text: string) => this.events.add("INFO", text));
     this.capture.on("stopped", () => {
       this.captureStoppedAt = Date.now();
       // A capture shorter than the head that names it is kept once it stopped growing
