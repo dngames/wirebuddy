@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -38,6 +37,7 @@ import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type Con
 import { FOLLOW_LIMIT, capturedObjects, follow, saveObjects, type StreamsView } from "./streams.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
+import { initialState, ViewStore } from "./viewstore.ts";
 import { openInWireshark } from "./wireshark.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { VERSION } from "../shared/version.ts";
@@ -208,8 +208,8 @@ export class Viewer extends EventEmitter {
   private readonly sharkdBin: string;
   /** Problems and user activity for the agent. */
   readonly events = new EventLog(
-    (pending) => this.set({ agent: { ...this.state.agent, pending } }),
-    (watching) => this.set({ agent: { ...this.state.agent, watching } }),
+    (pending) => this.store.set({ agent: { ...this.state.agent, pending } }),
+    (watching) => this.store.set({ agent: { ...this.state.agent, watching } }),
   );
   private active = 0;
   /** Frame numbers matching the filter; null means all frames 1..totalFrames. */
@@ -231,7 +231,7 @@ export class Viewer extends EventEmitter {
   /** The panels offered for the open file. */
   private readonly offers = new PanelOffers({
     state: () => this.state,
-    set: (patch) => this.set(patch),
+    set: (patch) => this.store.set(patch),
     offers: () => this.extensions.offers(),
     checkFilter: (filter) => this.checkFilter(filter),
     warn: (text) => this.events.add("WARNING", text),
@@ -258,7 +258,7 @@ export class Viewer extends EventEmitter {
   private readonly keeper = new Keeper({
     dir: () => this.investigations,
     state: () => this.state,
-    set: (patch) => this.set(patch),
+    set: (patch) => this.store.set(patch),
     investigation: () => this.investigation(),
     loadedHead: () => this.loadedHead,
     growing: (file) => this.capture.running && this.capture.state.currentFile === file,
@@ -345,7 +345,7 @@ export class Viewer extends EventEmitter {
   readonly capture: Capture;
   readonly recent: string[] = [];
 
-  state: ViewState;
+  private readonly store: ViewStore;
 
   constructor(opts: {
     captureDir: string;
@@ -365,7 +365,7 @@ export class Viewer extends EventEmitter {
     this.extensions = opts.extensions ?? new Extensions();
     this.panels = new Panels(this.extensions, this.events, opts.panelRuntime ?? "");
     this.panels.on("change", () => {
-      this.set({ panels: this.panels.list() });
+      this.store.set({ panels: this.panels.list() });
       this.offers.showOffers();
     });
     this.sharkdBin = opts.sharkd ?? "sharkd";
@@ -412,49 +412,15 @@ export class Viewer extends EventEmitter {
     this.mergecap = opts.mergecap ?? "mergecap";
     this.wiresharkBin = opts.wireshark ?? null;
     this.capture = new Capture(opts.captureDir, opts.dumpcap);
-    this.state = {
-      file: null,
-      fileSize: 0,
-      loading: false,
-      loadError: null,
-      // Unique per process so a restarted server never reuses a generation the UI has cached
-      generation: Date.now() % 1_000_000_000,
-      instance: randomBytes(6).toString("hex"),
-      columns: [],
-      totalFrames: 0,
-      displayedFrames: 0,
-      duration: 0,
-      filter: "",
-      selected: null,
-      selectedIndex: -1,
-      selectedBy: null,
-      selectSeq: 0,
-      selectedRows: [],
-      selectedCount: 0,
-      rowsSince: 0,
-      marks: [],
-      timeRefs: [],
-      timeRefsRevision: 0,
-      commentEdits: 0,
-      commentsEdited: 0,
-      commentRevision: 0,
-      kept: false,
-      capture: this.capture.state,
-      agentNotice: null,
-      agent: { attached: false, pending: 0, name: "Agent", watching: false },
-      wiresharkAvailable: !!this.wiresharkBin,
-      customColumns: [],
-      tlsKeylog: null,
-      decodeAs: { entries: [], unavailable: this.extensions.unavailable },
-      extensions: { active: 0, failing: 0, revision: 0 },
-      panels: [],
-      panelOffers: [],
-      epoch: 1,
-      tail: null,
-    };
+    this.store = new ViewStore(
+      initialState({ capture: this.capture.state, wiresharkAvailable: !!this.wiresharkBin, decodeAsUnavailable: this.extensions.unavailable }),
+      (state) => this.emit("state", state),
+    );
+    // Changed since it was last kept: not kept until the next save
+    this.store.after((state) => (state.kept && this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i]) ? { ...state, kept: false } : state));
     this.capture.on("change", (capture: CaptureState) => {
       if (capture.status === "error" && this.state.capture.status !== "error") this.events.add("ERROR", `The capture failed: ${capture.error ?? "unknown error"}`, { iface: capture.iface });
-      this.set({ capture });
+      this.store.set({ capture });
     });
     this.capture.on("file", (file: string) => {
       // A new capture takes over the view; later ring files only if the view still follows it
@@ -504,11 +470,9 @@ export class Viewer extends EventEmitter {
     return this.engines[this.active];
   }
 
-  private set(patch: Partial<ViewState>): void {
-    this.state = { ...this.state, ...patch };
-    // Changed since it was last kept: not kept until the next save
-    if (this.state.kept && this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.state = { ...this.state, kept: false };
-    this.emit("state", this.state);
+  /** The view's state; only the store replaces it. */
+  get state(): ViewState {
+    return this.store.state;
   }
 
   /** Packets read before may read differently now: panels start over. */
@@ -700,8 +664,7 @@ export class Viewer extends EventEmitter {
     if (why === "file" || why === "rewritten" || totalFrames >= this.keptFrames) this.keptFrames = 0;
     const known = Math.max(totalFrames + (this.listedTail?.frames ?? 0), this.keptFrames);
     const selected = keepSelection && this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
-    this.state = {
-      ...this.state,
+    this.store.merge({
       file,
       fileSize: status.filesize ?? safeSize(file),
       loading: false,
@@ -719,13 +682,13 @@ export class Viewer extends EventEmitter {
       generation: this.state.generation + 1,
       epoch,
       tail: this.tailState(),
-    };
+    });
     this.tail?.setRefs(this.state.timeRefs);
     // A shorter file is a rewritten one, filtered or not
     const keepRows = keepSelection && status.frames >= before.exact && startsWith(this.rowFrames(), before);
     const selectedIndex = this.indexOf(selected);
     const rows = keepRows ? clipRanges(this.state.selectedRows, this.listLength()) : rowOf(selectedIndex);
-    this.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
+    this.store.set({ selectedIndex, ...rowSelection(rows), rowsSince: keepRows ? this.state.rowsSince : this.state.generation });
   }
 
   /** The list's rows as frame numbers, copied: exact rows (of `exact` frames read in full), then provisional ones. */
@@ -748,7 +711,7 @@ export class Viewer extends EventEmitter {
   open(file: string, next = false): Promise<void> {
     file = resolve(file);
     return this.exclusive(async () => {
-      this.set({ loading: true, loadError: null });
+      this.store.set({ loading: true, loadError: null });
       const standby = 1 - this.active;
       let filter = this.state.filter;
       try {
@@ -787,8 +750,8 @@ export class Viewer extends EventEmitter {
         const [last, edits] = [this.state.file, this.state.commentEdits];
         this.droppedEdits = keptLast ? 0 : edits;
         const inv = kept.investigation;
-        this.state = { ...this.state, marks: inv?.marks ?? [], timeRefs: inv?.timeRefs ?? [], ...this.dropComments(), selected: null, selectedBy: null };
-        if (inv) this.state = { ...this.state, ...this.restoreComments(inv), timeRefsRevision: this.state.timeRefsRevision + (inv.timeRefs.length ? 1 : 0) };
+        this.store.merge({ marks: inv?.marks ?? [], timeRefs: inv?.timeRefs ?? [], ...this.dropComments(), selected: null, selectedBy: null });
+        if (inv) this.store.merge({ ...this.restoreComments(inv), timeRefsRevision: this.state.timeRefsRevision + (inv.timeRefs.length ? 1 : 0) });
         this.applyLoad(file, filter, result, false);
         this.remember(file);
         this.restored(file, kept.key, kept.problem);
@@ -801,7 +764,7 @@ export class Viewer extends EventEmitter {
         void this.offers.checkOffers(true);
       } catch (err) {
         const message = printable((err as Error).message);
-        this.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
+        this.store.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
         throw err;
       }
     });
@@ -832,7 +795,7 @@ export class Viewer extends EventEmitter {
       const text = `Not enough free memory for a second copy of ${basename(file)}: WireBuddy reads it again in place of the one it has, so the packet list waits until it has`;
       this.events.add("WARNING", text);
       this.emit("toast", "info", text);
-      this.set({ loading: true });
+      this.store.set({ loading: true });
       // Requests in flight are answered first
       await this.engines[target].idle(RESTART_WAIT_MS);
       this.engines[target].restart();
@@ -850,7 +813,7 @@ export class Viewer extends EventEmitter {
       throw err;
     } finally {
       this.readStartedAt = 0;
-      if (inPlace) this.set({ loading: false });
+      if (inPlace) this.store.set({ loading: false });
     }
     if (this.state.file !== file) return { dropped: false, rolledBack: result.rolledBack };
     this.lastReadMs = Date.now() - started;
@@ -873,7 +836,7 @@ export class Viewer extends EventEmitter {
     this.loadedHead = head;
     if (redissect || result.rolledBack) void this.filterTail();
     if (result.rolledBack) {
-      this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
+      this.store.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 } });
       this.refreshExtensions();
     }
     return { dropped, rolledBack: result.rolledBack };
@@ -914,7 +877,7 @@ export class Viewer extends EventEmitter {
     const retry = this.finalRead ? "The full read after the capture's end tries again" : "View › Reload tries again";
     const loadError = `${this.readFailed[0].toUpperCase()}${this.readFailed.slice(1)}${listed}. ${retry}`;
     if (!inPlace) {
-      this.set({ loadError, tail: this.tailState() });
+      this.store.set({ loadError, tail: this.tailState() });
       this.events.add("ERROR", loadError);
       return;
     }
@@ -924,8 +887,7 @@ export class Viewer extends EventEmitter {
     const known = tail?.count ?? 0;
     const selected = this.state.selected !== null && this.state.selected <= known ? this.state.selected : null;
     const generation = this.state.generation + 1;
-    this.state = {
-      ...this.state,
+    this.store.merge({
       loading: false,
       loadError,
       totalFrames: 0,
@@ -938,10 +900,10 @@ export class Viewer extends EventEmitter {
       generation,
       rowsSince: generation,
       tail: this.tailState(),
-    };
+    });
     tail?.setRefs(this.state.timeRefs);
     const selectedIndex = this.indexOf(selected);
-    this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+    this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
     this.events.add("ERROR", loadError);
     void this.filterTail();
   }
@@ -1116,9 +1078,9 @@ export class Viewer extends EventEmitter {
   /** Provisional matches listed before changed: the list's rows are read again, the selection stays on its packet. */
   private tailRevised(): void {
     const generation = this.state.generation + 1;
-    this.state = { ...this.state, tail: this.tailState(), generation, rowsSince: generation };
+    this.store.merge({ tail: this.tailState(), generation, rowsSince: generation });
     const selectedIndex = this.indexOf(this.state.selected);
-    this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+    this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
   }
 
   /** Publishes the tail as it is now; the list's generation moves when its rows grew. */
@@ -1132,7 +1094,7 @@ export class Viewer extends EventEmitter {
     const { selected, selectedIndex, selectedRows } = this.state;
     const index = grew && selectedIndex < 0 && selected !== null && selected > this.state.totalFrames ? this.indexOf(selected) : -1;
     const selection = index >= 0 ? { selectedIndex: index, ...(selectedRows.length ? {} : rowSelection(rowOf(index))) } : {};
-    this.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}), ...selection });
+    this.store.set({ tail, ...(grew ? { generation: this.state.generation + 1 } : {}), ...selection });
   }
 
   /**
@@ -1147,8 +1109,7 @@ export class Viewer extends EventEmitter {
     this.keptFrames = keep > s.totalFrames ? keep : 0;
     const generation = s.generation + 1;
     const selected = s.selected !== null && s.selected <= keep ? s.selected : null;
-    this.state = {
-      ...s,
+    this.store.merge({
       tail: null,
       generation,
       rowsSince: s.tail.displayed ? generation : s.rowsSince,
@@ -1157,8 +1118,8 @@ export class Viewer extends EventEmitter {
       marks: s.marks.filter((m) => m.frame <= keep),
       timeRefs: refsUpTo(s.timeRefs, keep),
       ...this.pruneComments(keep),
-    };
-    this.set({ selectedIndex: this.indexOf(selected), ...rowSelection(clipRanges(s.selectedRows, s.displayedFrames)) });
+    });
+    this.store.set({ selectedIndex: this.indexOf(selected), ...rowSelection(clipRanges(s.selectedRows, s.displayedFrames)) });
   }
 
   /** Provisional rows, details or a filter pass failed: a warning now and then; after a few in a row the tail is turned off. */
@@ -1301,7 +1262,7 @@ export class Viewer extends EventEmitter {
       for (const e of this.engines) e.forgetFile();
       this.dropTail();
       this.displayed = null;
-      this.set({
+      this.store.set({
         file: null,
         fileSize: 0,
         loading: false,
@@ -1356,18 +1317,17 @@ export class Viewer extends EventEmitter {
         } while (refs !== this.state.timeRefs && usesRefTime(filter));
         this.displayed = displayed;
         this.listedTail?.setFilter(filter, held);
-        this.state = {
-          ...this.state,
+        this.store.merge({
           filter,
           displayedFrames: displayed ? displayed.length : this.state.totalFrames,
           generation: this.state.generation + 1,
           tail: this.tailState(),
-        };
+        });
         const selectedIndex = this.indexOf(this.state.selected);
-        this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)), rowsSince: this.state.generation });
+        this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)), rowsSince: this.state.generation });
         void this.filterTail();
       } else {
-        this.set({ filter });
+        this.store.set({ filter });
       }
       if (by === "agent") this.notice(filter ? `Applied display filter: ${filter}` : "Cleared the display filter");
       return check;
@@ -1513,7 +1473,7 @@ export class Viewer extends EventEmitter {
         // Provisional rows renumber frame-number fields
         await this.fieldType(c.field);
       }
-      this.set({
+      this.store.set({
         customColumns,
         columns: this.state.file ? [...this.baseColumns, ...customColumns.map((c) => c.title)] : [],
         generation: this.state.generation + 1,
@@ -1636,7 +1596,7 @@ export class Viewer extends EventEmitter {
     }
     const selectedIndex = this.indexOf(frame);
     const selectedRows = rows ? this.checkRows(rows) : rowOf(selectedIndex);
-    this.set({
+    this.store.set({
       selected: frame,
       selectedIndex,
       selectedBy: frame === null ? null : by,
@@ -1711,7 +1671,7 @@ export class Viewer extends EventEmitter {
     const keep = this.state.marks.filter((m) => !marked.has(m.frame));
     if (keep.length + valid.length > MAX_MARKS) throw new Error(`at most ${MAX_MARKS} frames can be marked`);
     const added: Mark[] = valid.map((frame) => ({ frame, note, by }));
-    this.set({ marks: [...keep, ...added].sort((a, b) => a.frame - b.frame) });
+    this.store.set({ marks: [...keep, ...added].sort((a, b) => a.frame - b.frame) });
     if (by === "agent" && valid.length) {
       this.notice(`Marked ${valid.length} frame${valid.length === 1 ? "" : "s"}${note ? `: ${note}` : ""}`);
     }
@@ -1720,7 +1680,7 @@ export class Viewer extends EventEmitter {
 
   clearMarks(frames?: number[]): void {
     const drop = frames && new Set(frames);
-    this.set({ marks: drop ? this.state.marks.filter((m) => !drop.has(m.frame)) : [] });
+    this.store.set({ marks: drop ? this.state.marks.filter((m) => !drop.has(m.frame)) : [] });
   }
 
   /** Wireshark's Mark/Unmark Packet(s): flips the mark of each selected frame. */
@@ -1733,7 +1693,7 @@ export class Viewer extends EventEmitter {
     const had = new Set(marks.map((m) => m.frame));
     const added: Mark[] = [];
     for (const [a, b] of frames) for (let f = a; f <= b; f++) if (!had.has(f)) added.push({ frame: f, note: "", by });
-    this.set({ marks: [...marks.filter((m) => !inRanges(frames, m.frame)), ...added].sort((a, b) => a.frame - b.frame) });
+    this.store.set({ marks: [...marks.filter((m) => !inRanges(frames, m.frame)), ...added].sort((a, b) => a.frame - b.frame) });
   }
 
   /** Wireshark's Mark All Displayed (`on`) / Unmark All Displayed; existing marks keep their notes. */
@@ -1742,7 +1702,7 @@ export class Viewer extends EventEmitter {
     const marks = this.state.marks;
     const shown = (m: Mark) => this.indexOf(m.frame) >= 0;
     if (!on) {
-      this.set({ marks: marks.filter((m) => !shown(m)) });
+      this.store.set({ marks: marks.filter((m) => !shown(m)) });
       return;
     }
     const n = this.listLength();
@@ -1752,7 +1712,7 @@ export class Viewer extends EventEmitter {
     for (const [a, b] of n ? this.framesOfRows([[0, n - 1]]) : []) {
       for (let frame = a; frame <= b; frame++) if (!had.has(frame)) added.push({ frame, note: "", by });
     }
-    this.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
+    this.store.set({ marks: [...marks, ...added].sort((a, b) => a.frame - b.frame) });
   }
 
   /** Sets (`on`) or unsets time references on `frames`; frames the view doesn't know are left out. */
@@ -1811,10 +1771,10 @@ export class Viewer extends EventEmitter {
         const was = this.displayed;
         if (displayed && !(was && was.length === displayed.length && was.every((f, i) => f === displayed[i]))) {
           this.displayed = displayed;
-          this.state = { ...this.state, timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, displayedFrames: displayed.length, generation, rowsSince: generation };
+          this.store.merge({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, displayedFrames: displayed.length, generation, rowsSince: generation });
           const selectedIndex = this.indexOf(this.state.selected);
-          this.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
-        } else this.set({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, generation });
+          this.store.set({ selectedIndex, ...rowSelection(rowOf(selectedIndex)) });
+        } else this.store.set({ timeRefs: refs, timeRefsRevision: this.state.timeRefsRevision + 1, generation });
         if (by === "agent") {
           const text = changeText(change);
           this.notice(notice ?? text[0].toUpperCase() + text.slice(1));
@@ -1912,7 +1872,7 @@ export class Viewer extends EventEmitter {
     await this.clearTimeRefs("user");
     await this.commentQueue(file, async () => {
       this.dropComments();
-      this.set({ marks: [], commentEdits: this.editCount(), commentsEdited: 0, commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
+      this.store.set({ marks: [], commentEdits: this.editCount(), commentsEdited: 0, commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
     });
     this.keeper.keepNow();
     return gone;
@@ -2006,7 +1966,7 @@ export class Viewer extends EventEmitter {
 
   /** The list's rows read differently now, in the same places. */
   private commentsChanged(): void {
-    this.set({ commentEdits: this.editCount(), commentsEdited: this.editedPackets(), commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
+    this.store.set({ commentEdits: this.editCount(), commentsEdited: this.editedPackets(), commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
   }
 
   /** Packets whose comments read otherwise than the capture file's, as edited here (exported or not). */
@@ -2109,7 +2069,7 @@ export class Viewer extends EventEmitter {
     this.keeper.kept = { key, content: key && !problem && !nothingToKeep(inv) ? investigationContent(inv) : "" };
     this.keeper.keptOf = this.keeper.keepingOf();
     // What the view has is what is kept: nothing, or what was read
-    if (this.state.kept !== !!key) this.set({ kept: !!key });
+    if (this.state.kept !== !!key) this.store.set({ kept: !!key });
     if (problem) {
       const dir = this.investigations!;
       const aside = this.keeper.refused.has(key) ? `; it stays as it is until something is kept for this capture, then it is moved to ${setAsideName(dir, key)}` : "";
@@ -2146,7 +2106,7 @@ export class Viewer extends EventEmitter {
 
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
   attachAgent(name = this.state.agent.name): void {
-    this.set({ agent: { ...this.state.agent, attached: true, name } });
+    this.store.set({ agent: { ...this.state.agent, attached: true, name } });
   }
 
   /**
@@ -2323,7 +2283,7 @@ export class Viewer extends EventEmitter {
   }
 
   notice(text: string): void {
-    this.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
+    this.store.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
   }
 
   async phs(filter?: string): Promise<PhsNode[]> {
@@ -2359,7 +2319,7 @@ export class Viewer extends EventEmitter {
     try {
       const r = await this.engine.call<{ prefs?: Record<string, { s?: string }> }>("dumpconf", { pref: "tls.keylog_file" });
       const path = r.prefs?.["tls.keylog_file"]?.s;
-      if (path && !this.state.tlsKeylog) this.set({ tlsKeylog: path });
+      if (path && !this.state.tlsKeylog) this.store.set({ tlsKeylog: path });
     } catch {
       // older sharkd without dumpconf
     }
@@ -2373,7 +2333,7 @@ export class Viewer extends EventEmitter {
     }
     // With the reloads: a sharkd restarting meanwhile would miss the key
     await this.exclusive(async () => {
-      this.set({ tlsKeylog: path });
+      this.store.set({ tlsKeylog: path });
       await this.redissectNow("tls.keylog_file", path ?? "", "tls");
     });
   }
@@ -2392,7 +2352,7 @@ export class Viewer extends EventEmitter {
       this.panelData.setPref(name, value);
       await this.reloadNow(true, false, true, false, rollback);
     } finally {
-      this.set({ epoch: this.newEpoch(why) });
+      this.store.set({ epoch: this.newEpoch(why) });
       this.panelData.hold(false);
       // A panel's offer may need a protocol only this brings
       void this.offers.checkOffers(true);
@@ -2447,7 +2407,7 @@ export class Viewer extends EventEmitter {
         }
         set = { entry, was: s.was, now: s.now, frames: null };
       }
-      this.set({ decodeAs: { ...this.state.decodeAs, entries: next } });
+      this.store.set({ decodeAs: { ...this.state.decodeAs, entries: next } });
       if (set) set.frames = await this.countMatching(countFilter(set.entry)).catch(() => null);
       if (by === "agent") this.notice(set ? `Decode As: ${set.entry.table} ${set.entry.value} as ${set.now}` : removed ? `Removed Decode As ${entryText(removed)}` : "Removed all Decode As entries");
       return { entries: next, ...(set ? { set } : {}), ...(removed ? { removed } : {}) };
@@ -2522,7 +2482,7 @@ export class Viewer extends EventEmitter {
       for (const [f, e] of this.unexported) if (e <= edit) this.unexported.delete(f);
       if (this.clearedEdit <= edit) this.clearedEdit = 0;
       const edits = this.editCount();
-      if (edits !== this.state.commentEdits) this.set({ commentEdits: edits });
+      if (edits !== this.state.commentEdits) this.store.set({ commentEdits: edits });
     }
     if (by === "agent") {
       this.agentExports.add(resolve(req.path));
@@ -2696,7 +2656,7 @@ export class Viewer extends EventEmitter {
       if (typeof a !== "number" || !Number.isInteger(a) || a < 1 || a > this.known()) throw new ApiError(400, "bad-args", `wb.select: no frame ${printable(String(a)).slice(0, 40)} in this capture`);
       this.select(a, "user");
       // The packet list scrolls to it, as to the agent's selections
-      this.set({ selectSeq: this.state.selectSeq + 1 });
+      this.store.set({ selectSeq: this.state.selectSeq + 1 });
       this.notice(`Panel "${title}" selected frame ${a}`);
       this.panels.acted(name, `selected frame ${a}`);
       return { ok: true };
@@ -2715,7 +2675,7 @@ export class Viewer extends EventEmitter {
   refreshExtensions(): void {
     const active = this.extensions.active();
     const failing = this.extensions.failing();
-    if (active !== this.state.extensions.active || failing !== this.state.extensions.failing) this.set({ extensions: { ...this.state.extensions, active, failing } });
+    if (active !== this.state.extensions.active || failing !== this.state.extensions.failing) this.store.set({ extensions: { ...this.state.extensions, active, failing } });
   }
 
   private luaReport(report: LuaReport): void {
@@ -2756,7 +2716,7 @@ export class Viewer extends EventEmitter {
           this.forgetTypes();
         }
       } finally {
-        this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
+        this.store.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
         this.panelData.hold(false);
         this.refreshExtensions();
         void this.offers.checkOffers(true);

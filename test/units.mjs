@@ -19,7 +19,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -31,7 +31,7 @@ const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
-const { machineTag, interfaceSignature, availableMemory } = await import(join(out, "units.mjs"));
+const { machineTag, interfaceSignature, availableMemory, ViewStore } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { codeSpan, cell, quote, escapeLine, checkSummary, MAX_SUMMARY_BYTES, buildFindings, checkReportTarget, writeReport, MAX_LISTED, MAX_REPORT_BYTES, TargetExists } = await import(join(out, "units.mjs"));
@@ -1643,6 +1643,29 @@ try {
     assert.deepEqual(changedFields({ a: null }, { a: { b: 1 } }, jsonOf), { a: '{"b":1}' });
     assert.deepEqual(JSON.parse(patchMessage(7, { filter: '"tcp"', capture: '{"n":2}' })), { type: "patch", seq: 7, patch: { filter: "tcp", capture: { n: 2 } } });
     assert.deepEqual(JSON.parse(patchMessage(8, {})), { type: "patch", seq: 8, patch: {} });
+  });
+  await check("view store: set applies a patch, runs the rules and tells once; merge tells nobody; a rule may change the state; what the patch leaves alone keeps its identity", () => {
+    const marks = [{ frame: 1 }];
+    const told = [];
+    const store = new ViewStore({ file: null, kept: true, marks, n: 0 }, (state) => told.push(state));
+    store.merge({ n: 1 });
+    assert.equal(told.length, 0);
+    assert.equal(store.state.n, 1);
+    store.set({ file: "a.pcap" });
+    assert.equal(told.length, 1);
+    assert.equal(told[0], store.state);
+    assert.equal(store.state.marks, marks);
+    const seen = [];
+    store.after((state) => (seen.push(state.n), state.kept && state.file === "b.pcap" ? { ...state, kept: false } : state));
+    store.set({ n: 2 });
+    assert.deepEqual(seen, [2]);
+    assert.equal(store.state.kept, true);
+    store.set({ file: "b.pcap" });
+    assert.equal(store.state.kept, false);
+    assert.equal(store.state.file, "b.pcap");
+    assert.equal(told.length, 3);
+    assert.equal(told[2], store.state);
+    assert.equal(store.state.marks, marks);
   });
 } finally {
   rmSync(out, { recursive: true, force: true });
