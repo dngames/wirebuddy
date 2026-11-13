@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { chmodSync, mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join } from "node:path";
-import { writeRefused } from "./permission.ts";
+import { reaching, writeRefused } from "./permission.ts";
 import { inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 
 /** editcap refuses more than 512 selections per run. */
@@ -53,8 +53,8 @@ export function checkTarget(path: string, protectedFiles: string[], overwrite: b
   if (!isAbsolute(path)) throw new Error("the export path must be absolute");
   const ext = extname(path).toLowerCase();
   if (ext !== ".pcapng" && ext !== ".pcap") throw new Error("the export file must end in .pcapng or .pcap");
-  if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
-  const existing = statSync(path, { throwIfNoEntry: false });
+  if (!reaching(dirname(path), () => statSync(dirname(path), { throwIfNoEntry: false }))?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
+  const existing = reaching(dirname(path), () => statSync(path, { throwIfNoEntry: false }));
   if (!existing) return ext === ".pcap" ? "pcap" : "pcapng";
   if (!existing.isFile()) throw new Error(`${path} exists and is not a file`);
   for (const file of protectedFiles) {

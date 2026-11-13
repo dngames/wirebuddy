@@ -33,7 +33,7 @@ const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(
 const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
 const { usesFrameNumber } = await import(join(out, "units.mjs"));
-const { writeRefused } = await import(join(out, "units.mjs"));
+const { writeRefused, checkTarget } = await import(join(out, "units.mjs"));
 const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
@@ -2268,6 +2268,23 @@ esac
       assert.throws(() => newObjectFolder(closed, "http", []), me);
     } finally {
       chmodSync(closed, 0o700);
+    }
+  });
+
+  await check("a target in a folder the user can't enter says who WireBuddy runs as: export, findings report, saved objects", () => {
+    if (process.getuid?.() === 0) return;
+    const dir = mkdtempSync(join(out, "noenter-"));
+    const locked = join(dir, "locked");
+    mkdirSync(join(locked, "in"), { recursive: true });
+    chmodSync(locked, 0o000);
+    const inside = join(locked, "in");
+    const me = new RegExp(`WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't reach ${inside.replace(/\W/g, "\\$&")}`);
+    try {
+      assert.throws(() => checkTarget(join(inside, "x.pcapng"), [], false), me);
+      assert.throws(() => checkReportTarget(join(inside, "report.md"), [], false), me);
+      assert.throws(() => objectDir(inside, []), me);
+    } finally {
+      chmodSync(locked, 0o700);
     }
   });
 

@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, extname, isAbsolute, join } from "node:path";
 import { TargetExists } from "./export.ts";
 import { cell, codeSpan, quote } from "./markdown.ts";
-import { writeRefused } from "./permission.ts";
+import { reaching, writeRefused } from "./permission.ts";
 
 /** Marked packets and commented packets a report lists; more are counted in one line. */
 export const MAX_LISTED = 2000;
@@ -119,8 +119,8 @@ export function buildFindings(f: Findings): string {
 export function checkReportTarget(path: string, protectedFiles: string[], overwrite: boolean): void {
   if (!isAbsolute(path)) throw new Error("the report path must be absolute");
   if (extname(path).toLowerCase() !== ".md") throw new Error("the report file must end in .md");
-  if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
-  const existing = statSync(path, { throwIfNoEntry: false });
+  if (!reaching(dirname(path), () => statSync(dirname(path), { throwIfNoEntry: false }))?.isDirectory()) throw new Error(`no such directory: ${dirname(path)}`);
+  const existing = reaching(dirname(path), () => statSync(path, { throwIfNoEntry: false }));
   if (!existing) return;
   if (!existing.isFile()) throw new Error(`${path} exists and is not a file`);
   for (const file of protectedFiles) {

@@ -144,7 +144,7 @@ try {
   await call("mark_frames", { frames: [27], note: "last" }, () => {});
   assert.equal((await post("/api/marks", { frames: [29], note: "mine" })).status, 200);
   await call("mark_frames", { frames: [29], note: "yours" }, () => {});
-  assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame: yours; replaced the user's mark on frame 29$/);
+  assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame \(replaced the user's mark on frame 29\): yours$/);
   // The details of a marked packet lead with its mark
   await call("inspect_frame", { frame: 29, max_lines: 10 }, (t) => assert.match(t, /^Frame 29: .*\nMarked by Agent: yours\n/));
   await call("inspect_frame", { frame: 29, protocols: ["ip"], max_lines: 10 }, (t) => assert.match(t, /^Frame 29: .*\nMarked by Agent: yours\nFrame 29: .*\(collapsed/));

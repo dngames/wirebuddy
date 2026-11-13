@@ -1508,8 +1508,9 @@ export class Viewer extends EventEmitter {
     const marked = marksWith(this.state.marks, frames, note, by, this.known());
     this.store.set({ marks: marked.marks });
     const n = marked.frames.length;
-    const replaced = marked.replaced.length ? `; replaced the user's mark on ${marked.replaced.length === 1 ? "frame" : "frames"} ${frameList(marked.replaced)}` : "";
-    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${marked.note ? `: ${marked.note}` : ""}${replaced}`);
+    // Before the note: the banner cuts a long line at its end
+    const replaced = marked.replaced.length ? ` (replaced the user's mark on ${marked.replaced.length === 1 ? "frame" : "frames"} ${frameList(marked.replaced)})` : "";
+    if (by === "agent" && n) this.notice(`Marked ${n} frame${n === 1 ? "" : "s"}${replaced}${marked.note ? `: ${marked.note}` : ""}`);
     return { frames: marked.frames, replaced: marked.replaced };
   }
 
