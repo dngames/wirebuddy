@@ -647,7 +647,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "mark_frames",
     {
-      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip and under Go → Marked Packets). A frame the user marked gets your mark and note instead; the result names those frames.",
+      description: "Highlight frames in the user's packet list with a short note (shown as a tooltip, in the details of the selected packet and under Go → Marked Packets). A frame the user marked gets your mark and note instead; the result names those frames.",
       inputSchema: {
         frames: z.array(z.number().int().min(1)).min(1).max(5000),
         note: z.string().max(200).describe("Why these frames matter, e.g. \"DNS NXDOMAIN\""),

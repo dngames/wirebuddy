@@ -16,7 +16,7 @@ import type { Investigation, InvestigationLimits } from "./investigation.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { printable } from "./text.ts";
 import { MAX_TIME_REFS, refsUpTo } from "./timerefs.ts";
-import type { Mark, TimeRefsChange, ViewState } from "../shared/api.ts";
+import type { Mark, TimeRefsChange, TreeNode, ViewState } from "../shared/api.ts";
 import { countRanges, hasFrame, inRanges, type Ranges } from "../shared/ranges.ts";
 
 export const MAX_MARKS = 10000;
@@ -53,6 +53,14 @@ export function marksWith(marks: readonly Mark[], frames: number[], note: string
   const added: Mark[] = valid.map((frame) => ({ frame, note, by }));
   const replaced = by === "agent" ? marks.filter((m) => marked.has(m.frame) && m.by === "user").map((m) => m.frame) : [];
   return { marks: [...keep, ...added].sort(byFrame), frames: valid, note, replaced };
+}
+
+/**
+ * The first line of a marked packet's details, as the packet list's tooltip
+ * words it. It has no field or filter: no filter, export or column reads it.
+ */
+export function markNode(mark: Mark, agentName: string): TreeNode {
+  return { l: `${mark.by === "agent" ? `Marked by ${agentName}` : "Marked"}${mark.note ? `: ${mark.note}` : ""}`, t: "proto" };
 }
 
 /** `marks` without the ones on `frames`; without any when `frames` is left out. */

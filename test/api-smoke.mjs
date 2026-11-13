@@ -168,6 +168,21 @@ try {
     assert.deepEqual((await api("/api/state")).json.marks.map((m) => m.frame), [12]);
   });
 
+  await check("a mark is the first line of the packet's details, without a field or filter, and goes with the mark", async () => {
+    const first = async () => (await api("/api/frame?num=4")).json.tree[0];
+    assert.equal((await first()).fn, "frame");
+    await api("/api/marks", { frames: [4], note: "slow reply" });
+    assert.deepEqual(await first(), { l: "Marked: slow reply", t: "proto" });
+    await api("/api/marks", { frames: [4], note: "" });
+    assert.deepEqual(await first(), { l: "Marked", t: "proto" });
+    // Not a field: no filter finds it, no export carries it
+    assert.equal((await api("/api/filter", { filter: "frame.number == 4" })).status, 200);
+    assert.equal((await api("/api/state")).json.displayedFrames, 1);
+    await api("/api/filter", { filter: "" });
+    await api("/api/marks/clear", { frames: [4] });
+    assert.equal((await first()).fn, "frame");
+  });
+
   await check("stats", async () => {
     const phs = (await api("/api/stats/phs")).json;
     assert.equal(phs[0].proto, "frame");

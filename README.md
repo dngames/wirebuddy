@@ -383,7 +383,7 @@ solution; `solution/ctseries` is the panel.
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
-| `mark_frames` / `clear_marks` | Highlight frames with a note (listed under Go → Marked Packets) |
+| `mark_frames` / `clear_marks` | Highlight frames with a note (first line of the packet's details, listed under Go → Marked Packets) |
 | `time_references` | Set or unset time references (`*REF*`), which the Time column counts from, or clear them |
 | `packet_comments` | Add, replace or delete packet comments in the user's view (kept by exports to pcapng) |
 | `set_columns` | Show fields as extra columns in the user's packet list |

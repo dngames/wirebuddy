@@ -1699,11 +1699,16 @@ input[type="checkbox"] {
   text-overflow: ellipsis;
 }
 
+/* A mark's note shows in full, wrapped */
+.menu-item:has(.menu-detail) {
+  padding-block: 2px;
+}
+
 .menu-detail {
-  overflow: hidden;
   color: var(--text-dim);
   font-size: 11.5px;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .menu-item.active .menu-detail,

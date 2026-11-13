@@ -31,6 +31,7 @@ const { checkPanel } = await import(join(out, "units.mjs"));
 const { noLuaReason } = await import(join(out, "units.mjs"));
 const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
 const { frameList } = await import(join(out, "units.mjs"));
+const { markNode } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -2221,6 +2222,13 @@ esac
     assert.equal(frameList([1, 2, 3]), "1, 2, 3");
     assert.equal(frameList([1, 2, 3, 4], 3), "1, 2, 3, ...");
     assert.equal(frameList(Array.from({ length: 21 }, (_, i) => i + 1)), `${Array.from({ length: 20 }, (_, i) => i + 1).join(", ")}, ...`);
+  });
+
+  await check("a mark leads the details as one line without a field, worded as the packet list's tooltip", () => {
+    assert.deepEqual(markNode({ frame: 3, note: "slow reply", by: "user" }, "Claude"), { l: "Marked: slow reply", t: "proto" });
+    assert.deepEqual(markNode({ frame: 3, note: "", by: "user" }, "Claude"), { l: "Marked", t: "proto" });
+    assert.deepEqual(markNode({ frame: 3, note: "DNS NXDOMAIN", by: "agent" }, "Claude"), { l: "Marked by Claude: DNS NXDOMAIN", t: "proto" });
+    assert.deepEqual(markNode({ frame: 3, note: "", by: "agent" }, "Agent"), { l: "Marked by Agent", t: "proto" });
   });
 
 } finally {

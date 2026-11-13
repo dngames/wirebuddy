@@ -56,6 +56,14 @@ export function markResync(): void {
 /** The `marks` array of the state `app.marks` was built from. */
 let marksOf: Mark[] | null = null;
 
+/** Whether the mark of `frame` (its note, who set it) differs between two states' marks. */
+function markChanged(before: Mark[], after: Mark[], frame: number): boolean {
+  if (before === after) return false;
+  const a = before.find((m) => m.frame === frame);
+  const b = after.find((m) => m.frame === frame);
+  return a?.by !== b?.by || a?.note !== b?.note;
+}
+
 export function applyState(s: ViewState): void {
   const prev = app.state;
   const fresh = !prev || (resync && prev.instance !== s.instance);
@@ -126,8 +134,8 @@ export function applyState(s: ViewState): void {
 
   bus.emit("state", s, prev);
   if (app.selFrame !== prevSel || app.selIndex !== prevIdx || !sameRanges(app.selRows, prevRows)) bus.emit("selection");
-  // A provisional packet read in full now: its exact details; other time references: its times
-  if (app.selFrame !== null && prev?.file === s.file && prev.timeRefsRevision !== s.timeRefsRevision) reloadFrame();
+  // A provisional packet read in full now: its exact details; other time references: its times; another mark on it: its first line
+  if (app.selFrame !== null && prev?.file === s.file && (prev.timeRefsRevision !== s.timeRefsRevision || markChanged(prev.marks, s.marks, app.selFrame))) reloadFrame();
   else if (app.frame?.provisional && app.frame.num === app.selFrame && app.frame.num <= s.totalFrames) {
     // Once: the states that follow while its request is under way leave that request alone
     if (loadingNum !== app.frame.num) reloadFrame();

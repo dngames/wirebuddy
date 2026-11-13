@@ -9,7 +9,7 @@ import { commentsOf, withCommentNode, withComments, type CommentsView, type Edit
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type SharkdStatus } from "./enginesession.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
-import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs } from "./edits.ts";
+import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
@@ -1705,8 +1705,11 @@ export class Viewer extends EventEmitter {
     return withComments(rows, this.edits.edited(), short);
   }
 
+  /** Frame `num`'s `tree` with its comments as edited here and, first of all, its mark. */
   private withCommentNode(num: number, tree: TreeNode[]): TreeNode[] {
-    return withCommentNode(num, tree, this.edits.edited(), this.commentEtts);
+    const withComments = withCommentNode(num, tree, this.edits.edited(), this.commentEtts);
+    const mark = this.state.marks.find((m) => m.frame === num);
+    return mark ? [markNode(mark, this.state.agent.name), ...withComments] : withComments;
   }
 
   /** Tells what came back of the investigation kept for `file` (`kept`, as read at open), or why nothing did. */
