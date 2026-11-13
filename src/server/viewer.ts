@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { COLUMN_FIELD, matchingFrames, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
+import { COLUMN_FIELD, matchingFrames, page, Sharkd, SharkdError, SharkdExit, type LuaError, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { fileHead, looksLikeCapture, safeSize } from "./capturefile.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
@@ -34,6 +34,8 @@ import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import { newObjectFolder, objectDir, objectFileName, writeObject, type CapturedObject, type ObjectKind } from "./objects.ts";
 import { Panels } from "./panels.ts";
+import { StaleGenerationError } from "./stale.ts";
+import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, MAX_TIME_REFS, refBefore, refsOf, refsUpTo, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
 import { launchWireshark } from "./wireshark.ts";
@@ -50,7 +52,6 @@ import type {
   EndpointRow,
   ExpertItem,
   ExtensionList,
-  ExpertSeverity,
   ExportRequest,
   ExportResult,
   FindingsRequest,
@@ -99,8 +100,6 @@ export interface ExtensionTest {
   hierarchy: string[];
 }
 
-export class StaleGenerationError extends Error {}
-
 interface SharkdStatus {
   frames: number;
   duration?: number;
@@ -132,16 +131,12 @@ interface SharkdFrame {
   fol?: [string, string | null][];
 }
 
-interface SharkdPhs {
+export interface SharkdPhs {
   proto: string;
   frames: number;
   bytes: number;
   protos?: SharkdPhs[];
 }
-
-const CONV_TAPS = { eth: "Ethernet", ipv4: "IPv4", ipv6: "IPv6", tcp: "TCP", udp: "UDP" } as const;
-export type ConvType = keyof typeof CONV_TAPS;
-export const CONV_TYPES = Object.keys(CONV_TAPS) as ConvType[];
 
 /** Bytes of payload data a follow result may carry before it is cut. */
 const FOLLOW_LIMIT = 4 * 1024 * 1024;
@@ -190,11 +185,6 @@ const NOW_CLOCK_MS = 5000;
 const MAX_CUSTOM_COLUMNS = 10;
 /** Longer custom column values (e.g. whole payloads) are cut to this. */
 const MAX_COLUMN_VALUE = 500;
-const MAX_IO_BUCKETS = 4000;
-/** sharkd computes the interval in 32-bit microseconds; larger intervals overflow. */
-const MAX_IO_INTERVAL = 2_000_000;
-const MAX_IO_BUCKETS_HARD = 100_000;
-const MAX_IO_GRAPHS = 4;
 const FIELD_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 /** Loads tried again after extensions crashed sharkd (each crash switches one off). */
 const MAX_CRASH_RETRIES = 10;
@@ -278,6 +268,15 @@ export class Viewer extends EventEmitter {
   private readonly profile: string | undefined;
   private readonly editcap: string;
   private readonly mergecap: string;
+  /** What the statistics and Find ask of this viewer. */
+  private readonly statsView: StatsView = {
+    engine: () => this.engine,
+    state: () => this.state,
+    requireFile: () => this.requireFile(),
+    checkFilter: (filter) => this.checkFilter(filter),
+    sharkdFilter: (filter) => this.sharkdFilter(filter),
+    indexOf: (frame) => this.indexOf(frame),
+  };
   /** Columns sharkd reports for the open file, before custom ones. */
   private baseColumns: string[] = [];
   /** Their formats (%m the number, %i Info). */
@@ -2459,145 +2458,32 @@ export class Viewer extends EventEmitter {
     this.set({ agentNotice: { id: ++this.noticeId, text, at: Date.now() } });
   }
 
-  /** sharkd tap parameters, limited to `filter` when given. */
-  private async tapParams(tap: string, filter?: string): Promise<Record<string, unknown>> {
-    this.requireFile();
-    if (!filter?.trim()) return { tap0: tap };
-    const check = await this.checkFilter(filter);
-    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-    return { tap0: tap, filter: this.sharkdFilter(filter.trim()) };
-  }
-
   async phs(filter?: string): Promise<PhsNode[]> {
-    const r = await this.engine.call<{ taps: { protos: SharkdPhs[] }[] }>("tap", await this.tapParams("phs", filter));
-    const map = (p: SharkdPhs): PhsNode => ({
-      proto: p.proto,
-      frames: p.frames,
-      bytes: p.bytes,
-      children: (p.protos ?? []).map(map),
-    });
-    return (r.taps[0]?.protos ?? []).map(map);
+    return phs(this.statsView, filter);
   }
 
   async conversations(type: ConvType, filter?: string): Promise<ConvRow[]> {
-    const r = await this.engine.call<{ taps: { convs?: Record<string, never>[] }[] }>("tap", await this.tapParams(`conv:${CONV_TAPS[type]}`, filter));
-    return (r.taps[0]?.convs ?? []).map((c: Record<string, any>) => ({
-      addrA: c.saddr,
-      portA: c.sport,
-      addrB: c.daddr,
-      portB: c.dport,
-      framesAB: c.txf,
-      bytesAB: c.txb,
-      framesBA: c.rxf,
-      bytesBA: c.rxb,
-      start: c.start,
-      duration: c.stop - c.start,
-      filter: c.filter,
-    }));
+    return conversations(this.statsView, type, filter);
   }
 
   async endpoints(type: ConvType, filter?: string): Promise<EndpointRow[]> {
-    const r = await this.engine.call<{ taps: { hosts?: Record<string, never>[] }[] }>("tap", await this.tapParams(`endpt:${CONV_TAPS[type]}`, filter));
-    return (r.taps[0]?.hosts ?? []).map((h: Record<string, any>) => ({
-      addr: h.host,
-      port: h.port,
-      framesTx: h.txf,
-      bytesTx: h.txb,
-      framesRx: h.rxf,
-      bytesRx: h.rxb,
-      filter: h.filter,
-    }));
+    return endpoints(this.statsView, type, filter);
   }
 
   async expert(filter?: string): Promise<ExpertItem[]> {
-    const r = await this.engine.call<{ taps: { details?: { f: number; s: string; g: string; p: string; m: string }[] }[] }>(
-      "tap",
-      await this.tapParams("expert", filter),
-    );
-    return (r.taps[0]?.details ?? [])
-      // Lua dissectors can put packet bytes into messages
-      .map((d) => ({ frame: d.f, severity: d.s as ExpertSeverity, group: printable(d.g), protocol: printable(d.p), message: printable(d.m) }))
-      .sort((a, b) => a.frame - b.frame);
+    return expert(this.statsView, filter);
   }
 
-  /**
-   * Packets, bytes or bits per interval for up to four filters. The interval
-   * grows when the capture would need more than MAX_IO_BUCKETS buckets.
-   */
   async ioGraph(specs: IoGraphSpec[], intervalMs: number): Promise<IoGraphResult> {
-    this.requireFile();
-    if (!specs.length || specs.length > MAX_IO_GRAPHS) throw new Error(`give 1 to ${MAX_IO_GRAPHS} graphs`);
-    if (!Number.isFinite(intervalMs) || intervalMs < 1) throw new Error("the interval must be at least 1 ms");
-    const params: Record<string, unknown> = {};
-    for (const [i, g] of specs.entries()) {
-      if (g.metric !== "packets" && g.metric !== "bytes" && g.metric !== "bits") throw new Error(`unknown metric "${g.metric}"`);
-      params[`graph${i}`] = g.metric;
-      const filter = (g.filter ?? "").trim();
-      if (filter) {
-        const check = await this.checkFilter(filter);
-        if (!check.ok) throw new Error(`invalid display filter "${filter}": ${check.error}`);
-        params[`filter${i}`] = this.sharkdFilter(filter);
-      }
-    }
-    const spanUs = Math.max(Math.round(this.state.duration * 1e6), 1);
-    const interval = Math.min(niceInterval(Math.max(Math.round(intervalMs), Math.ceil(spanUs / 1000 / MAX_IO_BUCKETS))), MAX_IO_INTERVAL);
-    const buckets = Math.floor(spanUs / (interval * 1000)) + 1;
-    if (buckets > MAX_IO_BUCKETS_HARD) throw new Error("the capture spans too much time for an I/O graph (check for packets with bogus timestamps)");
-    const r = await this.engine.call<{ iograph: { items?: (number | string)[] }[] }>("iograph", { interval, ...params });
-    return {
-      interval,
-      series: specs.map((g, i) => ({ metric: g.metric, filter: (g.filter ?? "").trim(), values: denseItems(r.iograph[i]?.items ?? [], buckets) })),
-    };
+    return ioGraph(this.statsView, specs, intervalMs);
   }
 
-  /** First frame at or after `seconds` since the first frame (and before `until`, if given), within the display filter. */
   async frameAt(seconds: number, until?: number): Promise<number | null> {
-    this.requireFile();
-    if (!Number.isFinite(seconds) || seconds < 0) throw new Error("time must be a non-negative number of seconds");
-    if (until !== undefined && !(Number.isFinite(until) && until > seconds)) throw new Error("until must be a time after t");
-    const at = `frame.time_relative >= ${seconds.toFixed(9)}${until === undefined ? "" : ` && frame.time_relative < ${until.toFixed(9)}`}`;
-    return this.firstMatching(this.engine, this.state.filter ? `(${this.sharkdFilter(this.state.filter)}) && ${at}` : at);
+    return frameAt(this.statsView, seconds, until);
   }
 
-  private async firstMatching(engine: Sharkd, filter: string): Promise<number | null> {
-    const rows = await engine.call<{ num: number }[]>("frames", { filter, ...page(0, 1), column0: "frame.number:0" });
-    return rows[0]?.num ?? null;
-  }
-
-  /**
-   * Find Packet: the first displayed frame after `from` (dir 1) or the last
-   * one before it (dir -1) matching `filter`, else the first (last) one
-   * overall. `from` 0 searches the whole list without wrapping.
-   */
   async find(filter: string, from: number, dir: number): Promise<FindResult> {
-    this.requireFile();
-    if (dir !== 1 && dir !== -1) throw new Error("dir must be 1 or -1");
-    if (!Number.isInteger(from) || from < 0) throw new Error("from must be a frame number, or 0 for none");
-    filter = filter.trim();
-    if (!filter) throw new Error("no display filter to find");
-    const check = await this.checkFilter(filter);
-    if (!check.ok) throw new Error(`invalid display filter: ${check.error}`);
-    const engine = this.engine;
-    const { file, filter: view } = this.state;
-    const match = this.sharkdFilter(view ? `(${view}) && (${filter})` : `(${filter})`);
-    let frame: number | null;
-    let wrapped = false;
-    if (dir === 1) {
-      frame = await this.firstMatching(engine, from ? `${match} && frame.number > ${from}` : match);
-      if (frame === null && from) {
-        frame = await this.firstMatching(engine, match);
-        wrapped = frame !== null;
-      }
-    } else {
-      const frames = await matchingFrames(engine, match);
-      const last = frames.length ? frames[frames.length - 1] : null;
-      const before = from ? (frames.findLast((f) => f < from) ?? null) : last;
-      frame = before ?? last;
-      wrapped = before === null && last !== null;
-    }
-    // Live reloads keep frame numbers; another file or filter does not
-    if (this.state.file !== file || this.state.filter !== view) throw new StaleGenerationError("the view changed during the search");
-    return { frame, index: this.indexOf(frame), wrapped };
+    return find(this.statsView, filter, from, dir);
   }
 
   /** Reads the keylog file Wireshark's own preferences may already set. */
@@ -3483,29 +3369,6 @@ function hasFrame(frames: Int32Array, f: number): boolean {
   return false;
 }
 
-/** Rounds up to 1, 2 or 5 times a power of ten milliseconds. */
-function niceInterval(ms: number): number {
-  const p = 10 ** Math.floor(Math.log10(ms));
-  for (const m of [1, 2, 5, 10]) if (m * p >= ms) return m * p;
-  return 10 * p;
-}
-
-/** sharkd skips empty buckets: a string item is the next bucket's index in hex. */
-function denseItems(items: (number | string)[], buckets: number): number[] {
-  const values = new Array<number>(buckets).fill(0);
-  let i = 0;
-  for (const item of items) {
-    if (typeof item === "string") i = parseInt(item, 16);
-    else {
-      // Rounding of the capture duration can leave sharkd one bucket ahead of us
-      while (values.length <= i) values.push(0);
-      values[i] = item;
-      i++;
-    }
-  }
-  return values;
-}
-
 /** Frame count and capture times of a capture's packets; `complete`: every packet up to the time asked for is there. */
 type LiveTimes = { count: number; timeOf: (frame: number) => Promise<number>; complete: boolean };
 
@@ -3520,11 +3383,6 @@ async function framesBefore({ count, timeOf }: LiveTimes, t: number, orAt: boole
     else hi = mid - 1;
   }
   return lo;
-}
-
-/** sharkd rejects skip: 0, so leave it out. */
-function page(skip: number, limit: number): Record<string, unknown> {
-  return skip > 0 ? { skip, limit } : { limit };
 }
 
 /** The row at `index` alone, or no rows for -1. */

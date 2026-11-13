@@ -453,3 +453,8 @@ class LuaLog {
     this.emit(this.report);
   }
 }
+
+/** sharkd rejects skip: 0, so leave it out. */
+export function page(skip: number, limit: number): Record<string, unknown> {
+  return skip > 0 ? { skip, limit } : { limit };
+}
