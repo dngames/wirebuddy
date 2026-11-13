@@ -2235,6 +2235,24 @@ esac
     assert.equal(notes.length, 2);
   });
 
+  await check("capture: a folder for captures that can't be created says who WireBuddy runs as, not a bare EACCES", async () => {
+    if (process.getuid?.() === 0) return;
+    const dir = mkdtempSync(join(out, "capdir-"));
+    const fake = join(dir, "dumpcap");
+    writeFileSync(fake, `#!/bin/sh\ncase " $* " in *" -D "*) echo '[{"lo":{"friendly_name":null,"vendor_description":null,"addrs":[],"loopback":true,"extcap":""}}]' ;; *) exit 0 ;; esac\n`, { mode: 0o755 });
+    const closed = join(dir, "closed");
+    mkdirSync(closed, { mode: 0o500 });
+    const target = join(closed, "captures");
+    try {
+      await assert.rejects(
+        new Capture(target, fake).start({ iface: "lo", filter: "", autostop: {}, ring: null }),
+        new RegExp(`^Error: permission denied: WireBuddy runs as the user ${userInfo().username.replace(/\W/g, "\\$&")}, and this user can't create ${target.replace(/\W/g, "\\$&")}`),
+      );
+    } finally {
+      chmodSync(closed, 0o700);
+    }
+  });
+
   await check("filter hints: a set with spaces between its members asks for commas, others get none", () => {
     assert.equal(setHint("frame.number in {430 432}"), " (separate the members of a set with commas: {430, 432})");
     assert.equal(setHint("ip.src == 1.2.3.4 && tcp.port in {80 443 8080 }"), " (separate the members of a set with commas: {80, 443, 8080})");

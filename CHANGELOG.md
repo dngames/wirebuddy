@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- A folder for live captures that can't be created (`--capture-dir`) says which user WireBuddy runs as and that this user can't create it, not a bare `EACCES`
+- Applying a display filter with no capture running shows the selected packet if the list still has it, else the top of the list, not its last row; Auto Scroll in Live Capture matters only while a capture runs
+- The agent's `extensions` test says how many packets of the capture still show as undecoded payload and, for an extension over TCP, how many are segments of a message reassembled in a later packet, so those are not read as a hole
+- A panel whose capture is closed (or changed) while it reads no longer counts as a problem sent to the agent: a read with no capture open or a stale one rejects with `no-capture` or `stale`, which is not reported, and the panel guide says what a panel sees then
+- The agent's panel guide says how a panel follows a live capture (`wb.subscribe`, or reading again on the `packets` event) and not to pick packets by a client's ephemeral TCP port
+- The agent's extension guide has a template for a length-prefixed protocol over TCP (several messages in a segment, a message split over segments, every message in the Info column) and says what several messages in one packet mean for display filters and columns
 - A question to the agent (Ask Agent, Now) shows in the page: a quiet line says it is waiting, and the answer the agent gives with the new `answer_question` tool takes its place in the banner until you dismiss it; Tools › Questions to Claude… lists the session's last 20 questions with their answers, and a click selects the packet a question was about
 - Mark Packet with Note… (the packet list's menu and Edit) gives a mark a note of your own, Edit Mark's Note… changes it, and the agent hears which packets got which note; Mark Packet stays the quick toggle
 - The agent's mark on a packet the user marked still replaces it, but `mark_frames` now names those frames and the notice the user gets says so

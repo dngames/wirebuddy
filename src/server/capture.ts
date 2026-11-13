@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
+import { writeRefused } from "./permission.ts";
 import type { CaptureInterface, CaptureRequest, CaptureState, FilterCheck, InterfaceActivity } from "../shared/api.ts";
 
 const ACTIVITY_SAMPLES = 60;
@@ -304,7 +305,11 @@ export class Capture extends EventEmitter {
     } else if (autostop.files) throw new Error("stopping after a number of files needs new files to be created automatically");
 
     // Captures can hold passwords and private traffic: only the user may read them
-    mkdirSync(this.state.dir, { recursive: true, mode: 0o700 });
+    try {
+      mkdirSync(this.state.dir, { recursive: true, mode: 0o700 });
+    } catch (err) {
+      throw writeRefused(err, this.state.dir, "create");
+    }
     const stamp = new Date().toISOString().replace(/[-:.Z]/g, "").replace("T", "_");
     const safeIface = req.iface.replace(/[^A-Za-z0-9_.-]/g, "_");
     let base = `wirebuddy_${safeIface}_${stamp}`;

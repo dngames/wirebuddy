@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
 import { writeAcmeCapture } from "./acme.mjs";
+import { writeAcmeTcpCapture } from "./acmetcp.mjs";
 import * as g from "./capgen.mjs";
 import { followState } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
@@ -525,11 +526,14 @@ try {
   await call("extensions", { action: "test", name: "acme" }, (t) => {
     assert.match(t, /Extension "acme": loaded/);
     assert.match(t, /^  acme: 20 packets, first 1$/m);
+    assert.doesNotMatch(t, /undecoded payload/);
     assert.match(t, /Sequence: 0/);
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "test", name: "acme_heur" }, (t) => {
     assert.match(t, /^  acme: 19 packets, first 1$/m);
+    // The cut-short packet the heuristic rejects is still payload nobody decoded
+    assert.match(t, /^  1 packet still shows as undecoded payload \("data"\)\.$/m);
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "test", name: "acme_gap" }, (t) => {
@@ -575,7 +579,13 @@ try {
   await call("extensions", { action: "list" }, (t) => assert.match(t, /^acme \[loaded\] \[lua\]/m));
 
   // Panels: written by the agent, checked before they run
-  await call("extensions", { action: "guide", topic: "panel" }, (t) => assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/));
+  await call("extensions", { action: "guide", topic: "panel" }, (t) => {
+    assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/);
+    // Following a live capture is the panel's job, and what it picks by must outlast a run
+    assert.match(t, /wb\.packets and wb\.all miss what a live capture adds[\s\S]*wb\.subscribe\(q[\s\S]*wb\.on\("packets", draw\)/);
+    assert.match(t, /After File › Close the reset comes with\s+wb\.view\.file null[\s\S]*"no-capture"/);
+    assert.match(t, /Don't pick packets by a client's TCP port[\s\S]*ephemeral ports/);
+  });
   mkdirSync(join(extDir, "viewpanel", "panel"), { recursive: true });
   writeFileSync(join(extDir, "viewpanel", "extension.json"), JSON.stringify({ label: "View", version: "1", panel: { offer: { filter: "udp", text: "Show the view" } } }));
   writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "const x = 1;\nconst y = ;\n");
@@ -601,6 +611,40 @@ try {
   await call("extensions", { action: "reload" }, (t) => assert.match(t, /^viewpanel \[loaded\] \[panel\] View v1; offers "Show the view"$/m));
   await call("capture_summary", {}, (t) => assert.match(t, /^Panel available: viewpanel \("Show the view"\): panel action "open"/m));
   await call("get_view_state", {}, (t) => assert.match(t, /^Panels offered to the user in the status bar: viewpanel \("Show the view"\)$/m));
+
+  // The guide's TCP template on a stream: several messages in one segment, and one split over two
+  const tcpTemplate = template("length-prefixed messages over TCP \\(several per segment, or split over segments\\)");
+  assert.match(tcpTemplate, /dissect_tcp_pdus/, "the guide has a TCP template");
+  rmSync(join(extDir, "acme"), { recursive: true });
+  rmSync(join(extDir, "acme_gap"), { recursive: true });
+  addExtension("acme_tcp", tcpTemplate);
+  const tcpFile = join(out, "acme-tcp.pcap");
+  writeAcmeTcpCapture(tcpFile);
+  await call("open_capture", { path: tcpFile }, (t) => assert.match(t, /3 frames/));
+  await call("extensions", { action: "test", name: "acme_tcp" }, (t) => {
+    assert.match(t, /Extension "acme_tcp": loaded/);
+    assert.match(t, /^  acme: 2 packets, first 1$/m);
+    // Frame 2 holds the start of the split message: no payload nobody decoded, a segment decoded in frame 3
+    assert.match(t, /^  1 packet is a segment of a message reassembled in a later packet \(tcp\.reassembled_in\), decoded there: no hole\.$/m);
+    assert.doesNotMatch(t, /undecoded payload/);
+    assert.match(t, /No Lua errors/);
+  });
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /Extension "acme_tcp" loaded \(protocols: acme\)/));
+  await call("query_packets", { filter: "acme", fields: ["frame.number", "acme.kind", "acme.length", "tcp.reassembled_in"] }, (t) => {
+    // Three messages in frame 1; the split one is decoded in frame 3, the frame that completes it
+    assert.match(t, /^1 \| 1 \| Status,Points,Status \| 2,4,0 \| $/m);
+    assert.match(t, /^3 \| 3 \| Points \| 6 \| $/m);
+    assert.match(t, /2 frames match/);
+  });
+  await call("query_packets", {}, (t) => {
+    assert.match(t, /^1 \|.*\| ACME \|.*\| Status, Points, Status$/m, "the Info column lists every message of the segment");
+    assert.match(t, /^2 \|.*\| TCP \|.*\[TCP PDU reassembled in 3\]$/m);
+    assert.match(t, /^3 \|.*\| ACME \|.*\| Points$/m);
+  });
+  await call("query_packets", { filter: "acme.body", fields: ["acme.body"] }, (t) => {
+    assert.match(t, /^1 \| 0102,03040506$/m);
+    assert.match(t, /^3 \| 0708090a0b0c$/m);
+  });
 } finally {
   await client.close();
   rmSync(out, { recursive: true, force: true });

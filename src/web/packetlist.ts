@@ -985,8 +985,11 @@ export function createPacketList(): HTMLElement {
       if (prev && app.autoScroll && captureActive(s)) setVirtTop(metrics().maxVirt);
     } else if (genChanged && sameView && app.autoScroll && (captureActive(s) || wasCapturing || wasAtBottom)) {
       follow();
-    } else if (genChanged && prev && s.filter !== prev.filter && app.selIndex >= 0) {
-      ensureVisible(app.selIndex, "center");
+    } else if (genChanged && prev && s.filter !== prev.filter) {
+      // The selected packet if the new list has it, else the top; the end only for a followed live capture
+      if (app.autoScroll && captureActive(s)) follow();
+      else if (app.selIndex >= 0) ensureVisible(app.selIndex, "center");
+      else setVirtTop(0);
     }
     updateOverlay(s);
     render();

@@ -373,6 +373,44 @@ local function heuristic(tvb, pinfo, tree)
 end
 acme:register_heuristic("udp", heuristic)
 `,
+  tcp: `-- A length-prefixed message protocol on TCP port 50000: header = magic u16, kind u8, body length u32.
+-- A segment holds several messages or part of one; dissect_tcp_pdus collects the segments of a message
+-- and calls dissect_message once per whole message, in the frame that completes it
+local acme = Proto("acme", "ACME Messages")
+local kinds = { [1] = "Status", [2] = "Points" }
+local f = {
+  kind = ProtoField.uint8("acme.kind", "Kind", base.DEC, kinds),
+  length = ProtoField.uint32("acme.length", "Body length"),
+  body = ProtoField.bytes("acme.body", "Body"),
+}
+acme.fields = f
+local HEADER = 7
+
+-- The length of the whole message at tvb(offset); called once HEADER bytes are there
+local function message_length(tvb, pinfo, offset)
+  return HEADER + tvb(offset + 3, 4):uint()
+end
+
+local function dissect_message(tvb, pinfo, tree)
+  pinfo.cols.protocol = "ACME"
+  local t = tree:add(acme, tvb())  -- one subtree per message
+  t:add(f.kind, tvb(2, 1))
+  t:add(f.length, tvb(3, 4))
+  if tvb:len() > HEADER then t:add(f.body, tvb(HEADER)) end
+  -- Info lists every message of the frame, not only the last
+  local info = tostring(pinfo.cols.info)
+  local kind = tvb(2, 1):uint()
+  pinfo.cols.info = (info == "" and "" or info .. ", ") .. (kinds[kind] or kind)
+end
+
+function acme.dissector(tvb, pinfo, tree)
+  pinfo.cols.info:clear()
+  dissect_tcp_pdus(tvb, tree, HEADER, message_length, dissect_message)
+  return tvb:len()
+end
+
+DissectorTable.get("tcp.port"):add(50000, acme)
+`,
   postdissector: `-- Adds a computed field to packets other dissectors decoded
 local gap = Proto("acme_gap", "ACME gap")
 local f_gap = ProtoField.double("acme_gap.ms", "Since previous ACME packet (ms)")
@@ -961,6 +999,15 @@ Rules and pitfalls:
 - Return quietly on packets that don't fit; never assume a length: tvb(offset, len) past the end
   raises "Range is out of bounds". Lua errors show as an expert item and as WireBuddy events.
 - Little-endian values: t:add_le(field, range) and range:le_uint().
+- A TCP segment holds several messages or part of one: dissecting "the message of the segment" misses
+  some. Use dissect_tcp_pdus as in the TCP template. A segment with only the start of a message stays
+  TCP, Info "[TCP segment of a reassembled PDU]" or "[TCP PDU reassembled in N]": no gap, frame N
+  (tcp.reassembled_in) decodes it.
+- Several messages in one packet give a field several values there. A display filter matches when ANY
+  of them does, so acme.tank == 3 && acme.temp > 12 can match two different messages; a custom column
+  and query_packets fields show all values, comma-joined. What keeps them apart: one subtree per
+  message, a field whose value names the entity ("tank3 temp=14"), and a generated field per thing the
+  user will filter on (acme.tank3.temp, registered in a loop), so acme.tank3.temp > 12 is that tank's.
 - Heuristic dissectors: after pinfo.conversation = proto, later packets of that conversation skip the
   heuristic, so the dissector must check lengths too.
 - Field.new() extractors are empty during sharkd's first pass over the file; use pinfo and tvb for
@@ -976,6 +1023,8 @@ Template, protocol on a fixed port:
 ${TEMPLATES.port}
 Template, heuristic (recognized by content):
 ${TEMPLATES.heuristic}
+Template, length-prefixed messages over TCP (several per segment, or split over segments):
+${TEMPLATES.tcp}
 Template, post-dissector (computed field on packets decoded by others):
 ${TEMPLATES.postdissector}
 Panels (a window of your own in the user's view: images, video, point clouds, charts): topic "panel".${why}`;
@@ -1019,7 +1068,17 @@ Rules:
 - Don't navigate or open windows: a panel that navigates is closed. One that stops responding
   for 20 s is stopped.
 - Call wb.ready() once the first view is drawn. On "reset" (another file, re-read extensions, TLS
-  keys or Decode As) throw away what you read and read again.
+  keys or Decode As) throw away what you read and read again. After File › Close the reset comes with
+  wb.view.file null: clear the panel and show "no capture" instead of reading; the next reset says
+  another capture is open. A read made while none is open rejects with .code "no-capture" (a "stale"
+  one with "stale" if the capture changed meanwhile); neither is reported to you, so they need no catch.
+- A read is a snapshot: wb.packets and wb.all miss what a live capture adds afterwards, and a panel that
+  only reads at the start stays empty or stale. To follow the capture, read through wb.subscribe, or
+  read again when "packets" fires (wb.view.live: a capture runs):
+    wb.subscribe(q, { batch(page) { add(page); draw(); }, reset() { clear(); } });
+    wb.on("packets", draw);   // draw() reads with wb.all and draws everything anew
+- Don't pick packets by a client's TCP port or an address seen in this capture: the next run has other
+  ephemeral ports. Use the server's port, a field of the protocol, or what the user selected.
 - Fetch data in main.js and transfer it to workers; workers can't call wb.
 
 API (global wb):

@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { chromeOrSkip } from "./chrome.mjs";
+import * as g from "./capgen.mjs";
 import { chromePort, pageSocket, rawCdp, sleep, startChrome, suite } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
@@ -43,6 +44,25 @@ document.getElementById("filter").addEventListener("click", () => said("filter",
 wb.on("select", (frame) => frame === 7 && (window.focus(), said("follow", wb.select(8))));
 await wb.storage.set({ runs: ((await wb.storage.get())?.runs ?? 0) + 1 });
 await said("early", wb.select(2));
+wb.ready();
+`,
+);
+
+// What a panel's author writes first: draws what it read and, on a reset, says so and reads again, catching nothing
+const reader = join(home, ".local/share/wirebuddy/extensions/reader/panel");
+mkdirSync(reader, { recursive: true });
+writeFileSync(join(home, ".local/share/wirebuddy/extensions/reader/extension.json"), JSON.stringify({ label: "Reader", version: "1", panel: { title: "Reader" } }));
+writeFileSync(
+  join(reader, "main.js"),
+  `async function draw() {
+  const page = await wb.all({ filter: "tcp" });
+  wb.status("reads " + page.n + " packets of " + wb.view.file);
+}
+await draw();
+wb.on("reset", () => {
+  if (!wb.view.file) wb.status("no capture");
+  return draw();
+});
 wb.ready();
 `,
 );
@@ -430,6 +450,29 @@ try {
     await sleep(300);
     seen += await viewState();
     assert.doesNotMatch(seen, /ResizeObserver/);
+  });
+
+  await check("browser: a panel survives its capture being closed and another opened, without a problem for the agent", async () => {
+    const readerStatus = async () => (await state()).panels.find((p) => p.name === "reader")?.statusText;
+    const post = (path) => fetch(new URL(path, ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: "{}" });
+    const events = async (after) => (await (await fetch(new URL(`/api/events?after=${after}`, ui.origin), { headers: { "X-WireBuddy-Token": token } })).json());
+    const { last } = await events(Number.MAX_SAFE_INTEGER);
+    await call("panel", { action: "open", name: "reader", wait_ms: 10_000 });
+    try {
+      await until("the panel's first reading", async () => /^reads \d+ packets of http\.pcapng$/.test((await readerStatus()) ?? ""));
+      assert.equal((await post("/api/close")).status, 200);
+      await until("the panel to hear of it", async () => /no capture/i.test((await readerStatus()) ?? ""));
+      await sleep(500);
+      assert.equal((await events(last)).events.filter((e) => e.level === "ERROR" || /^Panel/.test(e.text)).length, 0, JSON.stringify((await events(last)).events));
+      assert.match(await viewState(), /^Panels open: reader \(ready, opened by agent\)$/m);
+      assert.match((await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") })).text, /29 frames/);
+      await until("the panel to read the new capture", async () => /^reads \d+ packets of http\.pcapng$/.test((await readerStatus()) ?? ""));
+      await sleep(300);
+      assert.equal((await events(last)).events.filter((e) => e.level === "ERROR").length, 0, JSON.stringify((await events(last)).events));
+    } finally {
+      await call("panel", { action: "close", name: "reader" });
+      if (!(await state()).file) await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
+    }
   });
 
   await check("browser: a mark is the first line of the selected packet's details and changes with it; Go › Marked Packets shows a long note in full", async () => {
@@ -1023,6 +1066,52 @@ try {
       await typeFilter("");
       await key("Enter", "Enter", 13);
       await until("no filter", async () => (await state()).filter === "" && !/busy/.test(await classes()));
+    }
+  });
+
+  await check("browser: a new display filter with no capture running shows the selected packet if the list still has it, else the top, whatever the follow toggle says", async () => {
+    const long = join(home, "long.pcap");
+    writeFileSync(long, Buffer.concat([g.pcapHeader(), ...Array.from({ length: 3000 }, (_, i) => g.pcapRecord(1700000000, i * 1000, g.udpFrame(i)))]));
+    const followToggle = `document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').getAttribute('aria-pressed') === 'true'`;
+    const scrolled = () => evaluate("document.querySelector('.pl-scroll').scrollTop");
+    const firstRow = () => evaluate("[...document.querySelectorAll('.pl-row')].filter((r) => !r.hidden).map((r) => Number(r.querySelector('.pl-cell')?.textContent)).sort((a, b) => a - b)[0]");
+    const setFilter = async (text) => {
+      await evaluate(`(() => { const i = document.querySelector('.fb-input'); i.focus(); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input')); })()`);
+      await key("Enter", "Enter", 13);
+      await until(`the filter ${text}`, async () => (await state()).filter === text && !(await state()).loading);
+      await sleep(400);
+    };
+    assert.match((await call("open_capture", { path: long })).text, /3000 frames/);
+    try {
+      assert.ok(await evaluate(followToggle), "the follow toggle is on");
+      for (const follow of [true, false]) {
+        if ((await evaluate(followToggle)) !== follow) await evaluate(`document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').click()`);
+        await until("the toggle", async () => (await evaluate(followToggle)) === follow);
+        await setFilter("");
+        // A packet far down that the new filter hides
+        await call("goto_frame", { frame: 2500 });
+        await until("the list at frame 2500", async () => (await state()).selected === 2500 && (await firstRow()) > 2000);
+        await setFilter("frame.number < 60");
+        await until("the list's start", async () => (await scrolled()) === 0, 3000).catch(async (err) => {
+          throw new Error(`${err.message} (follow ${follow}); ${await listed()}`);
+        });
+        assert.equal(await firstRow(), 1, `follow ${follow}`);
+        // The selected packet still in the list: shown, not the top
+        await setFilter("");
+        await call("goto_frame", { frame: 2500 });
+        await until("the list at frame 2500", async () => (await state()).selected === 2500 && (await firstRow()) > 2000);
+        await setFilter("frame.number > 1000");
+        await sleep(300);
+        assert.ok((await firstRow()) > 1000 && (await state()).selected === 2500 && (await scrolled()) > 0, `follow ${follow}: ${await listed()}`);
+        await until("frame 2500 in view", async () => (await evaluate(`!!(${row(2500)})`)) === true, 3000).catch(async (err) => {
+          throw new Error(`${err.message} (follow ${follow}); ${await listed()}`);
+        });
+      }
+    } finally {
+      if (!(await evaluate(followToggle))) await evaluate(`document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').click()`);
+      await setFilter("");
+      rmSync(long, { force: true });
+      await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
     }
   });
 
