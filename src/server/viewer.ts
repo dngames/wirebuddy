@@ -19,21 +19,17 @@ import {
   InvalidInvestigation,
   investigationKey,
   keptSummary,
-  MAX_INVESTIGATION_BYTES,
   nothingToKeep,
   pruneInvestigations,
   readInvestigation,
-  removeInvestigation,
-  serializeInvestigation,
-  setAsideInvestigation,
   setAsideName,
-  writeInvestigation,
   type Investigation,
 } from "./investigation.ts";
 import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, Superseded, type Numbering, type RowView } from "./livetail.ts";
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
+import { Keeper } from "./keeper.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
 import { Panels } from "./panels.ts";
@@ -142,8 +138,6 @@ const MAX_COMMENTED = 10_000;
 const MAX_COMMENT = 2000;
 /** What an investigation read back may hold: what the view can. */
 const INVESTIGATION_LIMITS = { marks: MAX_MARKS, note: MAX_NOTE, timeRefs: MAX_TIME_REFS, commented: MAX_COMMENTED, comment: MAX_COMMENT };
-/** How soon after a change the investigation is kept. */
-const KEEP_MS = 1000;
 const MAX_QUESTION = 2000;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
@@ -260,6 +254,16 @@ export class Viewer extends EventEmitter {
     listedTail: () => this.listedTail,
     rowView: () => this.rowView(),
   };
+  /** The investigation kept for the open capture. */
+  private readonly keeper = new Keeper({
+    dir: () => this.investigations,
+    state: () => this.state,
+    set: (patch) => this.set(patch),
+    investigation: () => this.investigation(),
+    loadedHead: () => this.loadedHead,
+    growing: (file) => this.capture.running && this.capture.state.currentFile === file,
+    warn: (text) => this.events.add("WARNING", text),
+  });
   /** What Follow Stream and Export Objects ask of this viewer. */
   private readonly streamsView: StreamsView = {
     engine: () => this.engine,
@@ -336,15 +340,6 @@ export class Viewer extends EventEmitter {
   private commentedFrames: { loads: number; frames: Int32Array } | null = null;
   /** Where the marks, time references and edited comments of each capture are kept; null: nowhere. */
   private readonly investigations: string | null;
-  /** What the open capture's investigation file holds, as this server wrote or read it: its key, and its content ("" for none). */
-  private kept = { key: "", content: "" };
-  private keepTimer: NodeJS.Timeout | null = null;
-  /** What the last save looked at: a change to any of these is saved shortly after. */
-  private keptOf: unknown[] = [];
-  /** Problems with keeping investigations already told to the agent. */
-  private readonly keepTold = new Set<string>();
-  /** Keys whose file this server refused to read: set aside before anything is written over it. */
-  private readonly refused = new Set<string>();
   /** Packets whose comments were edited and not exported in the capture the view left last, if they weren't kept; else 0. */
   droppedEdits = 0;
   readonly capture: Capture;
@@ -473,7 +468,7 @@ export class Viewer extends EventEmitter {
     this.capture.on("stopped", () => {
       this.captureStoppedAt = Date.now();
       // A capture shorter than the head that names it is kept once it stopped growing
-      this.keepSoon();
+      this.keeper.keepSoon();
       if (this.reloadTimer) clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
       if (!this.followingCapture()) return;
@@ -492,11 +487,11 @@ export class Viewer extends EventEmitter {
       try {
         pruneInvestigations(this.investigations);
       } catch (err) {
-        this.keepProblem(`Could not prune the investigations kept in ${this.investigations}: ${(err as Error).message}`);
+        this.keeper.keepProblem(`Could not prune the investigations kept in ${this.investigations}: ${(err as Error).message}`);
       }
     }
     this.on("state", () => {
-      if (this.keepingOf().some((v, i) => v !== this.keptOf[i])) this.keepSoon();
+      if (this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.keeper.keepSoon();
     });
   }
 
@@ -512,7 +507,7 @@ export class Viewer extends EventEmitter {
   private set(patch: Partial<ViewState>): void {
     this.state = { ...this.state, ...patch };
     // Changed since it was last kept: not kept until the next save
-    if (this.state.kept && this.keepingOf().some((v, i) => v !== this.keptOf[i])) this.state = { ...this.state, kept: false };
+    if (this.state.kept && this.keeper.keepingOf().some((v, i) => v !== this.keeper.keptOf[i])) this.state = { ...this.state, kept: false };
     this.emit("state", this.state);
   }
 
@@ -762,8 +757,8 @@ export class Viewer extends EventEmitter {
         // A live capture's file may not have its header yet
         if (!this.capture.state.files.includes(file) && !(await looksLikeCapture(file))) throw new Error(`not a capture file: ${file}`);
         // Kept first: reopened, the capture (or a copy) comes back as it is now
-        this.keepNow();
-        const read = this.kept;
+        this.keeper.keepNow();
+        const read = this.keeper.kept;
         const head = fileHead(file);
         let kept = this.keptFor(file, head);
         const refs = kept.investigation?.timeRefs ?? [];
@@ -778,9 +773,9 @@ export class Viewer extends EventEmitter {
         // The filter may not apply to this capture's protocols; then it shows everything
         const result = await this.loadInto(this.engines[standby], file, filter, refs, true);
         filter = result.filter;
-        const keptLast = this.keepNow();
+        const keptLast = this.keeper.keepNow();
         // Changed while this one loaded, and the same capture: what it has now (rows read with the references they have anyway)
-        if (kept.key && this.kept.key === kept.key && this.kept !== read) kept = this.keptFor(file, head);
+        if (kept.key && this.keeper.kept.key === kept.key && this.keeper.kept !== read) kept = this.keptFor(file, head);
         this.active = standby;
         this.forgetTypes();
         this.lastReadMs = 0;
@@ -874,7 +869,7 @@ export class Viewer extends EventEmitter {
     this.applyLoad(file, result.filter, result, true, { changed: result.rolledBack ? "extensions" : rewritten ? "rewritten" : null, redissected: redissect, untrusted, held });
     this.loadedIno = ino;
     // A live capture's first bytes are all there now: what it has can be kept
-    if (head.length > this.loadedHead.length) this.keepSoon();
+    if (head.length > this.loadedHead.length) this.keeper.keepSoon();
     this.loadedHead = head;
     if (redissect || result.rolledBack) void this.filterTail();
     if (result.rolledBack) {
@@ -1300,8 +1295,8 @@ export class Viewer extends EventEmitter {
 
   close(): Promise<void> {
     return this.exclusive(async () => {
-      this.droppedEdits = this.keepNow() ? 0 : this.state.commentEdits;
-      this.kept = { key: "", content: "" };
+      this.droppedEdits = this.keeper.keepNow() ? 0 : this.state.commentEdits;
+      this.keeper.kept = { key: "", content: "" };
       // A restarted sharkd needn't read the closed file again
       for (const e of this.engines) e.forgetFile();
       this.dropTail();
@@ -1919,7 +1914,7 @@ export class Viewer extends EventEmitter {
       this.dropComments();
       this.set({ marks: [], commentEdits: this.editCount(), commentsEdited: 0, commentRevision: this.state.commentRevision + 1, generation: this.state.generation + 1 });
     });
-    this.keepNow();
+    this.keeper.keepNow();
     return gone;
   }
 
@@ -2090,7 +2085,7 @@ export class Viewer extends EventEmitter {
     try {
       return { key, investigation: readInvestigation(dir, key, INVESTIGATION_LIMITS), problem: null };
     } catch (err) {
-      if (err instanceof InvalidInvestigation) this.refused.add(key);
+      if (err instanceof InvalidInvestigation) this.keeper.refused.add(key);
       return { key, investigation: null, problem: (err as Error).message };
     }
   }
@@ -2111,13 +2106,13 @@ export class Viewer extends EventEmitter {
   /** Tells what came back of the investigation kept for `file` (under `key`), or why nothing did. */
   private restored(file: string, key: string, problem: string | null): void {
     const inv = this.investigation();
-    this.kept = { key, content: key && !problem && !nothingToKeep(inv) ? investigationContent(inv) : "" };
-    this.keptOf = this.keepingOf();
+    this.keeper.kept = { key, content: key && !problem && !nothingToKeep(inv) ? investigationContent(inv) : "" };
+    this.keeper.keptOf = this.keeper.keepingOf();
     // What the view has is what is kept: nothing, or what was read
     if (this.state.kept !== !!key) this.set({ kept: !!key });
     if (problem) {
       const dir = this.investigations!;
-      const aside = this.refused.has(key) ? `; it stays as it is until something is kept for this capture, then it is moved to ${setAsideName(dir, key)}` : "";
+      const aside = this.keeper.refused.has(key) ? `; it stays as it is until something is kept for this capture, then it is moved to ${setAsideName(dir, key)}` : "";
       this.events.add("WARNING", `The marks, time references and packet comments kept for ${basename(file)} were not restored: ${problem} (${join(dir, `${key}.json`)})${aside}`);
       return;
     }
@@ -2144,93 +2139,9 @@ export class Viewer extends EventEmitter {
     };
   }
 
-  /** The name of the open capture's investigation; null while a live capture still grows into the bytes that name it. */
-  private captureKey(): string | null {
-    const file = this.state.file;
-    let head = this.loadedHead;
-    if (!file || !head.length) return null;
-    if (head.length < INVESTIGATION_HEAD) {
-      if (this.capture.running && this.capture.state.currentFile === file) return null;
-      // A file that stopped growing: its first bytes as they are now, if they go on from the ones read
-      const now = fileHead(file);
-      if (!now.subarray(0, head.length).equals(head)) return null;
-      head = now;
-    }
-    return investigationKey(head);
-  }
-
   /** Keeps the open capture's marks, time references and comment edits now; whether they are kept (see ViewState.kept). */
   keep(): boolean {
-    return this.keepNow();
-  }
-
-  /** Keeps the investigation a second after a change, at most once a second. */
-  private keepSoon(): void {
-    if (!this.investigations || this.keepTimer) return;
-    this.keepTimer = setTimeout(() => {
-      this.keepTimer = null;
-      this.keepNow();
-    }, KEEP_MS);
-    this.keepTimer.unref();
-  }
-
-  /**
-   * Keeps the open capture's marks, time references and edited comments
-   * now, or removes its file when nothing is left to keep; returns whether
-   * they are kept (or there is nothing to keep).
-   */
-  private keepNow(): boolean {
-    if (this.keepTimer) clearTimeout(this.keepTimer);
-    this.keepTimer = null;
-    const kept = this.keepNowIn();
-    if (this.state.kept !== kept) this.set({ kept });
-    return kept;
-  }
-
-  /** What changes make the view's investigation one to keep again. */
-  private keepingOf(): unknown[] {
-    const s = this.state;
-    return [s.file, s.marks, s.timeRefs, s.commentRevision, s.commentEdits];
-  }
-
-  private keepNowIn(): boolean {
-    const dir = this.investigations;
-    const file = this.state.file;
-    this.keptOf = this.keepingOf();
-    if (!dir || !file) return false;
-    const key = this.captureKey();
-    if (!key) return false;
-    const inv = this.investigation();
-    const content = nothingToKeep(inv) ? "" : investigationContent(inv);
-    if (key === this.kept.key && content === this.kept.content) return true;
-    try {
-      // A file this server couldn't read goes aside first, not lost
-      if (this.refused.has(key)) {
-        setAsideInvestigation(dir, key);
-        this.refused.delete(key);
-      }
-      if (!content) removeInvestigation(dir, key);
-      else {
-        const text = serializeInvestigation(inv, { path: file, size: this.state.fileSize, frames: this.state.totalFrames });
-        if (Buffer.byteLength(text) > MAX_INVESTIGATION_BYTES) {
-          this.keepProblem(`The marks, time references and packet comments of ${basename(file)} take more than ${MAX_INVESTIGATION_BYTES / 1024 / 1024} MiB, too much to keep: they stay only until the capture is closed or another one opened`, key);
-          return false;
-        }
-        writeInvestigation(dir, key, text);
-      }
-      this.kept = { key, content };
-      return true;
-    } catch (err) {
-      this.keepProblem(`Could not keep the marks, time references and packet comments of ${basename(file)} in ${dir}: ${(err as Error).message}`);
-      return false;
-    }
-  }
-
-  /** A WARNING for the agent, once for each problem (or `once` key). */
-  private keepProblem(text: string, once = text): void {
-    if (this.keepTold.has(once)) return;
-    this.keepTold.add(once);
-    this.events.add("WARNING", text);
+    return this.keeper.keepNow();
   }
 
   /** Marks the viewer as driven by an MCP agent, which then gets the problems. */
@@ -2941,7 +2852,7 @@ export class Viewer extends EventEmitter {
   }
 
   shutdown(): void {
-    this.keepNow();
+    this.keeper.keepNow();
     this.capture.stop();
     this.capture.stopActivity();
     if (this.tailTimer) clearInterval(this.tailTimer);
