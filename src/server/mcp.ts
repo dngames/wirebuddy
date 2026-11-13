@@ -10,9 +10,10 @@ import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
 import { frameList } from "./edits.ts";
 import { aboutText, MAX_ANSWER, openQuestions } from "./questions.ts";
+import { otherCapture } from "../shared/questions.ts";
 import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
-import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
+import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, Question, TreeNode } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { framesFilter, inRanges, type Ranges } from "../shared/ranges.ts";
 import { toRanges } from "./export.ts";
@@ -42,6 +43,12 @@ You and the user look at the same view: the open capture, display filter, select
 - Once a live capture is too big to read again every second, the user's list shows the newest packets provisionally until the next full read; your tools answer from the packets read in full, and their results say which frames those are and how many newer packets the user's list shows provisionally.
 - When traffic is not decoded (shown as "Data"; capture_summary lists it) or decoded wrongly: if it is a protocol Wireshark knows on an unexpected port, decode_as fixes the view in one call (like Wireshark's Decode As); otherwise teach the viewer the protocol with a Lua dissector: the extensions tool, action "guide" first.
 - To show the user a view of your own (images, video, point clouds, charts), write a panel: extensions action "guide" topic "panel", then the panel tool.`;
+}
+
+/** " of tank.pcap, not the open capture" for a question about packets of another capture, else "". */
+function aboutOther(q: Question, open: string | null): string {
+  const other = otherCapture(q, open);
+  return other ? ` of ${other}, not the open capture` : "";
 }
 
 /** Packets whose edited comments get_view_state lists, and the longest line of one's. */
@@ -430,7 +437,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const waiting = openQuestions(s.questions);
       if (waiting.length) {
         lines.push(`Questions from the user still waiting for answer_question (${waiting.length}):`);
-        for (const q of waiting.slice(0, 20)) lines.push(`  ${q.id} (asked ${new Date(q.at).toISOString()})${q.count ? ` about ${aboutText(q.frame, q.count)}` : ""}: ${oneLine(q.text)}`);
+        for (const q of waiting.slice(0, 20)) lines.push(`  ${q.id} (asked ${new Date(q.at).toISOString()})${q.count ? ` about ${aboutText(q.frame, q.count)}${aboutOther(q, s.file)}` : ""}: ${oneLine(q.text)}`);
       }
       lines.push(s.tlsKeylog ? `TLS decryption: on, key log ${s.tlsKeylog}` : "TLS decryption: off (the user can set a key log file in the UI)");
       const da = s.decodeAs;
@@ -671,7 +678,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(({ text, id, frame }) => {
       const q = viewer.answerQuestion(text, id, frame);
       const left = openQuestions(viewer.state.questions).length;
-      return `Answered question ${q.id}${q.count ? ` (about ${aboutText(q.frame, q.count)})` : ""}${frame === undefined ? "" : `; selected frame ${frame}`}; ${left ? `${left} still waiting` : "none waiting"}`;
+      const other = otherCapture(q, viewer.state.file);
+      return `Answered question ${q.id}${q.count ? ` (about ${aboutText(q.frame, q.count)}${aboutOther(q, viewer.state.file)})` : ""}${frame === undefined ? "" : `; selected frame ${frame}`}; ${left ? `${left} still waiting` : "none waiting"}${other ? `. The question was about ${other}, not the open capture${viewer.state.file ? "" : " (none is open)"}: the user read it with the packet numbers of that capture` : ""}`;
     }, true, "view"),
   );
 

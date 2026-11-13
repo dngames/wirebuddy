@@ -463,6 +463,9 @@ try {
     assert.match(t, /new file needs/);
   });
 
+  // A question asked of a packet of this capture
+  assert.equal((await post("/api/select", { frame: 12 })).status, 200);
+  assert.equal((await post("/api/agent/ask", { question: "Which one is it?" })).status, 200);
   // A protocol Wireshark knows on a port it doesn't expect: one decode_as call
   const oddPorts = join(out, "odd-ports.pcap");
   writeOddPortsCapture(oddPorts);
@@ -473,6 +476,14 @@ try {
     assert.match(t, /; the display filter "frame\.number in \{1, 2\}" was cleared: frame\.number names the packets of the capture open before/);
   });
   await call("get_view_state", {}, (t) => assert.match(t, /^Display filter: \(none\)$/m));
+  // A question about a packet of the capture open before is about another capture now: the agent is told, and its frame is refused
+  await call("get_view_state", {}, (t) => assert.match(t, /^  4 \(asked [^)]+\) about frame 12 of http\.pcapng, not the open capture: Which one is it\?$/m));
+  await call("answer_question", { text: "It is the second one", id: 4, frame: 3 }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /question 4 was about frame 12 of http\.pcapng, not the open capture \(odd-ports\.pcap\): frame would select a packet of the wrong capture/);
+  });
+  assert.equal((await viewState()).selected, null, "no packet of the open capture was selected");
+  await call("answer_question", { text: "It is the second one", id: 4 }, (t) => assert.match(t, /^Answered question 4 \(about frame 12 of http\.pcapng, not the open capture\); none waiting\. The question was about http\.pcapng, not the open capture: the user read it with the packet numbers of that capture/));
   await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" }, (t) => {
     assert.match(t, /^udp\.port 50000 now decodes as RTP \(before: no dissector, so heuristics or Data\)\. 5 frames match "rtp && udp\.port == 50000"\.$/m);
     assert.match(t, /^Decode As entries \(1, until WireBuddy exits\): udp\.port 50000 → rtp \(agent\)$/m);

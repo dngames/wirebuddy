@@ -5,13 +5,16 @@ import * as act from "../actions.ts";
 import { agentName, app, bus } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import type { MenuItem } from "../menu.ts";
+import { otherCapture } from "../../shared/questions.ts";
 import { fmtDateTime, h } from "../util.ts";
 
 let current: Dialog | null = null;
 
-/** What a question was about, as the page says packets: "packet 878", "3 packets", "" for none. */
+/** What a question was about, as the page says packets: "packet 878", "3 packets", "" for none; "packet 878 of tank.pcap" when it is not the open capture's. */
 export function aboutPackets(q: Question): string {
-  return q.count <= 0 || q.frame === null ? "" : q.count === 1 ? `packet ${q.frame}` : `${q.count} packets`;
+  const what = q.count <= 0 || q.frame === null ? "" : q.count === 1 ? `packet ${q.frame}` : `${q.count} packets`;
+  const other = otherCapture(q, app.state?.file ?? null);
+  return what && other ? `${what} of ${other}` : what;
 }
 
 /** The entry in the Tools menu. */
@@ -28,9 +31,11 @@ export function openQuestionsDialog(): void {
   d.body.append(list);
   // Only when the questions changed: a click on an entry must not land on one built again
   let shown: Question[] | undefined;
+  let openFile: string | null | undefined;
   const render = (): void => {
-    if (app.state?.questions === shown) return;
+    if (app.state?.questions === shown && app.state?.file === openFile) return;
     shown = app.state?.questions;
+    openFile = app.state?.file ?? null;
     const questions = [...(shown ?? [])].reverse();
     if (!questions.length) {
       list.replaceChildren(h("div", { class: "goto-hint" }, "No questions asked yet."));

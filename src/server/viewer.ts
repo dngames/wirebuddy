@@ -12,6 +12,7 @@ import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } f
 import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { aboutText, answered, openQuestion, withQuestion } from "./questions.ts";
+import { otherCapture } from "../shared/questions.ts";
 import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
@@ -1807,6 +1808,9 @@ export class Viewer extends EventEmitter {
    */
   answerQuestion(text: string, id?: number, frame?: number): Question {
     const question = openQuestion(this.state.questions, id);
+    const other = otherCapture(question, this.state.file);
+    // Its answer is welcome, but a packet of the open capture isn't what it was about
+    if (frame !== undefined && other) throw new Error(`question ${question.id} was about ${aboutText(question.frame, question.count)} of ${other}, not the open capture${this.state.file ? ` (${basename(this.state.file)})` : " (none is open)"}: frame would select a packet of the wrong capture; answer without frame`);
     const questions = answered(this.state.questions, question, text, Date.now());
     if (frame !== undefined) this.select(frame, "agent");
     this.store.set({ questions });
