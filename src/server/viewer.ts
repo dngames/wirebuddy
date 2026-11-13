@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { COLUMN_FIELD, matchingFrames, page, Sharkd, SharkdError, SharkdExit, type LuaReport } from "./sharkd.ts";
 import { Capture } from "./capture.ts";
 import { fileHead, looksLikeCapture, safeSize } from "./capturefile.ts";
+import { commentsOf, hasFrame, withCommentNode, withComments, type CommentsView, type Edited, type EditedComments } from "./comments.ts";
 import { applyChange, closeMatches, countFilter, parseChange, parseStatus, serialize, type EntryStatus } from "./decodeas.ts";
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { EventLog, ReportedError } from "./events.ts";
@@ -113,17 +114,7 @@ interface SharkdStatus {
 }
 
 /** A sharkd "frames" row: commented packets carry their comments. */
-type SharkdRow = PacketRow & { comments?: string[] };
-
-/**
- * A packet's comments as edited in the viewer, in place of the file's: the
- * first `own` of `list` are the file's own ones, all of them, unchanged (-1:
- * they aren't).
- */
-interface EditedComments {
-  list: string[];
-  own: number;
-}
+export type SharkdRow = PacketRow & { comments?: string[] };
 
 interface SharkdFrame {
   tree: TreeNode[];
@@ -153,17 +144,6 @@ const MAX_COMMENT = 2000;
 const INVESTIGATION_LIMITS = { marks: MAX_MARKS, note: MAX_NOTE, timeRefs: MAX_TIME_REFS, commented: MAX_COMMENTED, comment: MAX_COMMENT };
 /** How soon after a change the investigation is kept. */
 const KEEP_MS = 1000;
-/** Lines of a comment the details list, as Wireshark's frame.max_comment_lines. */
-const COMMENT_LINES = 30;
-/** Ranges of frames whose comments are read one by one, however big the capture. */
-const COMMENT_READS = 20;
-/** Frames a search for the commented ones costs about as much as reading one range's comments. */
-const COMMENT_READ_FRAMES = 100;
-/** Comments the list's rows carry, and characters of each. */
-const ROW_COMMENTS = 5;
-const ROW_COMMENT = 300;
-/** Wireshark's longest item label, in bytes. */
-const ITEM_LABEL_LENGTH = 240;
 const MAX_QUESTION = 2000;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
@@ -271,6 +251,15 @@ export class Viewer extends EventEmitter {
     anyMatch: (filters, release) => this.panelData.anyMatch(filters, release),
     isOpen: (name) => this.panels.isOpen(name),
   });
+  /** What reading the comments asks of this viewer. */
+  private readonly commentsView: CommentsView = {
+    totalFrames: () => this.state.totalFrames,
+    fileCommentsKnown: () => this.commentedFrames?.loads === this.loads,
+    fileCommented: () => this.fileCommented(),
+    engine: () => this.engine,
+    listedTail: () => this.listedTail,
+    rowView: () => this.rowView(),
+  };
   /** What Follow Stream and Export Objects ask of this viewer. */
   private readonly streamsView: StreamsView = {
     engine: () => this.engine,
@@ -2038,33 +2027,8 @@ export class Viewer extends EventEmitter {
     return this.unexported.size + this.clearedFrames.length - both;
   }
 
-  /** The comments `frames` (frames the view knows, ascending) have now: as edited here, else the file's. */
   private async commentsOf(frames: number[]): Promise<Map<number, EditedComments>> {
-    const out = new Map<number, EditedComments>();
-    const file = (f: number, list: string[]): void => void out.set(f, { list, own: list.length });
-    const read = this.state.totalFrames;
-    const exact: number[] = [];
-    const later: number[] = [];
-    for (const f of frames) {
-      const edited = this.comments.get(f);
-      if (edited) out.set(f, edited);
-      else if (f <= this.cleared) out.set(f, { list: [], own: 0 });
-      else (f <= read ? exact : later).push(f);
-    }
-    let ranges = toRanges(exact);
-    // Many ranges of a small capture: only the frames with comments are read
-    if (ranges.length > COMMENT_READS && (this.commentedFrames?.loads === this.loads || ranges.length * COMMENT_READ_FRAMES > read)) {
-      const commented = await this.fileCommented();
-      for (const f of exact) file(f, []);
-      ranges = toRanges(exact.filter((f) => hasFrame(commented, f)));
-    }
-    const engine = this.engine;
-    for (const [a, b] of ranges) {
-      for (const r of await engine.call<SharkdRow[]>("frames", { ...page(a - 1, b - a + 1), column0: "frame.number:0" })) file(r.num, r.comments ?? []);
-    }
-    const tail = this.listedTail;
-    if (later.length && tail) for (const r of await tail.rowsOf(later, await this.rowView())) file(r.num, r.cm ?? []);
-    return out;
+    return commentsOf(this.commentsView, this.edited(), frames);
   }
 
   /** Frames read in full that have comments in the file. */
@@ -2076,33 +2040,16 @@ export class Viewer extends EventEmitter {
     return frames;
   }
 
-  /** The comments edited here in place of frame `num`'s, or null. */
-  private editedOf(num: number): string[] | null {
-    return this.comments.get(num)?.list ?? (num <= this.cleared ? [] : null);
-  }
-
-  /** `rows` with their comments as edited here; `short`: as the list's rows carry them. */
   private withComments(rows: PacketRow[], short = false): PacketRow[] {
-    if (!this.comments.size && !this.cleared && !short) return rows;
-    return rows.map((r) => {
-      const { cm: file, ...row } = r;
-      const cm = this.editedOf(r.num) ?? file;
-      if (!cm?.length) return row;
-      return { ...row, cm: short ? cm.slice(0, ROW_COMMENTS).map((c) => (c.length > ROW_COMMENT ? `${c.slice(0, ROW_COMMENT - 1)}…` : c)) : cm };
-    });
+    return withComments(rows, this.edited(), short);
   }
 
-  /** Frame `num`'s `tree` with its comments as edited here, in Wireshark's "Packet comments" node. */
   private withCommentNode(num: number, tree: TreeNode[]): TreeNode[] {
-    const node = tree.find((n) => n.fn === "pkt_comment");
-    // As sharkd's own comment nodes expand
-    if (node?.e !== undefined) this.commentEtts.node = node.e;
-    const item = node?.n?.find((n) => n.e !== undefined);
-    if (item?.e !== undefined) this.commentEtts.item = item.e;
-    const cm = this.editedOf(num);
-    if (!cm) return tree;
-    const rest = tree.filter((n) => n !== node);
-    return cm.length ? [commentTree(cm, this.commentEtts), ...rest] : rest;
+    return withCommentNode(num, tree, this.edited(), this.commentEtts);
+  }
+
+  private edited(): Edited {
+    return { comments: this.comments, cleared: this.cleared };
   }
 
   /** Drops the comments edited for frames after `last`; what the state says then. */
@@ -3049,63 +2996,6 @@ function frameCount(frames: number[]): string {
 function noticeText(text: string): string {
   const line = printable(text.replace(/\n/g, " "));
   return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-}
-
-/**
- * Wireshark's "Packet comments" node: a comment of several lines shows its
- * first line, and each line under it. `ett`: the expansion ids of the node
- * and of its comments.
- */
-export function commentTree(comments: string[], ett: { node: number; item: number }): TreeNode {
-  const line = (text: string): TreeNode => ({ l: labelText(text), f: `frame.comment == ${filterString(text)}`, fn: "frame.comment" });
-  const comment = (text: string): TreeNode => {
-    const lines = text.split("\n");
-    if (lines.length === 1) return { ...line(text), s: "Comment", e: ett.item, n: [] };
-    if (lines[lines.length - 1] === "") lines.pop();
-    const n = lines.slice(0, COMMENT_LINES).map(line);
-    if (lines.length > COMMENT_LINES) n.push({ l: `[comment truncated at ${COMMENT_LINES} lines]`, f: 'frame.comment == ""', fn: "frame.comment" });
-    return { ...line(lines[0]), l: labelText(`${lines[0]} [...]`), s: "Comment", e: ett.item, n };
-  };
-  return { l: "Packet comments", t: "proto", f: "pkt_comment", fn: "pkt_comment", s: "Comment", e: ett.node, n: comments.map(comment) };
-}
-
-/** Escapes of control characters, as Wireshark writes them. */
-const ESCAPES: Record<string, string> = { "\u0007": "a", "\b": "b", "\f": "f", "\n": "n", "\r": "r", "\t": "t", "\v": "v" };
-
-/**
- * `text` as sharkd labels it: control characters escaped (\t, \x01, \u0085),
- * and cut to Wireshark's label length as proto.c does, behind "[…] ".
- */
-function labelText(text: string): string {
-  const label = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => {
-    const code = c.charCodeAt(0);
-    return `\\${ESCAPES[c] ?? `${code < 0x80 ? "x" : "u00"}${code.toString(16).toUpperCase().padStart(2, "0")}`}`;
-  });
-  const bytes = Buffer.from(label);
-  if (bytes.length < ITEM_LABEL_LENGTH) return label;
-  // The mark goes first, and the last character in the buffer, whole or not, goes
-  const cut = Buffer.concat([Buffer.from("[…] "), bytes.subarray(0, ITEM_LABEL_LENGTH - 6)]);
-  let end = ITEM_LABEL_LENGTH - 1;
-  while (end > 0 && (cut[end] & 0xc0) === 0x80) end--;
-  return cut.subarray(0, end).toString();
-}
-
-/** `text` as a display filter string, escaped as Wireshark does. */
-function filterString(text: string): string {
-  return `"${text.replace(/[\u0007\b\f\n\r\t\v\\"]/g, (c) => `\\${ESCAPES[c] ?? c}`)}"`;
-}
-
-/** Whether ascending `frames` hold `f`. */
-function hasFrame(frames: Int32Array, f: number): boolean {
-  let lo = 0;
-  let hi = frames.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (frames[mid] === f) return true;
-    if (frames[mid] < f) lo = mid + 1;
-    else hi = mid - 1;
-  }
-  return false;
 }
 
 /** Frame count and capture times of a capture's packets; `complete`: every packet up to the time asked for is there. */
