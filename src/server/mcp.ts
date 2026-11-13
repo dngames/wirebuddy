@@ -357,7 +357,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "open_capture",
     {
-      description: "Open a pcap/pcapng file in the viewer (replaces what the user sees; keeps the display filter if it still applies). The marks, time references and edited packet comments of the capture open before are kept with it, and the ones kept for this capture come back.",
+      description: "Open a pcap/pcapng file in the viewer (replaces what the user sees; keeps the display filter if it still applies, except one on frame.number when another capture opens: those numbers are the other capture's packets, so it is cleared and the user told). The marks, time references and edited packet comments of the capture open before are kept with it, and the ones kept for this capture come back.",
       inputSchema: { path: z.string().describe("Absolute path of the capture file") },
     },
     tool(async ({ path }) => {
@@ -365,7 +365,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const discarded = discardedComments(viewer.droppedEdits);
       viewer.notice(`Opened ${basename(path)}${discarded && ` (${discarded})`}`);
       const s = viewer.state;
-      return `Opened ${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s${s.filter ? `, filter "${s.filter}" shows ${s.displayedFrames}` : ""}${discarded && `; ${discarded}`}`;
+      const cleared = viewer.droppedFilter ? `; the display filter "${viewer.droppedFilter}" was cleared: frame.number names the packets of the capture open before` : "";
+      return `Opened ${s.file}: ${s.totalFrames} frames, ${s.duration.toFixed(3)} s${s.filter ? `, filter "${s.filter}" shows ${s.displayedFrames}` : ""}${cleared}${discarded && `; ${discarded}`}`;
     }, true, "view"),
   );
 

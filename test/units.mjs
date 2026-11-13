@@ -32,6 +32,7 @@ const { noLuaReason } = await import(join(out, "units.mjs"));
 const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
 const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
+const { usesFrameNumber } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -2231,6 +2232,10 @@ esac
     assert.deepEqual(markNode({ frame: 3, note: "", by: "agent" }, "Agent"), { l: "Marked by Agent", t: "proto" });
   });
 
+  await check("a display filter tests frame.number: found outside quotes, not in other names", () => {
+    for (const f of ["frame.number in {928, 943}", "tcp && frame.number > 10", "!(frame.number==3)"]) assert.equal(usesFrameNumber(f), true, f);
+    for (const f of ["", "tcp.port == 80", 'frame.comment contains "frame.number"', "myframe.number == 1", "frame.number_x == 1", "frame.numbers == 1"]) assert.equal(usesFrameNumber(f), false, f);
+  });
 } finally {
   rmSync(out, { recursive: true, force: true });
 }

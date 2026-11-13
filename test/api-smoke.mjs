@@ -1333,6 +1333,48 @@ try {
     }
   });
 
+  await check("opening another capture drops a display filter on frame.number and says so; the restore notice says how many marks the filter hides", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const [a, b, copy] = [join(dir, "a.pcapng"), join(dir, "b.pcapng"), join(dir, "copy of a.pcapng")];
+    writeFileSync(a, udpCapture(200, 7502));
+    writeFileSync(b, udpCapture(50, 7600));
+    copyFileSync(a, copy);
+    const s = await keptServer(own);
+    const filterOf = async () => (await s.api("/api/state")).json.filter;
+    try {
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      await s.api("/api/marks", { frames: [3, 5], note: "m" });
+      await s.api("/api/marks", { frames: [150], note: "" });
+      assert.equal((await s.api("/api/filter", { filter: "frame.number in {100, 101}" })).status, 200);
+      // The same capture (a reload, a copy of it): the filter stays
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal(await filterOf(), "frame.number in {100, 101}");
+      assert.equal((await s.api("/api/open", { path: copy })).status, 200);
+      assert.equal(await filterOf(), "frame.number in {100, 101}");
+      // Another one: its frame numbers are other packets
+      let since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: b })).status, 200);
+      assert.equal(await filterOf(), "");
+      assert.equal((await s.api("/api/state")).json.displayedFrames, 50);
+      assert.deepEqual((await eventsSince(s, since)).filter((t) => /display filter/.test(t)), ['INFO The display filter "frame.number in {100, 101}" names packets of copy of a.pcapng, so it was cleared for b.pcapng']);
+      // A filter that doesn't name them stays, and hides the marks that come back
+      assert.equal((await s.api("/api/filter", { filter: "udp.dstport == 7600" })).status, 200);
+      since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal(await filterOf(), "udp.dstport == 7600");
+      assert.deepEqual((await eventsSince(s, since)).filter((t) => /Restored|display filter/.test(t)), ["INFO Restored 3 marks kept for this capture; the display filter hides all of them"]);
+      // Some of them: the filter shows frame 3 only
+      assert.equal((await s.api("/api/filter", { filter: "frame.time_relative < 0.0035" })).status, 200);
+      since = await lastEvent(s);
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.deepEqual((await eventsSince(s, since)).filter((t) => /Restored/.test(t)), ["INFO Restored 3 marks kept for this capture; the display filter hides 2 of them"]);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   await check("investigation: a copy under another name gets the capture's; a shorter one drops what is past its packets; a tampered file is ignored whole and left alone", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
     const own = join(dir, "home");

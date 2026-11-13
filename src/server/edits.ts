@@ -33,6 +33,13 @@ const byFrame = (a: Mark, b: Mark): number => a.frame - b.frame;
 const tooManyMarks = (): Error => new Error(`at most ${MAX_MARKS} frames can be marked`);
 const tooManyRefs = (): Error => new Error(`at most ${MAX_TIME_REFS} frames can be time references`);
 
+const FRAME_NUMBER = /"(?:\\.|[^"\\])*"|(?<![\w.-])frame\.number(?![\w.-])/g;
+
+/** Whether `filter` tests frame.number (outside quotes): it names packets of the capture it was written for. */
+export function usesFrameNumber(filter: string): boolean {
+  return [...filter.matchAll(FRAME_NUMBER)].some((m) => !m[0].startsWith('"'));
+}
+
 /** Frame numbers for a sentence: the first `max`, then "..." */
 export function frameList(frames: number[], max = 20): string {
   return frames.slice(0, max).join(", ") + (frames.length > max ? ", ..." : "");

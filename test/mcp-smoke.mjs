@@ -409,7 +409,13 @@ try {
   // A protocol Wireshark knows on a port it doesn't expect: one decode_as call
   const oddPorts = join(out, "odd-ports.pcap");
   writeOddPortsCapture(oddPorts);
-  await call("open_capture", { path: oddPorts }, (t) => assert.match(t, /11 frames/));
+  // Frame numbers are the other capture's packets: that filter goes, and the result says so
+  await call("set_display_filter", { filter: "frame.number in {1, 2}" }, (t) => assert.match(t, /2 of/));
+  await call("open_capture", { path: oddPorts }, (t) => {
+    assert.match(t, /11 frames/);
+    assert.match(t, /; the display filter "frame\.number in \{1, 2\}" was cleared: frame\.number names the packets of the capture open before/);
+  });
+  await call("get_view_state", {}, (t) => assert.match(t, /^Display filter: \(none\)$/m));
   await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" }, (t) => {
     assert.match(t, /^udp\.port 50000 now decodes as RTP \(before: no dissector, so heuristics or Data\)\. 5 frames match "rtp && udp\.port == 50000"\.$/m);
     assert.match(t, /^Decode As entries \(1, until WireBuddy exits\): udp\.port 50000 → rtp \(agent\)$/m);
