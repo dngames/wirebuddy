@@ -41,7 +41,10 @@
  * `index` one of `frame`'s. Edits and deletes by `index` name the comment's
  * text as `old` and get 409 once it changed; `comment` "" deletes it.
  * `/api/comments/clear` deletes every comment in the capture, the file's too.
- * Edits of a capture closed meanwhile get 409. `/api/forget` (File › Forget
+ * Edits of a capture closed meanwhile get 409. `/api/marks` marks `frames`,
+ * else the rows `rows` (or the frame `frame`) of the list `view` showed, as
+ * the user's, with `note` (at most 200 characters; "" for none), replacing
+ * the marks they had. `/api/forget` (File › Forget
  * Kept Marks and Comments…) drops the open capture's marks, time
  * references and every comment edit, so that its packets read as the
  * capture file has them, and removes what was kept of them.
@@ -77,7 +80,7 @@
  * | GET    | /api/objects                  | ?kind=http\|imf\|smb\|tftp\|dicom\|ftp-data | ObjectList      |
  * | POST   | /api/objects/save             | { kind, dir, file, keys? } (409 if another capture is open) | ObjectSaveResult |
  * | GET    | /api/follow                   | ?proto=TCP\|UDP\|...&filter=         | FollowResult           |
- * | POST   | /api/marks                    | { frames, note }                     | { ok: true }           |
+ * | POST   | /api/marks                    | { note, frames } or { note, frame?, rows?, view } (409 if view is stale) | MarkResult |
  * | POST   | /api/marks/clear              | { frames? } (omit: clear all)        | { ok: true }           |
  * | POST   | /api/marks/toggle             |                                      | { ok: true }           |
  * | POST   | /api/marks/displayed          | { on: boolean }                      | { ok: true }           |
@@ -371,6 +374,13 @@ export interface Mark {
 export interface TimeRefsChange {
   set: number[];
   unset: number[];
+}
+
+/** What a mark request did: the frames now marked (the first 10000) and how many. */
+export interface MarkResult {
+  ok: true;
+  frames: number[];
+  count: number;
 }
 
 export interface AgentNotice {

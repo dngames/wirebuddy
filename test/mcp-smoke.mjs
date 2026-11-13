@@ -138,6 +138,8 @@ try {
   await call("mark_frames", { frames: [21, 25], note: "404 request/response" }, (t) => assert.match(t, /2 marked in total/));
   // The user's mark on a frame goes to the agent when it marks it: the result and the notice name the frames
   assert.equal((await post("/api/marks", { frames: [26, 27], note: "the user's note" })).status, 200);
+  // The agent hears of it once, with the note
+  await call("get_view_state", {}, (t) => assert.match(t, /INFO The user marked frames 26, 27 with the note "the user's note"\]?$/m));
   await call("mark_frames", { frames: [26, 27, 28], note: "the agent's note" }, (t) => assert.match(t, /^Marked 3 frame\(s\); replaced the user's mark \(and its note\) on frames 26, 27; \d+ marked in total/));
   await call("mark_frames", { frames: [26], note: "again" }, (t) => assert.doesNotMatch(t, /replaced/, "its own mark is not the user's"));
   assert.match((await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice.text, /^Marked 1 frame: again$/);

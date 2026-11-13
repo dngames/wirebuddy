@@ -55,6 +55,10 @@ The viewer itself works like Wireshark:
 - **Export Objects** as in Wireshark's File menu: list the files carried in HTTP, email (IMF),
   SMB, TFTP, DICOM and FTP traffic, go to their packets, and save them, each save into a new
   folder; the agent hears where, so you can ask it about them.
+- **Marks with a note:** Mark Packet (Ctrl+M) is the quick toggle; **Mark Packet with Note…** (the
+  packet list's menu and Edit) asks for a note, and on a marked packet reads **Edit Mark's Note…**.
+  The note shows in the row's tooltip, the first line of the packet's details, Go › Marked
+  Packets, exports and the findings report, and the agent hears of it.
 - **Packet comments** as in Wireshark's Edit › Packet Comments: add, edit and delete them, for
   you and the agent alike; the packet list marks commented packets, and pcapng exports (Save As)
   write the comments as edited.

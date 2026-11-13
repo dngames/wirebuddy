@@ -8,6 +8,7 @@ import { commands, item, type CommandId } from "./commands.ts";
 import { fieldCopyItems, fieldFilterItems } from "./details.ts";
 import { commentItems } from "./dialogs/comment.ts";
 import { followItems } from "./dialogs/follow.ts";
+import { markNoteItem } from "./dialogs/marknote.ts";
 import { objectItems } from "./dialogs/objects.ts";
 import { conversationFilters } from "./frame.ts";
 import { closeMenus, menuOpen, menuOwner, SEP, showMenu, toggleMenuAt, type MenuItem } from "./menu.ts";
@@ -116,7 +117,7 @@ const MENUS: TopMenu[] = [
     items: () => [
       { label: "Copy", sub: [...packetCopyItems(), SEP, ...fieldCopyItems()] },
       SEP,
-      ...items("find", "findNext", "findPrevious", SEP, "markToggle", "markAllDisplayed", "unmarkAllDisplayed", "unmarkAll", "nextMark", "previousMark", SEP, "timeRefToggle", "unsetTimeRefs", "nextTimeRef", "previousTimeRef"),
+      ...items("find", "findNext", "findPrevious", SEP, "markToggle", markNoteItem(), "markAllDisplayed", "unmarkAllDisplayed", "unmarkAll", "nextMark", "previousMark", SEP, "timeRefToggle", "unsetTimeRefs", "nextTimeRef", "previousTimeRef"),
       SEP,
       { label: "Packet Comments", sub: commentItems(), disabled: !commands.addComment.enabled() },
       item("deleteAllComments"),

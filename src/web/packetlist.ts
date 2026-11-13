@@ -19,6 +19,7 @@ import { commentItems } from "./dialogs/comment.ts";
 import { decodeAsItem } from "./dialogs/decodeas.ts";
 import { openExportDialog } from "./dialogs/export.ts";
 import { followItems } from "./dialogs/follow.ts";
+import { markNoteItem } from "./dialogs/marknote.ts";
 import { conversationFilters } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
 import { toastError } from "./toast.ts";
@@ -797,6 +798,7 @@ async function openRowMenu(i: number, x: number, y: number): Promise<void> {
       shortcut: keyLabel("Ctrl+M"),
       action: () => void act.toggleMarkSelected(),
     },
+    markNoteItem(),
     { label: n > 1 ? `Set/Unset Time References on ${n} Packets` : "Set/Unset Time Reference", action: () => void act.toggleTimeRefSelected() },
     { label: "Packet Comments", sub: commentItems(fd) },
     SEP,

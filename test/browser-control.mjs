@@ -453,6 +453,77 @@ try {
     await until("no mark line", async () => /^Frame 4:/.test(await first()));
   }).finally(() => call("clear_marks", {}));
 
+  await check("browser: Mark Packet with Note… in a packet's menu and the Edit menu marks as the user with the note; Edit Mark's Note… starts with it; several packets get one note", async () => {
+    const first = () => evaluate("document.querySelector('.dt-label')?.textContent");
+    const noteBox = (title) => evaluate(`document.querySelector('.dlg-marknote .dlg-title-text')?.textContent === ${JSON.stringify(title)} && document.activeElement?.closest('.dlg-marknote') !== null`);
+    const marks = async () => (await state()).marks.map((m) => `${m.frame} ${m.by} ${m.note}`);
+    const note = "this is where the kiosk showed the error";
+    await click(...center(await box(row(4))));
+    await until("frame 4's details", async () => (await state()).selected === 4 && /^Frame 4:/.test((await first()) ?? ""));
+    await fromMenu(4, "Mark Packet with Note");
+    await until("the dialog", () => noteBox("Mark Packet with Note"));
+    assert.equal(await evaluate("document.activeElement.value"), "");
+    assert.equal(await evaluate("document.activeElement.maxLength"), 200);
+    assert.match(await evaluate("document.querySelector('.dlg-marknote').textContent"), /Mark packet 4/);
+    await cdp("Input.insertText", { text: note });
+    await key("Enter", "Enter", 13);
+    await until("the mark", async () => (await marks()).join() === `4 user ${note}`);
+    await until("Enter to close the dialog", () => evaluate("!document.querySelector('.dlg-marknote')"));
+    await until("the note as the first line of the details", async () => (await first()) === `Marked: ${note}`);
+    assert.equal(await evaluate(`${row(4)}.title`).then((t) => t.includes(note)), true, "the row's tooltip");
+    // The agent hears of it once
+    assert.equal([...(await viewState()).matchAll(/INFO The user marked frame 4 with the note "this is where the kiosk showed the error"/g)].length, 1);
+    // Edit › Edit Mark's Note… on a marked packet; Cancel changes nothing
+    await fromMenuBar("Edit", "Edit Mark's Note");
+    await until("the dialog", () => noteBox("Edit Mark's Note"));
+    assert.equal(await evaluate("document.activeElement.value"), note);
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "not this" });
+    await click(...center(await box("[...document.querySelectorAll('.dlg-marknote button')].find((b) => b.textContent === 'Cancel')")));
+    await until("the dialog closed", () => evaluate("!document.querySelector('.dlg-marknote')"));
+    assert.deepEqual(await marks(), [`4 user ${note}`]);
+    // A menu title clicked right after its menu closed counts as the click that closed it
+    await sleep(400);
+    await fromMenuBar("Edit", "Edit Mark's Note");
+    await until("the dialog", () => noteBox("Edit Mark's Note"));
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "edited note" });
+    await click(...center(await box("[...document.querySelectorAll('.dlg-marknote button')].find((b) => b.textContent === 'OK')")));
+    await until("the edited note", async () => (await first()) === "Marked: edited note");
+    assert.deepEqual(await marks(), ["4 user edited note"]);
+    // The user's note replaces the agent's mark, and says so
+    await call("mark_frames", { frames: [4], note: "by the agent" });
+    await until("the agent's mark", async () => (await marks()).join() === "4 agent by the agent");
+    await fromMenu(4, "Edit Mark's Note");
+    await until("the dialog", () => noteBox("Edit Mark's Note"));
+    assert.equal(await evaluate("document.activeElement.value"), "by the agent");
+    assert.match(await evaluate("document.querySelector('.dlg-marknote').textContent"), /Agent marked it; your mark replaces its mark/);
+    await key("Enter", "Enter", 13);
+    await until("the user's mark", async () => (await marks()).join() === "4 user by the agent");
+    await call("clear_marks", {});
+    await until("no marks", async () => (await marks()).length === 0);
+    // Several selected: one note on all, one event
+    const shiftClick = async ([x, y]) => {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1, modifiers: 8 });
+      await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1, modifiers: 8 });
+    };
+    await click(...center(await box(row(6))));
+    await until("frame 6", async () => (await state()).selected === 6);
+    await shiftClick(center(await box(row(8))));
+    await until("three selected", async () => (await state()).selectedCount === 3);
+    await fromMenu(7, "Packets with Note");
+    await until("the dialog", () => noteBox("Mark Packet with Note"));
+    assert.match(await evaluate("document.querySelector('.dlg-marknote').textContent"), /Mark the 3 selected packets/);
+    await cdp("Input.insertText", { text: "the burst" });
+    await key("Enter", "Enter", 13);
+    await until("three marks", async () => (await marks()).join() === "6 user the burst,7 user the burst,8 user the burst");
+    assert.equal([...(await viewState()).matchAll(/INFO The user marked frames 6, 7, 8 with the note "the burst"/g)].length, 1);
+  }).finally(async () => {
+    if (await evaluate("!!document.querySelector('.dlg-marknote')")) await key("Escape", "Escape", 27);
+    await call("clear_marks", {});
+  });
+
   await check("browser: with the agent attached, an error the user runs into shows in the page and the agent hears it once, whether the server refused the request or only the page knew", async () => {
     const gone = join(home, "gone.pcapng");
     copyFileSync(join(root, "test/fixtures/http.pcapng"), gone);
