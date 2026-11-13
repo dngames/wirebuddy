@@ -4,7 +4,8 @@ What is known to be wrong, missing or untested in WireBuddy, kept current as ite
 Most of it comes from two investigations played through the tool in November 2026 by an agent on the MCP
 tools and a human in the page, neither knowing the cause: a shop kiosk with two faults in traffic Wireshark
 decodes ("case 1"), and a brewery's tank controller that speaks a protocol Wireshark does not decode
-("case 2"). "Replay" is the re-check of case 1's fixes in the page.
+("case 2"). "Replay" is the re-check of case 1's fixes in the page; "round 3" played the features the two
+cases had not touched (a restart, Decode As, TLS keys, Now held, the watcher, a flooded live capture).
 
 What the two cases showed about WireBuddy's use: an agent working alone finds the cause just as well with
 `sharkd`, and faster; the difference is the human, who with `sharkd` alone has nothing to look at, and with
@@ -42,24 +43,35 @@ items, so a gap in the numbering is an item that is done (section E).
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
 | A31 | polish | A reopened capture's panel briefly showed "0 samples" (a race on reset; not looked into) | case 2 |
 | A32 | polish | In a browser that can't isolate a panel, the warning about it is counted as "1 problem sent to Agent" in the status bar | case 2 |
+| A33 | fix | **After a restart of WireBuddy the open page is dead**: the new session has a new token, the page's reconnects get 403 for good, the old content stays on screen, and the only sign is a small "Offline · retry" in the status bar with no word to open the new URL | round 3 |
+| A34 | gap | A restart keeps marks, notes, time references, comments and extensions (and says so), but drops the display filter, the custom columns and the questions with their answers without a word; the recent files list is empty | round 3 |
+| A35 | fix | The server instructions' background watcher command names a state file of the session before the restart | round 3 |
+| A36 | fix | A question about packets (Ask Agent, Now) stays "waiting" with its packet number when another capture is opened or started; `answer_question` answers it without a warning, and the questions list shows "packet 400" without the capture's name (see also A14) | round 3 |
+| A37 | fix | `follow_stream` with TLS keys set: the default still shows ciphertext with no hint to ask for TLS or HTTP, and with protocol TLS the directions are labelled the wrong way round | round 3 |
+| A38 | fix | If the list changes while the Add Comment dialog is open (the agent sets a filter), saving fails and the typed text is lost | round 3 |
+| A39 | polish | The background watcher prints one line and exits, without the recent activity the instructions promise | round 3 |
+| A40 | gap | In a live capture too big to re-read each second the newest rows are not marked as provisional in the list; only the status bar says so, its text is cut, and its estimate goes stale once the traffic stops | round 3 |
+| A41 | polish | Holding Now gives no feedback but a red outline; the old "answered" banner sits under a new waiting line; the capture's packet counter and the list's count disagree during a flood; 409s in the browser console at a filter change and at stop (no visible effect) | round 3 |
+| A42 | fix | A Lua plugin in Wireshark's own plugin folder with the same protocol description as an extension makes one of them fail to load; only the reload says so, as a warning, and the extension test says "No Lua errors" | guide-only run |
+| A43 | polish | The extension guide does not say which Lua version runs, has no word on checksums (a CRC-16 in pure Lua), and does not list the buffer methods | guide-only run |
 
 ## B. Not exercised yet (what the tests did not do)
 
 | # | What | Status |
 |---|---|---|
 | B1 | A protocol Wireshark does not decode: the agent writing a dissector (extensions), a panel | **done in case 2** |
-| B2 | Decode As on traffic that really needs it (case 1's odd ports were decoded by Wireshark's heuristics; it was only tried on plain-text metrics; case 2 did not need it) | open |
-| B3 | Now button: hold to flag a span (only the tap was tried) | open |
-| B4 | The background watcher (`--watch`), so the agent reacts while the human works | open |
-| B5 | TLS decryption with a key log file | open |
-| B6 | A live capture too big to re-read every second (the provisional newest rows) | open |
+| B2 | Decode As on traffic that really needs it | **done in round 3**: worked for the human and the agent |
+| B3 | Now button held to flag a span | **done in round 3**: works; see A36, A41 |
+| B4 | The background watcher (`--watch`) | **done in round 3**: prints and exits within 100 ms; see A35, A39 |
+| B5 | TLS decryption with a key log file | **done in round 3**: readable for both; see A37 |
+| B6 | A live capture too big to re-read every second | **done in round 3**: 442,129 packets, 250 MB, about 5,200 a second; the page stayed responsive (a click 0.12 s, a filter change 2.1 s), the full read after the stop took 12 s; see A40 |
 | B7 | Export Objects, ring-buffer captures, a capture on `any` with another host's traffic on WireBuddy's port | open |
 | B8 | A baseline agent with `tshark` (the realistic rival; not installed here, the comparison used `sharkd`) | open |
 | B9 | macOS by hand (only CI on a hosted runner), Windows at all | open |
 | B10 | The mark notes and the answers in the page in a real investigation (built after case 1) | **done in case 2** |
-| B11 | Marks, comments, questions and the extension after a restart of WireBuddy itself (both cases only closed and reopened the capture) | open |
+| B11 | A restart of WireBuddy itself | **done in round 3**: see A33–A35 |
 | B12 | Open in Wireshark, and the page's own Expert Information and I/O Graphs with a custom protocol | open |
-| B13 | An agent that does not know Wireshark's Lua API writing the dissector from the guide alone (case 2's agent knew it); the guide has a TCP template now, unproven in real use | open |
+| B13 | An agent writing the dissector from the guide alone | **done**: a small model decoded case 2's protocol at the first attempt from the TCP template (its starting state was not blank: an earlier tester's plugin was still installed) |
 
 ## C. Our own checks
 
