@@ -29,6 +29,7 @@ const { refBefore, refsOf, refsUpTo, refsParam, framesWithRefs, refTimeFilter, r
 const { parseChange, applyChange, serialize, parseStatus, closeMatches, countFilter } = await import(join(out, "units.mjs"));
 const { checkPanel } = await import(join(out, "units.mjs"));
 const { noLuaReason } = await import(join(out, "units.mjs"));
+const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -2152,6 +2153,66 @@ try {
     assert.equal(noLuaReason(undefined), "this sharkd has no Lua support");
     assert.match(noLuaReason(0), /does not load Lua plugins when it runs as root.*ordinary user/);
   });
+
+  await check("capture filter: WireBuddy's own port between the loopback addresses is left out, the user's filter in brackets; none on interfaces that don't see loopback", () => {
+    const own = "tcp port 8765 and ((src host 127.0.0.1 and dst host 127.0.0.1) or (src host ::1 and dst host ::1))";
+    assert.equal(ownTrafficFilter(8765), own);
+    assert.equal(captureFilter("", null), "");
+    assert.equal(captureFilter(" tcp port 80 ", null), "tcp port 80");
+    assert.equal(captureFilter("", 8765), `not (${own})`);
+    assert.equal(captureFilter("udp or tcp port 80", 8765), `(udp or tcp port 80) and not (${own})`);
+    for (const [name, loopback, sees] of [["lo", true, true], ["lo0", true, true], ["lo", false, true], ["lo0", false, true], ["any", false, true], ["Loopback", true, true], ["eth0", false, false], ["en0", false, false], ["local", false, false], ["wlo1", false, false]]) {
+      assert.equal(seesLoopback({ name, loopback }), sees, `${name} ${loopback}`);
+    }
+  });
+
+  await check("capture: dumpcap gets the user's filter with WireBuddy's own port left out on loopback and any, the user's filter alone elsewhere; the state keeps the user's and says the port", async () => {
+    const dir = mkdtempSync(join(out, "cap-"));
+    const log = join(dir, "args.log");
+    const fake = join(dir, "dumpcap");
+    const iface = (name, loopback) => `{"${name}":{"friendly_name":null,"vendor_description":null,"addrs":[],"loopback":${loopback},"extcap":""}}`;
+    // -D lists lo, eth0 and any; -d compiles unless the filter says "bad", or is combined with "nocombine"; a capture writes its arguments and ends
+    writeFileSync(fake, `#!/bin/sh
+case " $* " in
+  *" -D "*) echo '[${iface("lo", true)},${iface("eth0", false)},${iface("any", false)}]' ;;
+  *" -d "*)
+    case "$*" in
+      *bad*) echo "dumpcap: Invalid capture filter \\"bad\\" for interface 'lo'!" >&2; exit 1 ;;
+      *nocombine*"not ("*) echo "dumpcap: combined is wrong" >&2; exit 1 ;;
+    esac
+    echo "(000) ret #1" ;;
+  *) echo "$*" >> "${log}" ;;
+esac
+`, { mode: 0o755 });
+    const cap = new Capture(join(dir, "caps"), fake);
+    const run = async (iface, filter) => {
+      rmSync(log, { force: true });
+      await cap.start({ iface, filter, autostop: {}, ring: null });
+      for (let i = 0; i < 100 && cap.running; i++) await new Promise((r) => setTimeout(r, 20));
+      return readFileSync(log, "utf8");
+    };
+    // Before the server knows its port: the filter as typed
+    assert.match(await run("lo", "tcp"), / -f tcp\n$/);
+    assert.equal(cap.state.leftOutPort, null);
+    cap.ownPort = 8765;
+    const own = ownTrafficFilter(8765);
+    assert.match(await run("lo", "tcp"), new RegExp(` -f \\(tcp\\) and not \\(${own.replace(/[().]/g, "\\$&")}\\)\\n$`));
+    assert.deepEqual([cap.state.filter, cap.state.leftOutPort], ["tcp", 8765]);
+    assert.ok((await run("any", "")).includes(` -f not (${own})\n`));
+    assert.deepEqual([cap.state.filter, cap.state.leftOutPort], ["", 8765]);
+    const eth = await run("eth0", "udp");
+    assert.match(eth, / -f udp\n$/);
+    assert.equal(cap.state.leftOutPort, null);
+    assert.doesNotMatch(await run("eth0", ""), / -f /);
+    // The filter is checked as dumpcap gets it; an error of the user's own filter doesn't show the combination
+    assert.deepEqual(await cap.checkFilter("lo", "tcp"), { ok: true });
+    const bad = await cap.checkFilter("lo", "bad");
+    assert.deepEqual([bad.ok, bad.error], [false, 'Invalid capture filter "bad" for interface \'lo\'!']);
+    const combined = await cap.checkFilter("lo", "nocombine");
+    assert.deepEqual([combined.ok, combined.error], [false, "WireBuddy's own traffic can't be left out of this capture: combined is wrong"]);
+    await assert.rejects(cap.start({ iface: "lo", filter: "nocombine", autostop: {}, ring: null }), /capture filter: WireBuddy's own traffic can't be left out/);
+  });
+
 } finally {
   rmSync(out, { recursive: true, force: true });
 }

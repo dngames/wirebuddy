@@ -69,7 +69,9 @@ The viewer itself works like Wireshark:
   text and renders as nothing else.
 - **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
   checked as you type, new files automatically, a ring buffer and stop conditions; the view
-  updates about once a second.
+  updates about once a second. On a loopback interface or `any`, WireBuddy's own traffic (the
+  page and the agent talking to its server, TCP on its port) is left out of the capture, or it
+  would record itself; your capture filter is combined with that, and says so when you start.
 
 ![WireBuddy screenshot: a reassembled HTTP response, with frames marked by the agent](docs/screenshot.png)
 

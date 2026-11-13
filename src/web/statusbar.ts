@@ -2,6 +2,7 @@
 
 import type { ExpertItem, ExpertSeverity, Mark, PanelOffer, ViewState } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
+import { leftOutText } from "../shared/ownport.ts";
 import { countRanges } from "../shared/ranges.ts";
 import { APP_NAME, get } from "./api.ts";
 import { agentName, app, bus, knownFrames } from "./app.ts";
@@ -187,7 +188,8 @@ export function createStatusBar(): HTMLElement {
       capSeg.hidden = false;
       capSeg.className = `sb-seg sb-cap ${st.cls}`;
       setText(capSeg, st.text);
-      setTitle(capSeg, st.text + where);
+      const own = c.leftOutPort === null ? "" : `\n${leftOutText(c.leftOutPort)}.`;
+      setTitle(capSeg, st.text + where + own);
     } else {
       capSeg.hidden = true;
     }

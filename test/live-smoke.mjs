@@ -7,7 +7,7 @@ import { createSocket } from "node:dgram";
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { Agent as HttpsAgent, createServer as createHttpsServer, request as httpsRequest } from "node:https";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -220,6 +220,56 @@ try {
     } finally {
       await api("/api/capture/stop", {});
       await waitIdle(6000);
+    }
+  });
+  await check("dumpcap gets the filter with WireBuddy's own port left out on loopback; the state keeps the filter as typed; the start says it", async () => {
+    const own = Number(new URL(base).port);
+    const started = await api("/api/capture/start", { iface: LOOPBACK, filter: ECHO, autostop: { durationSec: 3 }, ring: null });
+    try {
+      assert.equal(started.leftOutPort, own);
+      const c = (await state()).capture;
+      assert.deepEqual([c.filter, c.leftOutPort], [ECHO, own]);
+      const pid = await new Promise((resolve) => {
+        const ps = spawn("pgrep", ["-P", String(server.pid), "dumpcap"]);
+        let out = "";
+        ps.stdout.on("data", (d) => (out += d));
+        ps.on("exit", () => resolve(out.trim().split("\n")[0]));
+      });
+      assert.ok(pid, "dumpcap runs");
+      const command = execFileSync("ps", ["-o", "command=", "-p", pid], { encoding: "utf8" });
+      assert.ok(command.includes(` -f (${ECHO}) and not (tcp port ${own} and `), command);
+    } finally {
+      await api("/api/capture/stop", {});
+      await waitIdle(6000);
+    }
+    // Checked as dumpcap gets it, also where there are other interfaces than lo
+    assert.deepEqual(await api(`/api/capture/check?iface=${LOOPBACK}&filter=tcp`), { ok: true });
+    if ((await api("/api/capture/interfaces")).some((i) => i.name === "any")) assert.deepEqual(await api("/api/capture/check?iface=any&filter=tcp"), { ok: true });
+    assert.equal((await api(`/api/capture/check?iface=${LOOPBACK}&filter=icmpp`)).ok, false);
+  });
+  await check("a capture on loopback records no packet of WireBuddy's own port, and other TCP traffic on it", async () => {
+    const own = Number(new URL(base).port);
+    const other = createServer((socket) => socket.end("hello"));
+    await new Promise((r) => other.listen(0, "127.0.0.1", r));
+    const port = other.address().port;
+    try {
+      await api("/api/capture/start", { iface: LOOPBACK, filter: "tcp", autostop: { durationSec: 3 }, ring: null });
+      for (let i = 0; i < 100 && (await state()).capture.status !== "running"; i++) await sleep(150);
+      assert.equal((await state()).capture.status, "running", "dumpcap should be capturing");
+      // Requests to WireBuddy's own port, and a connection to another one
+      for (let i = 0; i < 5; i++) await state();
+      await new Promise((resolve, reject) => {
+        const socket = createConnection(port, "127.0.0.1", () => socket.on("data", () => {}).on("end", resolve));
+        socket.on("error", reject);
+      });
+      await waitIdle(8000);
+      await sleep(1200);
+      const frames = (filter) => api("/api/filter", { filter }).then(() => state()).then((s) => s.displayedFrames);
+      assert.ok((await frames(`tcp.port == ${port}`)) >= 3, "the other connection is recorded");
+      assert.equal(await frames(`tcp.port == ${own}`), 0, "WireBuddy's own port is not");
+      await api("/api/filter", { filter: "" });
+    } finally {
+      other.close();
     }
   });
   await check("capture options that don't fit together are refused", async () => {
@@ -481,7 +531,9 @@ try {
       const started = await tool("start_capture", { interface: LOOPBACK, filter: ECHO, stop_after_seconds: 3 });
       sender = echo(8);
       assert.match(started, new RegExp(`^Capturing on ${LOOPBACK} with the capture filter .* into .*\\.pcapng\\. The view follows it live`));
+      assert.match(started, /with the capture filter "[^"]*" \(WireBuddy's own traffic \(TCP port \d+\) is left out\) into /);
       assert.match(await tool("get_view_state", {}), /Capture \(started by agent\): running/);
+      assert.match(await tool("get_view_state", {}), /with capture filter "[^"]*" \(WireBuddy's own traffic \(TCP port \d+\) is left out\), \d+ packets/);
       await assert.rejects(tool("start_capture", { interface: LOOPBACK }), /already running/);
       let view = "";
       for (let i = 0; i < 40 && !/Capture \(started by agent\): idle/.test(view); i++) {

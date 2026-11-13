@@ -41,6 +41,29 @@ export function interfaceSignature(netDir = "/sys/class/net", listNames: () => s
     .join(",");
 }
 
+/**
+ * BPF for the traffic between WireBuddy's page (or an agent) and its server:
+ * TCP on its port between the loopback addresses it listens on. Only network
+ * and transport primitives, which libpcap compiles for Ethernet (lo), Linux
+ * cooked capture (any) and the null link of lo0 alike; the addresses keep
+ * another host's traffic on that port, seen on a real interface of `any`.
+ */
+export function ownTrafficFilter(port: number): string {
+  return `tcp port ${port} and ((src host 127.0.0.1 and dst host 127.0.0.1) or (src host ::1 and dst host ::1))`;
+}
+
+/** The capture filter dumpcap gets: the user's (in brackets) without WireBuddy's own traffic on `leaveOut`'s port; "" for no filter. */
+export function captureFilter(user: string, leaveOut: number | null): string {
+  user = user.trim();
+  if (leaveOut === null) return user;
+  return user ? `(${user}) and not (${ownTrafficFilter(leaveOut)})` : `not (${ownTrafficFilter(leaveOut)})`;
+}
+
+/** Whether a capture on `iface` records the loopback traffic WireBuddy's page makes: loopback interfaces (lo, lo0), and any, which includes them. */
+export function seesLoopback(iface: Pick<CaptureInterface, "name" | "loopback">): boolean {
+  return iface.loopback || iface.name === "any" || /^lo\d*$/.test(iface.name);
+}
+
 /** Files of a capture the state lists. */
 const MAX_FILES_LISTED = 100;
 
@@ -58,6 +81,8 @@ function positiveInt(value: unknown, name: string): number | undefined {
  */
 export class Capture extends EventEmitter {
   state: CaptureState;
+  /** The port WireBuddy's own server listens on, set once it does: captures that see loopback traffic leave it out. */
+  ownPort: number | null = null;
   private proc: ChildProcess | null = null;
   private starting = false;
   private stopRequested = false;
@@ -84,6 +109,7 @@ export class Capture extends EventEmitter {
       autostop: {},
       ring: null,
       promiscuous: true,
+      leftOutPort: null,
       currentFile: null,
       files: [],
       filesWritten: 0,
@@ -123,19 +149,37 @@ export class Capture extends EventEmitter {
     return list;
   }
 
-  private async requireInterface(iface: string): Promise<void> {
-    const list = await this.interfaces();
-    if (!list.some((i) => i.name === iface)) throw new Error(`unknown interface "${iface}"`);
+  private async requireInterface(iface: string): Promise<CaptureInterface> {
+    const info = (await this.interfaces()).find((i) => i.name === iface);
+    if (!info) throw new Error(`unknown interface "${iface}"`);
+    return info;
+  }
+
+  /** The port of WireBuddy's own traffic a capture on `iface` leaves out; null where there is none. */
+  private leftOut(iface: CaptureInterface): number | null {
+    return this.ownPort !== null && seesLoopback(iface) ? this.ownPort : null;
   }
 
   /** Compiles the capture filter for the interface without capturing. */
   async checkFilter(iface: string, filter: string): Promise<FilterCheck> {
     if (!filter.trim()) return { ok: true };
     try {
-      await this.requireInterface(iface);
+      return await this.checkGiven(await this.requireInterface(iface), filter.trim());
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
+  }
+
+  /** Compiles what dumpcap gets for the user's `filter` (also none) on `iface`; an error of the user's own filter says so alone. */
+  private async checkGiven(iface: CaptureInterface, filter: string): Promise<FilterCheck> {
+    const given = captureFilter(filter, this.leftOut(iface));
+    const check = await this.compile(iface.name, given);
+    if (check.ok || given === filter) return check;
+    const alone = filter ? await this.compile(iface.name, filter) : check;
+    return alone.ok || !filter ? { ok: false, error: `WireBuddy's own traffic can't be left out of this capture: ${check.error}` } : alone;
+  }
+
+  private async compile(iface: string, filter: string): Promise<FilterCheck> {
     const { stdout, stderr } = await run(this.bin, ["-i", iface, "-f", filter, "-d"], 5000);
     if (stdout.includes("(000)")) return { ok: true };
     const message = stderr
@@ -153,7 +197,7 @@ export class Capture extends EventEmitter {
     this.starting = true;
     this.stopRequested = false;
     let args: string[];
-    let settings: Pick<CaptureState, "iface" | "filter" | "autostop" | "ring" | "promiscuous">;
+    let settings: Pick<CaptureState, "iface" | "filter" | "autostop" | "ring" | "promiscuous" | "leftOutPort">;
     try {
       ({ args, settings } = await this.prepare(req));
     } finally {
@@ -230,10 +274,13 @@ export class Capture extends EventEmitter {
 
   /** Validates a request and builds the dumpcap command line. */
   private async prepare(req: CaptureRequest) {
-    await this.requireInterface(req.iface);
+    const info = await this.requireInterface(req.iface);
     const filter = (req.filter ?? "").trim();
-    if (filter) {
-      const check = await this.checkFilter(req.iface, filter);
+    const leftOutPort = this.leftOut(info);
+    // What dumpcap gets, checked as such: the user's filter, and the exclusion of WireBuddy's own traffic
+    const given = captureFilter(filter, leftOutPort);
+    if (given) {
+      const check = await this.checkGiven(info, filter);
       if (!check.ok) throw new Error(`capture filter: ${check.error}`);
     }
     const autostop = {
@@ -269,7 +316,7 @@ export class Capture extends EventEmitter {
     const promiscuous = req.promiscuous !== false;
     const args = ["-i", req.iface, "-w", target];
     if (!promiscuous) args.push("-p");
-    if (filter) args.push("-f", filter);
+    if (given) args.push("-f", given);
     if (autostop.durationSec) args.push("-a", `duration:${autostop.durationSec}`);
     if (autostop.filesizeKB) args.push("-a", `filesize:${autostop.filesizeKB}`);
     if (autostop.packets) args.push("-a", `packets:${autostop.packets}`);
@@ -281,7 +328,7 @@ export class Capture extends EventEmitter {
       if (ring.packets) args.push("-b", `packets:${ring.packets}`);
       if (ring.intervalSec) args.push("-b", `interval:${ring.intervalSec}`);
     }
-    return { args, settings: { iface: req.iface, filter, autostop, ring, promiscuous } };
+    return { args, settings: { iface: req.iface, filter, autostop, ring, promiscuous, leftOutPort } };
   }
 
   /**

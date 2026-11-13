@@ -1,6 +1,7 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
 import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, Mark, ViewState } from "../shared/api.ts";
+import { leftOutText } from "../shared/ownport.ts";
 import type { Ranges } from "../shared/ranges.ts";
 import { errorText, get, HttpError, post } from "./api.ts";
 import { app, bus, captureActive, hooks, knownFrames } from "./app.ts";
@@ -530,7 +531,8 @@ export async function startCapture(req: CaptureRequest, asked = false): Promise<
   // The view opens the capture's file
   if (!asked && !(await discardComments("starting a capture"))) return false;
   try {
-    await post("api/capture/start", req);
+    const started = await post<{ leftOutPort: number | null }>("api/capture/start", req);
+    if (started?.leftOutPort != null) toast("info", `${leftOutText(started.leftOutPort)} of this capture`);
     if (app.conn !== "open") void refreshState();
     return true;
   } catch (e) {

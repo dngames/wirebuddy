@@ -8,6 +8,7 @@ import { eventLines } from "./events.ts";
 import type { HttpServer } from "./http.ts";
 import { checkPanel, type PanelCheck } from "./panelcheck.ts";
 import type { PanelReport } from "./panels.ts";
+import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, TreeNode } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
@@ -425,7 +426,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       if (s.panelOffers.length) lines.push(`Panels offered to the user in the status bar: ${s.panelOffers.slice(0, 3).map((o) => `${o.name} ("${o.text}")`).join(", ")}${s.panelOffers.length > 3 ? ` (${s.panelOffers.length - 3} more not shown)` : ""}`);
       if (c.status !== "idle" || c.filesWritten) {
         const elapsed = c.startedAt ? ` for ${((Date.now() - c.startedAt) / 1000).toFixed(0)} s` : "";
-        lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
+        lines.push(`Capture (started by ${c.startedBy ?? "user"}): ${c.status}${elapsed} on ${c.iface}${c.filter ? ` with capture filter "${c.filter}"` : ""}${c.leftOutPort === null ? "" : ` (${leftOutText(c.leftOutPort)})`}, ${c.packets} packets${c.error ? `, error: ${c.error}` : ""}`);
         const active = c.status === "starting" || c.status === "running" || c.status === "stopping";
         const ring = c.ring ? ` (${c.ring.files ? `ring buffer of ${c.ring.files} files` : "new files automatically"}, ${c.filesWritten} written)` : "";
         if (c.currentFile) lines.push(`  ${active ? "writing" : "last file:"} ${c.currentFile}${ring}`);
@@ -991,7 +992,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         "Start a live capture with dumpcap, like Wireshark's Capture Options, when the user asks for one. The view opens the new file and follows it live. Without a stop condition it runs until stop_capture or the user stops it.",
       inputSchema: {
         interface: z.string().describe("Interface name from list_interfaces, e.g. \"lo\" or \"eth0\" (macOS: \"lo0\", \"en0\")"),
-        filter: z.string().default("").describe("Capture filter in BPF syntax (tcp port 80), not display-filter syntax"),
+        filter: z.string().default("").describe("Capture filter in BPF syntax (tcp port 80), not display-filter syntax. On a loopback interface or any, WireBuddy's own traffic (its TCP port) is left out in addition to this filter"),
         promiscuous: z.boolean().default(true).describe("false: only traffic to and from this host"),
         stop_after_seconds: z.number().int().min(1).optional(),
         stop_after_packets: z.number().int().min(1).optional(),
@@ -1011,10 +1012,11 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
       const ring = Object.values(newFile).some((v) => v !== undefined) || a.ring_files !== undefined ? { ...newFile, files: a.ring_files } : null;
       const autostop = { durationSec: a.stop_after_seconds, packets: a.stop_after_packets, filesizeKB: a.stop_after_kb, files: a.stop_after_files };
       await viewer.capture.start({ iface: a.interface, filter: a.filter, promiscuous: a.promiscuous, autostop, ring }, "agent");
-      viewer.notice(`Started a capture on ${a.interface}${discarded && ` (${discarded})`}`);
+      const own = viewer.capture.state.leftOutPort;
+      viewer.notice(`Started a capture on ${a.interface}${discarded && ` (${discarded})`}${own === null ? "" : `; ${leftOutText(own)}`}`);
       const c = await captureSettled(viewer, 3000);
       if (c.status === "error") throw new Error(`the capture failed: ${c.error ?? "unknown error"}`);
-      const how = `${a.interface}${c.filter ? ` with the capture filter "${c.filter}"` : ""}${c.promiscuous ? "" : ", not promiscuous"}`;
+      const how = `${a.interface}${c.filter ? ` with the capture filter "${c.filter}"` : ""}${c.promiscuous ? "" : ", not promiscuous"}${c.leftOutPort === null ? "" : ` (${leftOutText(c.leftOutPort)})`}`;
       const lost = discarded && ` The view opened its file: ${discarded}.`;
       if (c.status === "starting") return `The capture on ${how} is starting; get_view_state shows when it runs.${lost}`;
       if (c.status === "idle") return `The capture on ${how} already ended: ${c.packets} packets in ${c.currentFile ?? "no file"}.${lost}`;
