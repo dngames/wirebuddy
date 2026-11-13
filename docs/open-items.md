@@ -10,8 +10,8 @@ What the two cases showed about WireBuddy's use: an agent working alone finds th
 `sharkd`, and faster; the difference is the human, who with `sharkd` alone has nothing to look at, and with
 WireBuddy reads the decoded packets, follows the agent's marks and filters live, and gets an answer in the page.
 
-Legend: **fix** wrong or misleading today · **gap** missing · **polish** small. "In work" means a fix is
-written and waits for review or for its pull request.
+Legend: **fix** wrong or misleading today · **gap** missing · **polish** small. Numbers stay with their
+items, so a gap in the numbering is an item that is done (section E).
 
 ## A. To fix or build, from real use
 
@@ -29,7 +29,6 @@ written and waits for review or for its pull request.
 | A10 | gap | Follow Stream shows no timestamps, so a 5 s wait inside a conversation is invisible there | case 1 |
 | A11 | polish | Findings report: lists the current display filter as a fact of the capture; a time reference appears only as a packet number; covers only the open capture | case 1 |
 | A12 | polish | Analyze › Apply as Column is greyed out until a field is selected, with no hint why | case 1 |
-| A13 | fix | `--capture-dir`: a folder that can't be created still says a bare `EACCES` (the other refused writes now name the user) — **in work** | fixes for case 1 |
 | A14 | gap | An open question stays "waiting" for good when the agent detaches; a question's packet can't be selected from the list once another capture is open | mark notes / answers |
 | A15 | gap | "Mark Packet with Note…" has no keyboard shortcut (the Ctrl+M family is taken) | mark notes / answers |
 | A16 | fix | A menu title clicked within 300 ms of its menu closing is swallowed | mark notes / answers (seen while testing) |
@@ -37,14 +36,7 @@ written and waits for review or for its pull request.
 | A18 | polish | A user capture filter with `vlan` shifts the offsets of what follows it, the own-traffic exclusion included (irrelevant on `lo` and `any`, noted for completeness) | fixes for case 1 |
 | A19 | fix | A crash report from the active engine while the standby loads makes that load retry once more than needed | engine session work |
 
-| A20 | gap | **The extension guide has no template for a protocol over TCP**: nothing on messages split across segments or several per segment. It worked in case 2 only because the agent knew that part of the Lua API — **in work** | case 2 |
-| A21 | gap | Several messages in one packet make every field multi-valued: a filter matches when any value matches, a column shows them all. The guide does not warn or say what helps — **in work** | case 2 |
-| A22 | fix | A panel outlives its capture: after File › Close it keeps a stale chart, its next request fails with "no capture is open", and that counts as a problem sent to the agent — **in work** | case 2 |
-| A23 | gap | The panel guide does not say that following a live capture is the panel's own job (and that keying on a client's port breaks in the next run) — **in work** | case 2 |
 | A24 | gap | A panel floats over the packet list and hides the columns the filter was set up to show; it can be maximized or closed, not docked | case 2 |
-| A25 | fix | After applying a display filter with no capture running, the list shows its last row, not the selected packet or the top — **in work** (to be reproduced first) | case 2 |
-| A26 | polish | `extensions` test reports packets per protocol but not what stayed undecoded, so segments of reassembled messages look like a hole — **in work** | case 2 |
-| A27 | polish | README says "Questions to Claude…", the page says "Questions to Agent…" when the agent gave no name — **in work** | case 2 |
 | A28 | gap | The findings report leaves out the questions and answers of the session (and still covers only the open capture, see A11) | case 2 |
 | A29 | gap | Nothing in the page tells the human that the agent has seen a question or is working on it; the agent hears a question only with its next tool call unless it runs the background watcher | case 2 |
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
@@ -67,7 +59,7 @@ written and waits for review or for its pull request.
 | B10 | The mark notes and the answers in the page in a real investigation (built after case 1) | **done in case 2** |
 | B11 | Marks, comments, questions and the extension after a restart of WireBuddy itself (both cases only closed and reopened the capture) | open |
 | B12 | Open in Wireshark, and the page's own Expert Information and I/O Graphs with a custom protocol | open |
-| B13 | An agent that does not know Wireshark's Lua API writing the dissector from the guide alone (case 2's agent knew it) | open; re-run after A20 is in |
+| B13 | An agent that does not know Wireshark's Lua API writing the dissector from the guide alone (case 2's agent knew it); the guide has a TCP template now, unproven in real use | open |
 
 ## C. Our own checks
 
@@ -95,3 +87,9 @@ replaced · a mark is the first line of the details, notes in full in Go › Mar
 filter cleared when another capture opens, restored marks hidden by the filter are counted · `expert_info`
 counts as the dialog does · refused writes name the user · hint for a set without commas (all PR 21, on main).
 A note on the human's own mark · questions and answers in the page (`answer_question`) (PR 22, on main).
+From case 2: a template for a protocol over TCP in the extension guide, proven on batched and split messages
+(A20) · the guide on fields with several values in a packet (A21) · a panel's read after its capture closed
+is no longer a problem reported to the agent, and the guide says what a panel sees then (A22) · the panel
+guide on following a live capture (A23) · a new display filter shows the selected packet or the top, not the
+end (A25) · the extension test says what stayed undecoded (A26) · the README's name for the questions dialog
+(A27) · the capture folder's refused creation names the user (A13).
