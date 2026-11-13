@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -36,6 +36,7 @@ const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, 
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { Edits, marksWith, marksWithout, toggledMarks, displayedMarks, refsWith, toggledRefs, refsChange, commentText, commentAt, MAX_MARKS, MAX_NOTE, MAX_TIME_REFS, StaleGenerationError } = await import(join(out, "units.mjs"));
+const { EngineSession, SharkdExit } = await import(join(out, "units.mjs"));
 const { codeSpan, cell, quote, escapeLine, checkSummary, MAX_SUMMARY_BYTES, buildFindings, checkReportTarget, writeReport, MAX_LISTED, MAX_REPORT_BYTES, TargetExists } = await import(join(out, "units.mjs"));
 
 const { check, finish } = suite();
@@ -1883,6 +1884,266 @@ try {
     assert.equal(listChanged({ file: "a", filter: "", generation: 4 }, { file: "a", filter: "", rowsSince: 5 }), true);
     assert.equal(listChanged({ file: "a", filter: "" }, { file: "a", filter: "", rowsSince: 5 }), false);
     assert.equal(listChanged({ file: "b", filter: "" }, { file: "a", filter: "", rowsSince: 0 }), true);
+  });
+
+  /** A sharkd stand-in for the engine session: `answer(method, params)` answers each call (or throws), and what it was asked is kept. */
+  function fakeEngine(name, answer = () => ({})) {
+    return {
+      name,
+      calls: [],
+      prefs: [],
+      forgot: 0,
+      closed: 0,
+      restarts: 0,
+      loaded: false,
+      stale: false,
+      onFailure: () => {},
+      onLua: () => {},
+      onLuaError: () => {},
+      async call(method, params) {
+        this.calls.push(params?.filter !== undefined ? `${method} ${params.filter}` : method);
+        return answer(method, params, this);
+      },
+      async setPref(n, v) {
+        this.prefs.push(`${n}=${v}`);
+      },
+      forgetFile() {
+        this.forgot++;
+      },
+      close() {
+        this.closed++;
+      },
+      outdated() {
+        return this.stale;
+      },
+      async idle() {},
+      restart() {
+        this.restarts++;
+        this.loaded = false;
+      },
+    };
+  }
+  /** A session over two fakes, with extensions that `any`, `revert` and `suspend` as told, and what it told. */
+  function session({ answer, any = true, revert = true, cumulative = false } = {}) {
+    const made = [];
+    const told = { failures: [], lua: [], luaErrors: [], problems: [], ext: [] };
+    const extensions = {
+      any: () => any,
+      saved: () => "before",
+      revert: () => (told.ext.push("revert"), revert),
+      suspend: () => told.ext.push("suspend"),
+      restore: (s) => told.ext.push(`restore ${s}`),
+    };
+    const s = new EngineSession(
+      () => {
+        const e = fakeEngine(made.length ? "b" : "a", answer);
+        made.push(e);
+        return e;
+      },
+      { onFailure: (m) => told.failures.push(m), onLua: (r) => told.lua.push(r), onLuaError: (e) => told.luaErrors.push(e) },
+      { extensions, cumulativeBytes: () => cumulative, problem: (t) => told.problems.push(t) },
+    );
+    return { s, made, told };
+  }
+  const loads = (status = { frames: 3, columns: ["No."] }) => (method) => (method === "load" ? { status: "OK" } : method === "status" ? status : [{ num: 2 }]);
+
+  await check("engine session: the exclusive queue runs in order, one at a time, and goes on after a rejection", async () => {
+    const { s } = session();
+    const seen = [];
+    let running = 0;
+    const job = (name, fail = false) => async () => {
+      assert.equal(running++, 0, `${name} ran beside another`);
+      seen.push(`start ${name}`);
+      await new Promise((r) => setTimeout(r, 5));
+      seen.push(`end ${name}`);
+      running--;
+      if (fail) throw new Error(`${name} failed`);
+      return name;
+    };
+    const a = s.exclusive(job("a"));
+    const b = s.exclusive(job("b", true));
+    const c = s.exclusive(job("c"));
+    assert.equal(await a, "a");
+    await assert.rejects(b, /b failed/);
+    assert.equal(await c, "c");
+    assert.deepEqual(seen, ["start a", "end a", "start b", "end b", "start c", "end c"]);
+    // a function that throws at once rejects its own promise only
+    await assert.rejects(
+      s.exclusive(() => {
+        throw new Error("sync");
+      }),
+      /sync/,
+    );
+    assert.equal(await s.exclusive(async () => 7), 7);
+  });
+
+  await check("engine session: two engines, hooks wired to each, swap to the standby or a given engine, never to a stranger; forgetFile and close reach both", async () => {
+    const { s, made, told } = session();
+    const [a, b] = made;
+    assert.equal(made.length, 2);
+    assert.equal(s.active, a);
+    assert.equal(s.standby, b);
+    s.swap();
+    assert.equal(s.active, b);
+    assert.equal(s.standby, a);
+    s.swap(b);
+    assert.equal(s.active, b, "swapping to the active one keeps it");
+    s.swap(a);
+    assert.equal(s.active, a);
+    assert.throws(() => s.swap(fakeEngine("x")), /not an engine of this session/);
+    assert.equal(s.active, a);
+    b.onFailure("sharkd exited (code 1)");
+    a.onLua({ loaded: [], failed: [] });
+    b.onLuaError({ frame: 4, message: "boom" });
+    assert.deepEqual(told.failures, ["sharkd exited (code 1)"]);
+    assert.equal(told.lua.length, 1);
+    assert.deepEqual(told.luaErrors, [{ frame: 4, message: "boom" }]);
+    s.forgetFile();
+    s.close();
+    assert.deepEqual([a.forgot, b.forgot, a.closed, b.closed], [1, 1, 1, 1]);
+  });
+
+  await check("engine session: a preference reaches both engines and is remembered, the last value of each, for an engine started later", async () => {
+    const { s, made } = session();
+    await s.setPref("tls.keylog_file", "/k1");
+    await s.setPref("wirebuddy.decode_as", "x");
+    await s.setPref("tls.keylog_file", "");
+    for (const e of made) assert.deepEqual(e.prefs, ["tls.keylog_file=/k1", "wirebuddy.decode_as=x", "tls.keylog_file="]);
+    assert.deepEqual([...s.prefs()], [["tls.keylog_file", ""], ["wirebuddy.decode_as", "x"]]);
+    const later = fakeEngine("later");
+    for (const [n, v] of s.prefs()) await later.setPref(n, v);
+    assert.deepEqual(later.prefs, ["tls.keylog_file=", "wirebuddy.decode_as=x"]);
+    // a failing engine fails the call, the value stays remembered
+    made[1].setPref = async () => {
+      throw new Error("x: refused");
+    };
+    await assert.rejects(s.setPref("x", "1"), /x: refused/);
+    assert.equal(s.prefs().get("x"), "1");
+  });
+
+  await check("engine session: load reads the file, its status and the filter's frames; a cut-off file loads, other statuses throw; a filter that doesn't compile is dropped only with fallback", async () => {
+    const { s, made } = session({ answer: loads() });
+    const [a] = made;
+    const r = await s.load(a, "/c.pcap", "tcp", []);
+    assert.deepEqual({ ...r, displayed: Array.from(r.displayed) }, { status: { frames: 3, columns: ["No."] }, displayed: [2], filter: "tcp", rolledBack: false });
+    assert.deepEqual(a.calls, ["load", "status", "frames tcp"]);
+    const all = await s.load(a, "/c.pcap", "", []);
+    assert.equal(all.displayed, null);
+    // frame.ref_time stands for the time references
+    a.calls = [];
+    await s.load(a, "/c.pcap", "frame.ref_time", [4]);
+    assert.equal(a.calls[2], `frames ${refTimeFilter("frame.ref_time", [4])}`);
+    assert.notEqual(a.calls[2], "frames frame.ref_time");
+    const cut = session({ answer: (m) => (m === "load" ? { status: "short read", err: -12 } : m === "status" ? { frames: 1, columns: [] } : []) });
+    assert.equal((await cut.s.load(cut.made[0], "/c.pcap", "", [])).status.frames, 1);
+    const bad = session({ answer: (m) => (m === "load" ? { status: "Unknown file format" } : {}) });
+    await assert.rejects(bad.s.load(bad.made[0], "/c.pcap", "", []), (err) => err.constructor === Error && err.message === "Unknown file format");
+    const nofilter = (m) => {
+      if (m === "frames") throw new SharkdError("invalid filter", -1);
+      return loads()(m);
+    };
+    const nf = session({ answer: nofilter });
+    await assert.rejects(nf.s.load(nf.made[0], "/c.pcap", "gone", []), SharkdError);
+    const dropped = await nf.s.load(nf.made[0], "/c.pcap", "gone", [], { fallback: true });
+    assert.deepEqual([dropped.filter, dropped.displayed, dropped.rolledBack], ["", null, false]);
+  });
+
+  await check("engine session: an engine that is outdated, or loaded with Cumulative Bytes columns, restarts before a load", async () => {
+    const plain = session({ answer: loads() });
+    const [a] = plain.made;
+    a.loaded = true;
+    await plain.s.load(a, "/c.pcap", "", []);
+    assert.equal(a.restarts, 0, "a loaded engine without %B keeps running");
+    a.stale = true;
+    await plain.s.load(a, "/c.pcap", "", []);
+    assert.equal(a.restarts, 1);
+    const cumulative = session({ answer: loads(), cumulative: true });
+    const [c] = cumulative.made;
+    await cumulative.s.load(c, "/c.pcap", "", []);
+    assert.equal(c.restarts, 0, "not loaded yet");
+    c.loaded = true;
+    await cumulative.s.current(c);
+    assert.equal(c.restarts, 0, "only before a load");
+    await cumulative.s.load(c, "/c.pcap", "", []);
+    assert.equal(c.restarts, 1);
+  });
+
+  await check("engine session: crash retries go again after each extension that crashed sharkd, at most 10 times, and not after other failures", async () => {
+    const { s, made } = session();
+    let n = 0;
+    assert.equal(
+      await s.crashRetries(async () => {
+        if (++n < 3) {
+          made[n % 2].onLua({ loaded: [], failed: [], crashedIn: `ext${n}` });
+          throw new Error(`crash ${n}`);
+        }
+        return "read";
+      }),
+      "read",
+    );
+    assert.equal(n, 3);
+    n = 0;
+    await assert.rejects(
+      s.crashRetries(async () => {
+        n++;
+        throw new Error("plain");
+      }),
+      /plain/,
+    );
+    assert.equal(n, 1);
+    n = 0;
+    await assert.rejects(
+      s.crashRetries(async () => {
+        n++;
+        made[0].onLua({ loaded: [], failed: [], crashedIn: "again" });
+        throw new Error("always");
+      }),
+      /always/,
+    );
+    assert.equal(n, 11);
+  });
+
+  await check("engine session: a crashed load goes back on the extensions (their last change, then all of them), says so, clears a filter gone with them; otherwise restores them and rethrows", async () => {
+    // dies until the extensions changed `k` times
+    const dying = (k, told) => (m) => {
+      if (m === "load" && told.ext.filter((x) => x === "revert" || x === "suspend").length < k) throw new SharkdExit("sharkd exited (SIGSEGV)", "SIGSEGV");
+      return loads()(m);
+    };
+    let x = session({ answer: (m) => dying(1, x.told)(m) });
+    const reverted = await x.s.load(x.made[0], "/dir/c.pcap", "", []);
+    assert.equal(reverted.rolledBack, "reverted");
+    assert.deepEqual(x.told.ext, ["revert"]);
+    assert.deepEqual(x.told.problems, ['sharkd crashed reading c.pcap with the extensions (sharkd exited (SIGSEGV)), so it reads it without the last change to the extensions. Test the extensions to find the one at fault (extensions action "test")']);
+    // nothing to revert: straight to none; a filter that doesn't compile without them is cleared
+    x = session({
+      revert: false,
+      answer: (m) => {
+        if (m === "frames" && x.told.ext.includes("suspend")) throw new SharkdError("invalid filter", -1);
+        return dying(1, x.told)(m);
+      },
+    });
+    const suspended = await x.s.load(x.made[0], "/c.pcap", "myproto", []);
+    assert.deepEqual([suspended.rolledBack, suspended.filter], ["suspended", ""]);
+    assert.deepEqual(x.told.ext, ["revert", "suspend"]);
+    assert.match(x.told.problems[0], /without extensions until they are reloaded; the display filter "myproto" was cleared\. Test/);
+    // still dies without any: they weren't the cause, the first crash is thrown
+    x = session({ answer: (m) => dying(9, x.told)(m) });
+    await assert.rejects(x.s.load(x.made[0], "/c.pcap", "", []), (err) => err instanceof SharkdExit && err.message === "sharkd exited (SIGSEGV)");
+    assert.deepEqual(x.told.ext, ["revert", "suspend", "restore before"]);
+    assert.deepEqual(x.told.problems, []);
+    // another failure while going back restores them and is thrown
+    x = session({ answer: (m) => (m === "load" && x.told.ext.length ? { status: "gone" } : dying(9, x.told)(m)) });
+    await assert.rejects(x.s.load(x.made[0], "/c.pcap", "", []), (err) => err.constructor === Error && err.message === "gone");
+    assert.deepEqual(x.told.ext, ["revert", "restore before"]);
+    // no rollback: without it, without extensions, or a kill while reading the only copy
+    for (const [opts, why, signal] of [[{ rollback: false }, {}, "SIGSEGV"], [{}, { any: false }, "SIGSEGV"], [{ inPlace: true }, {}, "SIGKILL"]]) {
+      x = session({ ...why, answer: (m) => (m === "load" ? Promise.reject(new SharkdExit(`sharkd exited (${signal})`, signal)) : loads()(m)) });
+      await assert.rejects(x.s.load(x.made[0], "/c.pcap", "", [], opts), SharkdExit);
+      assert.deepEqual(x.told.ext, [], JSON.stringify(opts));
+    }
+    // a kill not in place is blamed on the extensions like a crash
+    x = session({ answer: (m) => (m === "load" && !x.told.ext.length ? Promise.reject(new SharkdExit("sharkd exited (SIGKILL)", "SIGKILL")) : loads()(m)) });
+    assert.equal((await x.s.load(x.made[0], "/c.pcap", "", [])).rolledBack, "reverted");
   });
 } finally {
   rmSync(out, { recursive: true, force: true });
