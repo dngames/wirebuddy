@@ -35,9 +35,15 @@ writeFileSync(join(panel, "style.css"), "button { position: fixed; left: 0; widt
 writeFileSync(
   join(panel, "main.js"),
   `const said = (what, p) => p.then(() => wb.status(what + ": ok"), (e) => wb.status(what + ": " + e.code));
-const { ctx } = wb.canvas({ context: "2d" });
-ctx.fillStyle = "#e33";
-ctx.fillRect(0, 0, 4000, 4000);
+// Drawn again when the panel's size changes, as a chart does
+let c;
+const draw = () => {
+  if (!c) return;
+  c.ctx.fillStyle = "#e33";
+  c.ctx.fillRect(0, 0, 4000, 4000);
+};
+c = wb.canvas({ context: "2d", onResize: draw });
+draw();
 document.getElementById("select").addEventListener("click", () => said("click", wb.select(3)));
 document.getElementById("filter").addEventListener("click", () => said("filter", wb.setFilter("http")));
 // Takes the focus first, as a panel trying to act on the user's click elsewhere would
@@ -182,7 +188,7 @@ try {
   });
 
   await check("browser: setFilter after a click still needs control", async () => {
-    await clickPanel(100, 140, "filter");
+    await clickPanel(100, 105, "filter");
     await until("the refusal", async () => (await statusText()) === "filter: denied");
     assert.equal((await state()).filter, "");
   });
@@ -247,7 +253,227 @@ try {
     await click(...center(await box(menuItem(label))));
   };
 
+  // Docking: a panel opens in a pane of the layout, under the packet list, and floats or docks from its title bar
+  const win = "document.querySelector('.dlg-panel')";
+  const titleButton = (label) => `[...${win}.querySelectorAll('.dlg-titlebar button')].find((b) => b.textContent === '${label}')`;
+  const footerButton = (label) => `[...${win}.querySelectorAll('.dlg-footer button')].find((b) => b.textContent === '${label}')`;
+  const press = async (js, what) => {
+    await until(what, async () => !!(await box(js)));
+    await click(...center(await box(js)));
+  };
+  /** Presses until `done` holds: right after the page was loaded again, Chrome has not always routed the pointer to the page yet. */
+  const pressUntil = async (js, what, done) => {
+    for (let attempt = 0; ; attempt++) {
+      await press(js, what);
+      try {
+        return await until(`${what} to work`, done, 1500);
+      } catch (err) {
+        if (attempt >= 3) throw err;
+      }
+    }
+  };
+  const overlaps = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+  /** What the panel's window covers of the page's panes, and whether the list's header cells and first row are what the pointer meets there. */
+  const covering = async () => {
+    const w = await box(win);
+    const out = { window: w, covers: [] };
+    for (const name of ["pane-list", "pane-details", "pane-bytes"]) if (overlaps(w, await box(`document.querySelector('.${name}')`))) out.covers.push(name);
+    // Cells in view: rows are also drawn a little beyond the list
+    
+    const reached = await evaluate(
+      `(() => { const w = ${win}; return [...document.querySelectorAll('.pl-hcell, .pl-row:not([hidden]) .pl-cell')].filter((c) => { const r = c.getBoundingClientRect(), l = document.querySelector('.pane-list').getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top >= l.top && r.bottom <= l.bottom && w.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)); }).length; })()`,
+    );
+    out.reachedByPanel = reached;
+    return out;
+  };
+  /** The panel's drawing once it fits the frame (it draws again after a resize): its size and first pixel. */
+  const settledSnapshot = async () => {
+    let last;
+    for (const end = Date.now() + 8000; Date.now() < end; await sleep(150)) {
+      const f = await frameRect();
+      last = await snapshotColor();
+      if (Math.abs(last.width - f.width) <= 2 && Math.abs(last.height - f.height) <= 2 && last.rgb[0] > 200 && last.rgb[1] < 100 && last.rgb[2] < 100) return last;
+    }
+    throw new Error(`the drawing never fit the frame: ${JSON.stringify(last)} in ${JSON.stringify(await frameRect())}`);
+  };
+  const snapshotColor = async () => {
+    const r = await call("panel", { action: "snapshot", name: "clicker" });
+    assert.ok(!r.isError, r.text);
+    const png = Buffer.from(r.images[0].data, "base64");
+    const idat = []; // the chunks of pixels, first pixel of the first row after the filter byte
+    for (let at = 8; at < png.length; at += 12 + png.readUInt32BE(at)) if (png.subarray(at + 4, at + 8).toString() === "IDAT") idat.push(png.subarray(at + 8, at + 8 + png.readUInt32BE(at)));
+    const { inflateSync } = await import("node:zlib");
+    const raw = inflateSync(Buffer.concat(idat));
+    return { width: png.readUInt32BE(16), height: png.readUInt32BE(20), rgb: [...raw.subarray(1, 4)] };
+  };
+  const frameMark = () => evaluate("document.querySelector('.panel-frame').__mark === 'same'");
+  const storedRuns = () => JSON.parse(readFileSync(join(home, ".local/share/wirebuddy/panel-storage/clicker.json"), "utf8")).runs;
+  const dockPaneHidden = () => evaluate("document.querySelector('.pane-dock').hidden");
+  const dockedNow = () => evaluate(`${win}.classList.contains('pn-docked')`);
+
+  await check("browser: a panel opens docked under the packet list, covering none of the list, details or bytes", async () => {
+    assert.equal(await dockedNow(), true);
+    const c = await covering();
+    assert.deepEqual(c.covers, [], JSON.stringify(c));
+    assert.equal(c.reachedByPanel, 0, JSON.stringify(c));
+    const [list, dock, details, bytes] = await Promise.all(["pane-list", "pane-dock", "pane-details", "pane-bytes"].map((n) => box(`document.querySelector('.${n}')`)));
+    assert.ok(list.bottom <= dock.top + 1 && dock.bottom <= details.top + 1 && details.bottom <= bytes.top + 1, JSON.stringify({ list, dock, details, bytes }));
+    // The window fills the pane
+    assert.ok(Math.abs(c.window.left - dock.left) < 1.5 && Math.abs(c.window.top - dock.top) < 1.5 && Math.abs(c.window.width - dock.width) < 1.5 && Math.abs(c.window.height - dock.height) < 1.5, JSON.stringify({ window: c.window, dock }));
+    assert.ok(list.height >= 100 && details.height >= 44 && bytes.height >= 44 && dock.height >= 120, JSON.stringify({ list, dock, details, bytes }));
+    // The packet list keeps the focus the user had
+    assert.equal(await evaluate(`${win}.contains(document.activeElement)`), false);
+  });
+
+  await check("browser: Float turns a docked panel into a window over the page, Dock puts it back, and its drawing stays", async () => {
+    await evaluate("document.querySelector('.panel-frame').__mark = 'same'");
+    const runs = storedRuns();
+    await settledSnapshot();
+    await press(titleButton("Float"), "the Float button");
+    await until("the panel floating", async () => !(await dockedNow()));
+    assert.equal(await dockPaneHidden(), true, "the dock pane is gone");
+    // The panel learned of its new size and drew again
+    const floating = await settledSnapshot();
+    assert.ok(floating.height > 300, JSON.stringify(floating));
+    assert.equal(await evaluate(`!!${titleButton("Dock")}`), true);
+    // What a floating panel is: over the page, movable, resizable
+    assert.equal(await evaluate(`getComputedStyle(${win}).resize`), "both");
+    await press(titleButton("Dock"), "the Dock button");
+    await until("the panel docked", dockedNow);
+    const back = await settledSnapshot();
+    assert.ok(back.height < floating.height, JSON.stringify({ back, floating }));
+    // Same frame, never loaded again: its script did not run twice
+    assert.equal(await frameMark(), true);
+    assert.equal(storedRuns(), runs);
+    assert.deepEqual((await covering()).covers, []);
+  });
+
+  await check("browser: Maximize and Restore return a docked panel to its pane, a floating one to its window", async () => {
+    const pane = await box("document.querySelector('.pane-dock')");
+    await press(footerButton("Maximize"), "Maximize");
+    await until("maximized", () => evaluate(`${win}.classList.contains('pn-max')`));
+    const max = await box(win);
+    assert.ok(max.width > (await evaluate("innerWidth")) - 12 && max.height > (await evaluate("innerHeight")) - 12, JSON.stringify(max));
+    await press(footerButton("Restore"), "Restore");
+    await until("restored", async () => !(await evaluate(`${win}.classList.contains('pn-max')`)));
+    assert.equal(await dockedNow(), true);
+    const w = await box(win);
+    assert.ok(Math.abs(w.top - pane.top) < 1.5 && Math.abs(w.height - pane.height) < 1.5, JSON.stringify({ w, pane }));
+    // Floating: maximize, restore, still floating
+    await press(titleButton("Float"), "Float");
+    await until("floating", async () => !(await dockedNow()));
+    const floating = await box(win);
+    await press(footerButton("Maximize"), "Maximize");
+    await until("maximized", () => evaluate(`${win}.classList.contains('pn-max')`));
+    await press(footerButton("Restore"), "Restore");
+    await until("restored", async () => !(await evaluate(`${win}.classList.contains('pn-max')`)));
+    assert.equal(await dockedNow(), false);
+    const again = await box(win);
+    assert.ok(Math.abs(again.left - floating.left) < 1.5 && Math.abs(again.top - floating.top) < 1.5 && Math.abs(again.width - floating.width) < 1.5, JSON.stringify({ floating, again }));
+    // Maximized while docked, floated meanwhile, restored: floating then
+    await press(titleButton("Dock"), "Dock");
+    await until("docked", dockedNow);
+  });
+
+  await check("browser: a splitter resizes the dock, and its height is kept across a reload of the page", async () => {
+    const dock = () => box("document.querySelector('.pane-dock')");
+    const before = await dock();
+    // The splitter above the dock, dragged up by 60 px
+    const sp = await box("document.querySelector('.pane-dock').previousElementSibling");
+    const [x, y] = center(sp);
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y: y - 30, button: "left", buttons: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y: y - 60, button: "left", buttons: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y: y - 60, button: "left", clickCount: 1 });
+    await until("the taller dock", async () => (await dock()).height > before.height + 40);
+    const grown = await dock();
+    // The window follows the pane
+    const w = await box(win);
+    assert.ok(Math.abs(w.top - grown.top) < 1.5 && Math.abs(w.height - grown.height) < 1.5, JSON.stringify({ w, grown }));
+    // The panel sees its size change
+    await cdp("Page.navigate", { url: ui.href });
+    await until("the viewer", () => evaluate("!!document.querySelector('.sb-conn.open')"), 30_000);
+    await until("the panel back", async () => !!(await box("document.querySelector('.panel-frame')")));
+    await until("the dock", async () => Math.abs((await dock())?.height - grown.height) < 2);
+    assert.equal(await dockedNow(), true);
+    // Back to the default layout (double-click on a splitter), for the checks that follow
+    await evaluate("document.querySelector('.pane-dock').previousElementSibling.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
+    await until("the default dock", async () => Math.abs((await dock()).height - before.height) < 3);
+  });
+
+  await check("browser: the choice to float, and to dock again, is kept across a reload of the page", async () => {
+    await pressUntil(titleButton("Float"), "Float", async () => !(await dockedNow()));
+    await cdp("Page.navigate", { url: ui.href });
+    await until("the viewer", () => evaluate("!!document.querySelector('.sb-conn.open')"), 30_000);
+    await until("the panel back", async () => !!(await box("document.querySelector('.panel-frame')")));
+    assert.equal(await dockedNow(), false);
+    assert.equal(await dockPaneHidden(), true);
+    assert.ok(await evaluate(`!!${titleButton("Dock")}`));
+    await pressUntil(titleButton("Dock"), "Dock", dockedNow);
+    await cdp("Page.navigate", { url: ui.href });
+    await until("the viewer", () => evaluate("!!document.querySelector('.sb-conn.open')"), 30_000);
+    await until("the panel back", async () => !!(await box("document.querySelector('.panel-frame')")));
+    assert.equal(await dockedNow(), true);
+  });
+
+  await check("browser: a narrow window keeps a docked panel inside the layout, overlapping nothing", async () => {
+    try {
+      await cdp("Emulation.setDeviceMetricsOverride", { width: 480, height: 520, deviceScaleFactor: 1, mobile: false });
+      await until("the narrow window", async () => (await evaluate("window.innerWidth")) === 480);
+      await until("the dock to follow", async () => {
+        const w = await box(win);
+        const pane = await box("document.querySelector('.pane-dock')");
+        return w && Math.abs(w.width - pane.width) < 2 && Math.abs(w.top - pane.top) < 2 && w.right <= 481 && w.bottom <= 521;
+      });
+      const c = await covering();
+      assert.deepEqual(c.covers, [], JSON.stringify(c));
+      assert.equal(c.reachedByPanel, 0, JSON.stringify(c));
+      // Its buttons are all in the window
+      for (const label of ["Float", "Reload", "Maximize", "Close"]) {
+        const b = await box(label === "Float" ? titleButton(label) : footerButton(label));
+        assert.ok(b && b.left >= 0 && b.right <= 481, `${label}: ${JSON.stringify(b)}`);
+      }
+    } finally {
+      await cdp("Emulation.clearDeviceMetricsOverride");
+      // The list scrolled to keep its selection in view while it was small
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+    }
+  });
+
+  await check("browser: two docked panels are tabs in the one pane; closing the shown one shows the other", async () => {
+    await call("panel", { action: "open", name: "reader", wait_ms: 10_000 });
+    await until("the tabs", () => evaluate("document.querySelectorAll('.pn-tab').length === 2"));
+    const shown = () => evaluate("[...document.querySelectorAll('.dlg-panel')].filter((d) => getComputedStyle(d.parentElement).visibility !== 'hidden').map((d) => d.querySelector('.dlg-title-text').textContent)");
+    assert.equal((await shown()).length, 1);
+    assert.match((await shown())[0], /^Reader/);
+    assert.equal(await evaluate("document.querySelectorAll('.pane-dock').length"), 1);
+    await press("[...document.querySelectorAll('.pn-tab')].find((t) => t.textContent === 'Clicker')", "the Clicker tab");
+    await until("the Clicker panel", async () => /^Clicker/.test((await shown())[0] ?? ""));
+    await call("panel", { action: "close", name: "clicker" });
+    await until("the Reader panel", async () => /^Reader/.test((await shown())[0] ?? "") && (await evaluate("document.querySelectorAll('.dlg-panel').length")) === 1);
+    assert.equal(await evaluate("document.querySelector('.pn-tabs').hidden"), true);
+    await call("panel", { action: "close", name: "reader" });
+    await until("the dock to go", dockPaneHidden);
+    assert.ok((await box("document.querySelector('.pane-bytes')")).height > 44);
+    // Closed panels leave no window, and the next one opens docked again
+    await call("panel", { action: "open", name: "clicker", wait_ms: 10_000 });
+    await until("the panel", async () => !!(await box("document.querySelector('.panel-frame')")));
+    assert.equal(await dockedNow(), true);
+  });
+
+  await check("browser: Close in a docked panel closes it and gives its pane back", async () => {
+    await press(footerButton("Close"), "Close");
+    await until("the panel to close", () => evaluate("!document.querySelector('.panel-frame')"));
+    await until("the dock to go", dockPaneHidden);
+    await call("panel", { action: "open", name: "clicker", wait_ms: 10_000 });
+    await until("the panel", async () => !!(await box("document.querySelector('.panel-frame')")));
+  });
+
   await check("browser: a panel reopens at the size it had when it closed", async () => {
+    // Floating: the size is the window's own
+    await press(titleButton("Float"), "Float");
+    await until("floating", async () => !(await dockedNow()));
     const size = async () => {
       const r = await box("document.querySelector('.dlg-panel')");
       return r && [Math.round(r.width), Math.round(r.height)];
