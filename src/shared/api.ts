@@ -218,6 +218,8 @@ export interface ViewState {
   capture: CaptureState;
   /** Last action the agent took in the UI, shown as a dismissable banner. */
   agentNotice: AgentNotice | null;
+  /** The last 20 questions the user asked the agent, oldest first, with the answers `answer_question` gave. Not kept beyond the session. */
+  questions: Question[];
   /**
    * An MCP agent is attached: problems also go to it, and the page shows
    * how many are waiting (`pending`). `name` labels it in the UI
@@ -381,6 +383,22 @@ export interface MarkResult {
   ok: true;
   frames: number[];
   count: number;
+}
+
+/** A question the user asked the agent, in words (Ask Agent) or with Now. */
+export interface Question {
+  /** Ids restart with each server process. */
+  id: number;
+  /** Epoch milliseconds. */
+  at: number;
+  /** What was asked, cut at 300 characters (the agent got it in full). */
+  text: string;
+  /** The capture it was about and its first packet, null for none; `count` packets in all. */
+  file: string | null;
+  frame: number | null;
+  count: number;
+  /** What the agent answered, null while it waits. */
+  answer: { text: string; at: number } | null;
 }
 
 export interface AgentNotice {

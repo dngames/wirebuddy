@@ -3,7 +3,7 @@
 import { APP_NAME, token } from "./api.ts";
 import * as act from "./actions.ts";
 import { app, bus } from "./app.ts";
-import { createBanner } from "./banner.ts";
+import { createBanner, createQuestionBanner } from "./banner.ts";
 import { clearBytesHighlight, createBytesPane, highlightBytes, setBytesFrame } from "./bytes.ts";
 import { initCapture } from "./capture.ts";
 import { claimOwnedKey, handleCommandKey } from "./commands.ts";
@@ -47,6 +47,7 @@ function init(): void {
   const filterBar = createFilterBar();
   const findBar = createFindBar();
   const banner = createBanner();
+  const questionBanner = createQuestionBanner();
 
   const bytesPane = createBytesPane({
     onByteClick: (src, off) => {
@@ -81,7 +82,7 @@ function init(): void {
   panes.hidden = true;
   main.appendChild(panes);
 
-  root.replaceChildren(menuBar, toolbar, filterBar, findBar, banner, main, createStatusBar());
+  root.replaceChildren(menuBar, toolbar, filterBar, findBar, banner, questionBanner, main, createStatusBar());
 
   // View > Zoom scales the three panes, not the menus and bars
   const applyZoom = (): void => {

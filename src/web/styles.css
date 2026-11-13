@@ -769,6 +769,133 @@ input[type="checkbox"] {
   height: 12px;
 }
 
+/* The questions to the agent: a quiet line while one waits, then its answer */
+
+.question-banner {
+  flex: none;
+  min-width: 0;
+}
+
+.qb-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 2px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.qb-wait-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qb-answer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px 4px 8px;
+  background: var(--agent-soft);
+  border-bottom: 1px solid var(--border);
+  box-shadow: inset 3px 0 0 var(--agent);
+}
+
+.qb-mark {
+  display: inline-flex;
+  flex: none;
+  padding-top: 3px;
+  color: var(--agent);
+}
+
+.qb-mark .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.qb-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.qb-answer-text {
+  overflow-wrap: anywhere;
+}
+
+.qb-asked {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qb-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.qb-wait .qb-link {
+  line-height: inherit;
+}
+
+.qb-link:hover {
+  text-decoration: underline;
+}
+
+.q-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.q-item {
+  padding: 5px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+}
+
+.q-goes {
+  cursor: pointer;
+}
+
+.q-goes:hover {
+  background: var(--hover-row);
+}
+
+.q-head,
+.q-wait {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.q-text,
+.q-answer {
+  overflow-wrap: anywhere;
+}
+
+.q-text {
+  margin: 2px 0;
+}
+
+.q-answer {
+  padding-left: 6px;
+  border-left: 3px solid var(--agent);
+}
+
 /* ----------------------------------------------------------------- panes */
 
 .main {

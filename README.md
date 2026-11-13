@@ -295,7 +295,10 @@ question, prints it and exits, which wakes Claude.
 To ask about packets without switching to the chat, right-click them in the packet list and
 choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packets…**). The question
 goes to Claude with the packet numbers and wakes it if its watch is running (the dialog says
-whether it is); otherwise it comes with Claude's next step. Claude answers in the chat.
+whether it is); otherwise it comes with Claude's next step. Claude answers in the chat, and with
+`answer_question` in the page: a line under its banner says the question is waiting until it does,
+then the answer takes its place until you dismiss it, and **Tools › Questions to Claude…** lists
+this session's questions with their answers (a click selects the packet a question was about).
 
 When you notice something during a live capture (the app froze, a reply was slow, a light
 flickered), press **Now**: the flag in the toolbar, or N in the packet list. A tap asks what just
@@ -387,6 +390,7 @@ solution; `solution/ctseries` is the panel.
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
 | `goto_frame` | Select and scroll to a frame |
+| `answer_question` | Answer a question the user asked from the page (Ask Agent, Now) in the page, with a packet to select if it helps |
 | `mark_frames` / `clear_marks` | Highlight frames with a note (first line of the packet's details, listed under Go → Marked Packets) |
 | `time_references` | Set or unset time references (`*REF*`), which the Time column counts from, or clear them |
 | `packet_comments` | Add, replace or delete packet comments in the user's view (kept by exports to pcapng) |

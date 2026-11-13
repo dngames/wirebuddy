@@ -39,6 +39,7 @@ export function initialState({ capture, wiresharkAvailable, decodeAsUnavailable 
     kept: false,
     capture,
     agentNotice: null,
+    questions: [],
     agent: { attached: false, pending: 0, name: "Agent", watching: false },
     wiresharkAvailable,
     customColumns: [],

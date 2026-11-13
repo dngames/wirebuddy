@@ -12,6 +12,7 @@ import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
 import { writeAcmeCapture } from "./acme.mjs";
 import * as g from "./capgen.mjs";
+import { followState } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -70,6 +71,7 @@ try {
   const names = tools.map((t) => t.name);
   assert.ok(names.includes("start_capture") && names.includes("stop_capture"), "the agent starts and stops captures");
   assert.ok(names.includes("decode_as"), "the agent decodes ports as protocols Wireshark knows");
+  assert.ok(names.includes("answer_question"), "the agent answers the user's questions in the page");
   assert.ok(tools.find((t) => t.name === "panel").inputSchema.properties.action.enum.includes("snapshot"), "panel action snapshot");
   console.log(`tools: ${names.join(", ")}`);
 
@@ -308,6 +310,7 @@ try {
   // Time references: the user sees them with a notice; the agent's rows, fields and details count from them
   const notice = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: { "X-WireBuddy-Token": ui.searchParams.get("token") } })).json()).agentNotice?.text;
   assert.ok(names.includes("time_references"));
+  assert.match(client.getInstructions() ?? "", /QUESTION event with an id, to answer in the chat and with answer_question/);
   assert.match(client.getInstructions() ?? "", /mark_frames, time_references, packet_comments, set_columns and decode_as change what the user sees/);
   await call("set_display_filter", { filter: "" });
   await call("time_references", { action: "set" }, (t, r) => assert.ok(r.isError && /give the frames to set/.test(t), t));
@@ -370,6 +373,8 @@ try {
     assert.equal(r.status, 200, await r.clone().text());
     return r.json();
   };
+  // What a QUESTION event tells the agent about answering
+  const how = (id) => `\\(question ${id}: answer in the chat and with answer_question, so the user sees it in the page\\)`;
   const agentState = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json()).agent;
   assert.equal((await post("/api/select", { frame: 12 })).status, 200);
   assert.deepEqual(await ask("Why  is this\nso slow?"), { woken: false });
@@ -377,14 +382,14 @@ try {
   assert.equal((await post("/api/agent/ask", { question: "  " })).status, 400);
   assert.equal((await agentState()).pending, 0);
   await call("get_view_state", {}, (t) => {
-    assert.match(t, /QUESTION The user asks you about frame 12: Why is this so slow\?\]?$/m);
+    assert.match(t, new RegExp(`QUESTION The user asks you about frame 12 ${how(1)}: Why is this so slow\\?\\]?$`, "m"));
     assert.doesNotMatch(t, /Asking the agent failed/);
   });
   // The packets the dialog showed, not what is selected when it is sent; refused once that view is gone
   const { generation } = await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json();
   const shown = { file: fixture, filter: "", generation };
   assert.deepEqual(await (await post("/api/agent/ask", { question: "and these?", frame: 3, rows: [[1, 2]], view: shown })).json(), { woken: false });
-  await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you about 2 packets: and these\? \{"frames":"frame\.number in \{2\.\.3\}"\}\]?$/m));
+  await call("get_view_state", {}, (t) => assert.match(t, new RegExp(`QUESTION The user asks you about 2 packets ${how(2)}: and these\\? \\{"frames":"frame\\.number in \\{2\\.\\.3\\}"\\}\\]?$`, "m")));
   assert.equal((await post("/api/agent/ask", { question: "stale?", frame: 3, view: { ...shown, filter: "tcp" } })).status, 409);
   const asked = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "inherit"] });
   let heard = "";
@@ -397,9 +402,54 @@ try {
   if (askedCode === "timeout") asked.kill();
   await call("get_view_state", {}, () => {
     assert.equal(askedCode, 0, `watcher exit ${askedCode}`);
-    assert.match(heard, /QUESTION The user asks you about 3 packets: What are these\? \{"frames":"frame\.number in \{12\.\.14\}"\}/);
+    assert.match(heard, new RegExp(`QUESTION The user asks you about 3 packets ${how(3)}: What are these\\? \\{"frames":"frame\\.number in \\{12\\.\\.14\\}"\\}`));
   });
   assert.equal((await agentState()).watching, false);
+
+  // The questions are part of the view's state, and the agent answers them in the page
+  const feed = await followState(ui.origin, ui.searchParams.get("token"));
+  try {
+    const state = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json());
+    const questions = async () => (await state()).questions;
+    const file = (await state()).file;
+    assert.deepEqual((await questions()).map(({ at, ...q }) => q), [
+      { id: 1, text: "Why is this so slow?", file, frame: 12, count: 1, answer: null },
+      { id: 2, text: "and these?", file, frame: 2, count: 2, answer: null },
+      { id: 3, text: "What are these?", file, frame: 12, count: 3, answer: null },
+    ]);
+    await call("get_view_state", {}, (t) => assert.match(t, /Questions from the user still waiting for answer_question \(3\):\n  1 \(asked [^)]+\) about frame 12: Why is this so slow\?\n  2 \(asked [^)]+\) about 2 packets: and these\?\n  3 \(asked [^)]+\) about 3 packets: What are these\?\n/));
+    // Without an id the oldest one waiting
+    const seq = feed.seq;
+    await call("answer_question", { text: "It waits for the server's\nreply." }, (t) => assert.match(t, /^Answered question 1 \(about frame 12\); 2 still waiting/));
+    let qs = await questions();
+    assert.equal(qs[0].answer.text, "It waits for the server's reply.", "one line");
+    assert.ok(Number.isInteger(qs[0].answer.at));
+    assert.deepEqual([qs[1].answer, qs[2].answer], [null, null]);
+    await feed.until("the answer", 5000, (s) => s.questions[0].answer);
+    // What the page got is the field that changed, and not the big ones
+    const patch = feed.messages.filter((m) => m.type === "patch" && m.seq > seq).find((m) => m.patch.questions);
+    assert.ok(patch, "the answer comes as a patch of questions");
+    for (const f of ["columns", "marks", "capture", "file"]) assert.ok(!(f in patch.patch), f);
+    assert.ok(patch.bytes < 2048, `${patch.bytes} bytes`);
+    await call("get_view_state", {}, (t) => assert.match(t, /still waiting for answer_question \(2\):\n  2 .*\n  3 /));
+    // By id, with a packet for the user to look at
+    await call("answer_question", { text: "Frame 7 shows it", id: 3, frame: 7 }, (t) => assert.match(t, /^Answered question 3 \(about 3 packets\); selected frame 7; 1 still waiting/));
+    assert.deepEqual([(await state()).selected, (await state()).selectedBy], [7, "agent"]);
+    assert.equal((await questions())[2].answer.text, "Frame 7 shows it");
+    // Refused, with the reason, and nothing changed
+    const refused = async (args, pattern) => call("answer_question", args, (t, r) => (assert.ok(r.isError, t), assert.match(t, pattern)));
+    await refused({ text: "again", id: 1 }, /question 1 is answered already/);
+    await refused({ text: "again", id: 99 }, /there is no question 99/);
+    await refused({ text: "  \n " }, /the answer is empty/);
+    await refused({ text: "x".repeat(601) }, /600|too big|too long/i);
+    await refused({ text: "never mind", id: 2, frame: 0 }, /./);
+    assert.deepEqual((await questions()).map((q) => q.answer?.text ?? null), ["It waits for the server's reply.", null, "Frame 7 shows it"]);
+    await call("answer_question", { text: "Those are the three requests." }, (t) => assert.match(t, /^Answered question 2 \(about 2 packets\); none waiting/));
+    await refused({ text: "one more" }, /no question is waiting for an answer/);
+    await call("get_view_state", {}, (t) => assert.doesNotMatch(t, /still waiting for answer_question/));
+  } finally {
+    feed.close();
+  }
   if (capture) await call("list_interfaces", {}, (t) => assert.match(t, new RegExp(`^${LOOPBACK}\\b.*\\[loopback\\]`, "m")));
   else console.log(`skip list_interfaces: dumpcap may not capture on ${LOOPBACK} here`);
   await call("stop_capture", {}, (t) => assert.match(t, /No capture is running/));

@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession", "filterhints", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -32,6 +32,7 @@ const { noLuaReason } = await import(join(out, "units.mjs"));
 const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
 const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
+const { withQuestion, openQuestion, answered, openQuestions, aboutText, MAX_QUESTIONS, MAX_QUESTION_SHOWN, MAX_ANSWER } = await import(join(out, "units.mjs"));
 const { usesFrameNumber } = await import(join(out, "units.mjs"));
 const { writeRefused, checkTarget } = await import(join(out, "units.mjs"));
 const { setHint } = await import(join(out, "units.mjs"));
@@ -2299,6 +2300,42 @@ esac
     assert.deepEqual(markNode({ frame: 3, note: "", by: "user" }, "Claude"), { l: "Marked", t: "proto" });
     assert.deepEqual(markNode({ frame: 3, note: "DNS NXDOMAIN", by: "agent" }, "Claude"), { l: "Marked by Claude: DNS NXDOMAIN", t: "proto" });
     assert.deepEqual(markNode({ frame: 3, note: "", by: "agent" }, "Agent"), { l: "Marked by Agent", t: "proto" });
+  });
+
+  await check("the questions to the agent: kept in order, the last 20, answered oldest first, refused when none waits", () => {
+    const ask = (list, id, text = `q${id}`) => withQuestion(list, { id, at: 1000 + id, text, file: "a.pcapng", frame: id, count: 1 });
+    let qs = [];
+    assert.throws(() => openQuestion(qs), /no question is waiting for an answer/);
+    qs = ask(ask(ask(qs, 1), 2), 3);
+    assert.deepEqual(qs.map((q) => q.id), [1, 2, 3]);
+    assert.equal(qs[0].answer, null);
+    assert.equal(openQuestion(qs).id, 1, "the oldest without an answer");
+    qs = answered(qs, openQuestion(qs, 2), "  two\n\nlines\u0001 ", 5000);
+    assert.deepEqual(qs[1].answer, { text: "two lines?", at: 5000 }, "one line of printable text");
+    assert.equal(qs[0].answer, null, "the others stay");
+    assert.equal(openQuestion(qs).id, 1);
+    assert.equal(openQuestion(qs, 3).id, 3, "by id");
+    assert.throws(() => openQuestion(qs, 2), /question 2 is answered already/);
+    assert.throws(() => openQuestion(qs, 9), /there is no question 9/);
+    assert.throws(() => answered(qs, qs[0], " \n ", 1), /the answer is empty/);
+    assert.equal(answered(qs, qs[0], "x".repeat(MAX_ANSWER + 50), 1)[0].answer.text.length, MAX_ANSWER);
+    assert.deepEqual(openQuestions(qs).map((q) => q.id), [1, 3]);
+    // The input list is not changed
+    assert.equal(qs[0].answer, null);
+    qs = answered(qs, qs[0], "one", 6000);
+    assert.equal(openQuestion(qs).id, 3, "the next oldest after an answer");
+    // The limit: the oldest go, answered or not
+    let many = [];
+    for (let i = 1; i <= MAX_QUESTIONS + 5; i++) many = ask(many, i);
+    assert.equal(MAX_QUESTIONS, 20);
+    assert.deepEqual(many.map((q) => q.id), Array.from({ length: 20 }, (_, i) => i + 6));
+    assert.throws(() => openQuestion(many, 5), /there is no question 5/, "a dropped one is unknown");
+    assert.equal(openQuestion(many).id, 6);
+    // A long question is cut in the state
+    const long = ask([], 1, "y".repeat(MAX_QUESTION_SHOWN + 100))[0].text;
+    assert.equal(long.length, MAX_QUESTION_SHOWN);
+    assert.ok(long.endsWith("…"));
+    assert.deepEqual([aboutText(12, 1), aboutText(12, 3), aboutText(null, 0), aboutText(4, 0)], ["frame 12", "3 packets", "", ""]);
   });
 
   await check("a display filter tests frame.number: found outside quotes, not in other names", () => {
