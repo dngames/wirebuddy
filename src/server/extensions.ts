@@ -1069,6 +1069,13 @@ Rules:
   for 20 s is stopped.
 - Call wb.ready() once the first view is drawn. On "reset" (another file, re-read extensions, TLS
   keys or Decode As) throw away what you read and read again.
+- A read is a snapshot: wb.packets and wb.all miss what a live capture adds afterwards, and a panel that
+  only reads at the start stays empty or stale. To follow the capture, read through wb.subscribe, or
+  read again when "packets" fires (wb.view.live: a capture runs):
+    wb.subscribe(q, { batch(page) { add(page); draw(); }, reset() { clear(); } });
+    wb.on("packets", draw);   // draw() reads with wb.all and draws everything anew
+- Don't pick packets by a client's TCP port or an address seen in this capture: the next run has other
+  ephemeral ports. Use the server's port, a field of the protocol, or what the user selected.
 - Fetch data in main.js and transfer it to workers; workers can't call wb.
 
 API (global wb):

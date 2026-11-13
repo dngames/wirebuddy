@@ -576,7 +576,12 @@ try {
   await call("extensions", { action: "list" }, (t) => assert.match(t, /^acme \[loaded\] \[lua\]/m));
 
   // Panels: written by the agent, checked before they run
-  await call("extensions", { action: "guide", topic: "panel" }, (t) => assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/));
+  await call("extensions", { action: "guide", topic: "panel" }, (t) => {
+    assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/);
+    // Following a live capture is the panel's job, and what it picks by must outlast a run
+    assert.match(t, /wb\.packets and wb\.all miss what a live capture adds[\s\S]*wb\.subscribe\(q[\s\S]*wb\.on\("packets", draw\)/);
+    assert.match(t, /Don't pick packets by a client's TCP port[\s\S]*ephemeral ports/);
+  });
   mkdirSync(join(extDir, "viewpanel", "panel"), { recursive: true });
   writeFileSync(join(extDir, "viewpanel", "extension.json"), JSON.stringify({ label: "View", version: "1", panel: { offer: { filter: "udp", text: "Show the view" } } }));
   writeFileSync(join(extDir, "viewpanel", "panel", "main.js"), "const x = 1;\nconst y = ;\n");
