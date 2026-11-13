@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
 import { execFileSync, spawn } from "node:child_process";
 import { writeAcmeCapture } from "./acme.mjs";
+import { writeAcmeTcpCapture } from "./acmetcp.mjs";
 import * as g from "./capgen.mjs";
 import { followState } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
@@ -601,6 +602,37 @@ try {
   await call("extensions", { action: "reload" }, (t) => assert.match(t, /^viewpanel \[loaded\] \[panel\] View v1; offers "Show the view"$/m));
   await call("capture_summary", {}, (t) => assert.match(t, /^Panel available: viewpanel \("Show the view"\): panel action "open"/m));
   await call("get_view_state", {}, (t) => assert.match(t, /^Panels offered to the user in the status bar: viewpanel \("Show the view"\)$/m));
+
+  // The guide's TCP template on a stream: several messages in one segment, and one split over two
+  const tcpTemplate = template("length-prefixed messages over TCP \\(several per segment, or split over segments\\)");
+  assert.match(tcpTemplate, /dissect_tcp_pdus/, "the guide has a TCP template");
+  rmSync(join(extDir, "acme"), { recursive: true });
+  rmSync(join(extDir, "acme_gap"), { recursive: true });
+  addExtension("acme_tcp", tcpTemplate);
+  const tcpFile = join(out, "acme-tcp.pcap");
+  writeAcmeTcpCapture(tcpFile);
+  await call("open_capture", { path: tcpFile }, (t) => assert.match(t, /3 frames/));
+  await call("extensions", { action: "test", name: "acme_tcp" }, (t) => {
+    assert.match(t, /Extension "acme_tcp": loaded/);
+    assert.match(t, /^  acme: 2 packets, first 1$/m);
+    assert.match(t, /No Lua errors/);
+  });
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /Extension "acme_tcp" loaded \(protocols: acme\)/));
+  await call("query_packets", { filter: "acme", fields: ["frame.number", "acme.kind", "acme.length", "tcp.reassembled_in"] }, (t) => {
+    // Three messages in frame 1; the split one is decoded in frame 3, the frame that completes it
+    assert.match(t, /^1 \| 1 \| Status,Points,Status \| 2,4,0 \| $/m);
+    assert.match(t, /^3 \| 3 \| Points \| 6 \| $/m);
+    assert.match(t, /2 frames match/);
+  });
+  await call("query_packets", {}, (t) => {
+    assert.match(t, /^1 \|.*\| ACME \|.*\| Status, Points, Status$/m, "the Info column lists every message of the segment");
+    assert.match(t, /^2 \|.*\| TCP \|.*\[TCP PDU reassembled in 3\]$/m);
+    assert.match(t, /^3 \|.*\| ACME \|.*\| Points$/m);
+  });
+  await call("query_packets", { filter: "acme.body", fields: ["acme.body"] }, (t) => {
+    assert.match(t, /^1 \| 0102,03040506$/m);
+    assert.match(t, /^3 \| 0708090a0b0c$/m);
+  });
 } finally {
   await client.close();
   rmSync(out, { recursive: true, force: true });

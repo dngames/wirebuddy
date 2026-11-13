@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- The agent's extension guide has a template for a length-prefixed protocol over TCP (several messages in a segment, a message split over segments, every message in the Info column) and says what several messages in one packet mean for display filters and columns
 - A question to the agent (Ask Agent, Now) shows in the page: a quiet line says it is waiting, and the answer the agent gives with the new `answer_question` tool takes its place in the banner until you dismiss it; Tools › Questions to Claude… lists the session's last 20 questions with their answers, and a click selects the packet a question was about
 - Mark Packet with Note… (the packet list's menu and Edit) gives a mark a note of your own, Edit Mark's Note… changes it, and the agent hears which packets got which note; Mark Packet stays the quick toggle
 - The agent's mark on a packet the user marked still replaces it, but `mark_frames` now names those frames and the notice the user gets says so
