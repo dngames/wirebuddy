@@ -278,7 +278,7 @@ try {
     await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
     await until("the toast", async () => /Sent\. Agent gets it with its next step/.test(await toasts()));
     assert.equal(await evaluate("!!document.querySelector('.dlg-ask')"), false);
-    assert.match((await call("get_view_state")).text, /QUESTION The user asks you about frame 4: What is this\?/);
+    assert.match((await call("get_view_state")).text, /QUESTION The user asks you about frame 4 \(question \d+: answer in the chat and with answer_question, so the user sees it in the page\): What is this\?/);
   }).finally(closeDialog);
 
   await check("browser: with the agent's watch running, the dialog says so and the question wakes it", async () => {
@@ -299,7 +299,7 @@ try {
       await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
       await until("the toast", async () => /Sent to Agent/.test(await toasts()));
       assert.equal(await Promise.race([exited, sleep(10_000).then(() => "timeout")]), 0);
-      assert.match(heard, /QUESTION The user asks you about frame 4: Wake up\?/);
+      assert.match(heard, /QUESTION The user asks you about frame 4 \(question \d+: answer in the chat and with answer_question, so the user sees it in the page\): Wake up\?/);
     } finally {
       watcher.kill();
       await closeDialog();
@@ -452,6 +452,144 @@ try {
     await call("clear_marks", { frames: [4] });
     await until("no mark line", async () => /^Frame 4:/.test(await first()));
   }).finally(() => call("clear_marks", {}));
+
+  await check("browser: Mark Packet with Note… in a packet's menu and the Edit menu marks as the user with the note; Edit Mark's Note… starts with it; several packets get one note", async () => {
+    const first = () => evaluate("document.querySelector('.dt-label')?.textContent");
+    const noteBox = (title) => evaluate(`document.querySelector('.dlg-marknote .dlg-title-text')?.textContent === ${JSON.stringify(title)} && document.activeElement?.closest('.dlg-marknote') !== null`);
+    const marks = async () => (await state()).marks.map((m) => `${m.frame} ${m.by} ${m.note}`);
+    const note = "this is where the kiosk showed the error";
+    await click(...center(await box(row(4))));
+    await until("frame 4's details", async () => (await state()).selected === 4 && /^Frame 4:/.test((await first()) ?? ""));
+    await fromMenu(4, "Mark Packet with Note");
+    await until("the dialog", () => noteBox("Mark Packet with Note"));
+    assert.equal(await evaluate("document.activeElement.value"), "");
+    assert.equal(await evaluate("document.activeElement.maxLength"), 200);
+    assert.match(await evaluate("document.querySelector('.dlg-marknote').textContent"), /Mark packet 4/);
+    await cdp("Input.insertText", { text: note });
+    await key("Enter", "Enter", 13);
+    await until("the mark", async () => (await marks()).join() === `4 user ${note}`);
+    await until("Enter to close the dialog", () => evaluate("!document.querySelector('.dlg-marknote')"));
+    await until("the note as the first line of the details", async () => (await first()) === `Marked: ${note}`);
+    assert.equal(await evaluate(`${row(4)}.title`).then((t) => t.includes(note)), true, "the row's tooltip");
+    // The agent hears of it once
+    assert.equal([...(await viewState()).matchAll(/INFO The user marked frame 4 with the note "this is where the kiosk showed the error"/g)].length, 1);
+    // Edit › Edit Mark's Note… on a marked packet; Cancel changes nothing
+    await fromMenuBar("Edit", "Edit Mark's Note");
+    await until("the dialog", () => noteBox("Edit Mark's Note"));
+    assert.equal(await evaluate("document.activeElement.value"), note);
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "not this" });
+    await click(...center(await box("[...document.querySelectorAll('.dlg-marknote button')].find((b) => b.textContent === 'Cancel')")));
+    await until("the dialog closed", () => evaluate("!document.querySelector('.dlg-marknote')"));
+    assert.deepEqual(await marks(), [`4 user ${note}`]);
+    // A menu title clicked right after its menu closed counts as the click that closed it
+    await sleep(400);
+    await fromMenuBar("Edit", "Edit Mark's Note");
+    await until("the dialog", () => noteBox("Edit Mark's Note"));
+    await evaluate("document.activeElement.select()");
+    await cdp("Input.insertText", { text: "edited note" });
+    await click(...center(await box("[...document.querySelectorAll('.dlg-marknote button')].find((b) => b.textContent === 'OK')")));
+    await until("the edited note", async () => (await first()) === "Marked: edited note");
+    assert.deepEqual(await marks(), ["4 user edited note"]);
+    // The user's note replaces the agent's mark, and says so
+    await call("mark_frames", { frames: [4], note: "by the agent" });
+    await until("the agent's mark", async () => (await marks()).join() === "4 agent by the agent");
+    await fromMenu(4, "Edit Mark's Note");
+    await until("the dialog", () => noteBox("Edit Mark's Note"));
+    assert.equal(await evaluate("document.activeElement.value"), "by the agent");
+    assert.match(await evaluate("document.querySelector('.dlg-marknote').textContent"), /Agent marked it; your mark replaces its mark/);
+    await key("Enter", "Enter", 13);
+    await until("the user's mark", async () => (await marks()).join() === "4 user by the agent");
+    await call("clear_marks", {});
+    await until("no marks", async () => (await marks()).length === 0);
+    // Several selected: one note on all, one event
+    const shiftClick = async ([x, y]) => {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1, modifiers: 8 });
+      await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1, modifiers: 8 });
+    };
+    // A click on a row the list is just redrawing can be lost: clicked again until it counts
+    await until("frame 6", async () => {
+      if ((await state()).selected !== 6) await click(...center(await box(row(6))));
+      return (await state()).selected === 6;
+    });
+    await shiftClick(center(await box(row(8))));
+    await until("three selected", async () => (await state()).selectedCount === 3);
+    await fromMenu(7, "Packets with Note");
+    await until("the dialog", () => noteBox("Mark Packet with Note"));
+    assert.match(await evaluate("document.querySelector('.dlg-marknote').textContent"), /Mark the 3 selected packets/);
+    await cdp("Input.insertText", { text: "the burst" });
+    await key("Enter", "Enter", 13);
+    await until("three marks", async () => (await marks()).join() === "6 user the burst,7 user the burst,8 user the burst");
+    assert.equal([...(await viewState()).matchAll(/INFO The user marked frames 6, 7, 8 with the note "the burst"/g)].length, 1);
+  }).finally(async () => {
+    if (await evaluate("!!document.querySelector('.dlg-marknote')")) await key("Escape", "Escape", 27);
+    await call("clear_marks", {});
+  });
+
+  await check("browser: a question to the agent shows as waiting, its answer in the banner until dismissed, and the Questions dialog keeps both", async () => {
+    const banner = (sel) => evaluate(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); return e && !e.hidden && e.getClientRects().length ? e.textContent : null; })()`);
+    const waitLine = () => banner(".qb-wait-text");
+    // The two questions the checks before left open
+    await until("the waiting line", async () => (await waitLine()) === "Asked Agent 2 questions · waiting");
+    assert.equal(await banner(".qb-answer"), null, "nothing answered yet");
+    // The oldest one is answered first
+    await call("answer_question", { text: "It is a GET request." });
+    await until("the answer", async () => /^Agent answered: It is a GET request\./.test((await banner(".qb-answer")) ?? ""));
+    assert.equal(await banner(".qb-asked"), "You asked: What is this?");
+    assert.equal(await evaluate("document.querySelector('.qb-asked').title"), "What is this?");
+    await until("one question left waiting", async () => (await waitLine()) === "Asked Agent about packet 4 · waiting");
+    await call("answer_question", { text: "Look at frame 9", frame: 9 });
+    await until("nothing waiting", async () => (await waitLine()) === null);
+    await until("the second answer", async () => /Agent answered: Look at frame 9/.test((await banner(".qb-answer")) ?? ""));
+    await until("frame 9 selected", async () => (await state()).selected === 9);
+    // One asked in the page: a quiet line by the answer of the one before
+    await fromMenu(6, "Ask Agent about This Packet");
+    await until("the question box", () => evaluate("document.activeElement?.classList.contains('ask-in') === true"));
+    await cdp("Input.insertText", { text: "Is this the error?" });
+    await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await until("the waiting line", async () => (await waitLine()) === "Asked Agent about packet 6 · waiting");
+    assert.match((await banner(".qb-answer")) ?? "", /Look at frame 9/, "the answer before stays until it is dismissed");
+    // A long answer wraps, in full, and is text: markup in it is not
+    const markup = '<b>bold</b> & <img src=x onerror="document.title=1"> ';
+    const long = `${markup}${"it keeps going and going and going ".repeat(12)}done`;
+    await call("answer_question", { text: long.slice(0, 600) });
+    const shown = long.slice(0, 600).replace(/\s+/g, " ").trim();
+    await until("the long answer", async () => (await banner(".qb-answer-text")) === shown);
+    const wrapped = await evaluate(`(() => { const t = document.querySelector('.qb-answer-text'), a = document.querySelector('.qb-answer'); return JSON.stringify({ lines: Math.round(t.getBoundingClientRect().height / parseFloat(getComputedStyle(t).lineHeight || '15')), cut: a.scrollWidth > a.clientWidth + 1, markup: !!document.querySelector('.question-banner img, .qb-answer-text *'), title: document.title }); })()`);
+    const w = JSON.parse(wrapped);
+    assert.ok(w.lines >= 3 && !w.cut && !w.markup && w.title !== "1", wrapped);
+    // Dismissed, it stays gone; the line for a question waiting is no answer
+    await click(...center(await box("document.querySelector('.qb-answer .ab-close')")));
+    await until("the banner dismissed", async () => (await banner(".qb-answer")) === null);
+    // The list: newest first, a waiting one says so, and an entry selects the packet it was about
+    assert.equal((await fetch(new URL("/api/agent/ask", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: JSON.stringify({ question: "And this one?" }) })).status, 200);
+    await fromMenuBar("Tools", "Questions to Agent");
+    await until("the list", () => evaluate("!!document.querySelector('.dlg-questions .q-item')"));
+    const items = () => evaluate("JSON.stringify([...document.querySelectorAll('.dlg-questions .q-item')].map((e) => e.textContent))").then(JSON.parse);
+    await until("four questions", async () => (await items()).length === 4);
+    const list = await items();
+    assert.match(list[0], /packet 6.*And this one\?Waiting for an answer/);
+    assert.match(list[1], /packet 6.*Is this the error\?Agent answered: <b>bold<\/b> &/);
+    assert.match(list[2], /Wake up\?Agent answered: Look at frame 9/);
+    assert.match(list[3], /What is this\?Agent answered: It is a GET request\./);
+    await until("the unsent one answered", async () => (await call("answer_question", { text: "Same as before." })).text.startsWith("Answered question 4"));
+    await until("its answer in the list", async () => /And this one\?Agent answered: Same as before\./.test((await items())[0]));
+    // The one about packet 4
+    const wake = "[...document.querySelectorAll('.dlg-questions .q-item')].find((e) => e.textContent.includes('Wake up?'))";
+    // The list scrolls inside the dialog
+    await evaluate(`${wake}.scrollIntoView({ block: 'center' })`);
+    await click(...center(await box(wake)));
+    await until("packet 4 selected", async () => (await state()).selected === 4);
+    await click(...center(await box("document.querySelector('.dlg-questions .dlg-footer button')")));
+    await until("the list closed", () => evaluate("!document.querySelector('.dlg-questions')"));
+    // The answer given last is the one the banner shows again, and dismissing it takes it away for good
+    await click(...center(await box("document.querySelector('.qb-answer .ab-close')")));
+    await until("the banner dismissed", async () => (await banner(".qb-answer")) === null);
+    assert.equal(await banner(".question-banner"), null);
+  }).finally(async () => {
+    if (await evaluate("!!document.querySelector('.dlg-questions')")) await click(...center(await box("document.querySelector('.dlg-questions .dlg-footer button')")));
+  });
 
   await check("browser: with the agent attached, an error the user runs into shows in the page and the agent hears it once, whether the server refused the request or only the page knew", async () => {
     const gone = join(home, "gone.pcapng");
@@ -1123,7 +1261,7 @@ try {
       await cdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "n", code: "KeyN", windowsVirtualKeyCode: 78 });
       await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "n", code: "KeyN", windowsVirtualKeyCode: 78 });
       const tap = await woke(w);
-      const [, tapped] = /QUESTION The user pressed Now in the live capture, without words: what happened just before\? Frame (\d+) is the newest packet then, with the packet comment "WireBuddy Now"\./.exec(tap) ?? [];
+      const [, tapped] = /QUESTION The user pressed Now in the live capture, without words \(question \d+: answer in the chat and with answer_question, so the user sees it in the page\): what happened just before\? Frame (\d+) is the newest packet then, with the packet comment "WireBuddy Now"\./.exec(tap) ?? [];
       assert.ok(tapped, tap);
       const [, filter] = /"filter":"(frame\.time_epoch >= \d+\.\d{3} && frame\.time_epoch <= \d+\.\d{3})"/.exec(tap) ?? [];
       assert.ok(filter, tap);
@@ -1150,7 +1288,7 @@ try {
       await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: x + 200, y: y + 200, button: "left", buttons: 1 });
       await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: x + 200, y: y + 200, button: "left", clickCount: 1 });
       const hold = await woke(w);
-      const [, a, b] = /QUESTION The user held Now for 1\.\d s in the live capture, without words: what happened then\? Frames (\d+) to (\d+) came meanwhile, the first and last with packet comments\./.exec(hold) ?? [];
+      const [, a, b] = /QUESTION The user held Now for 1\.\d s in the live capture, without words \(question \d+: answer in the chat and with answer_question, so the user sees it in the page\): what happened then\? Frames (\d+) to (\d+) came meanwhile, the first and last with packet comments\./.exec(hold) ?? [];
       assert.ok(a, hold);
       // 200 packets a second
       assert.ok(b - a > 200 && b - a < 400, `${a} to ${b}`);
@@ -1169,7 +1307,7 @@ try {
       await call("stop_capture");
       await until("the capture stopped", async () => (await state()).capture.status === "idle");
       await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-      assert.match(await woke(w), /QUESTION The user held Now for \d+\.\d s in the live capture, without words: what happened then\? Frames \d+ to \d+ came meanwhile, the first and last with packet comments\./);
+      assert.match(await woke(w), /QUESTION The user held Now for \d+\.\d s in the live capture, without words \(question \d+: answer in the chat and with answer_question, so the user sees it in the page\): what happened then\? Frames \d+ to \d+ came meanwhile, the first and last with packet comments\./);
       assert.equal(await evaluate(autoScroll), false, "the stop keeps the agent's packet in view");
 
       // New files would drop the comments

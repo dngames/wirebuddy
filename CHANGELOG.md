@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- A question to the agent (Ask Agent, Now) shows in the page: a quiet line says it is waiting, and the answer the agent gives with the new `answer_question` tool takes its place in the banner until you dismiss it; Tools › Questions to Claude… lists the session's last 20 questions with their answers, and a click selects the packet a question was about
+- Mark Packet with Note… (the packet list's menu and Edit) gives a mark a note of your own, Edit Mark's Note… changes it, and the agent hears which packets got which note; Mark Packet stays the quick toggle
 - The agent's mark on a packet the user marked still replaces it, but `mark_frames` now names those frames and the notice the user gets says so
 - A packet's mark shows as the first line of its details ("Marked by Claude: note", "Marked: note"), and Go › Marked Packets shows a note in full, wrapped, not cut off
 - Opening another capture clears a display filter on `frame.number` (it named the other capture's packets) and says so; the notice of restored marks says how many the display filter hides, so they no longer read as lost

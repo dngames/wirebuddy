@@ -183,6 +183,32 @@ try {
     assert.equal((await first()).fn, "frame");
   });
 
+  await check("marks with a note for the packets a dialog showed: the user's, with the note on every packet, one event per action", async () => {
+    const state = (await api("/api/state")).json;
+    const view = { file: state.file, filter: "", generation: state.generation };
+    await api("/api/marks/clear", {});
+    await api("/api/events/take", {});
+    const r = await api("/api/marks", { note: "the kiosk showed the error", frame: 4, rows: [[2, 4]], view });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { ok: true, frames: [3, 4, 5], count: 3 });
+    assert.deepEqual((await api("/api/state")).json.marks, [3, 4, 5].map((frame) => ({ frame, note: "the kiosk showed the error", by: "user" })));
+    assert.deepEqual((await api("/api/events/take", {})).json.events.map((e) => `${e.level} ${e.text}`), ['INFO The user marked frames 3, 4, 5 with the note "the kiosk showed the error"']);
+    assert.deepEqual((await api("/api/frame?num=4")).json.tree[0], { l: "Marked: the kiosk showed the error", t: "proto" });
+    // The frame alone, a new note on a marked packet, and none
+    assert.equal((await api("/api/marks", { note: "edited", frame: 4, view })).json.count, 1);
+    assert.deepEqual((await api("/api/state")).json.marks.map((m) => [m.frame, m.note]), [[3, "the kiosk showed the error"], [4, "edited"], [5, "the kiosk showed the error"]]);
+    assert.equal((await api("/api/marks", { note: "", frame: 4, view })).json.count, 1);
+    assert.deepEqual((await api("/api/events/take", {})).json.events.map((e) => e.text), ['The user marked frame 4 with the note "edited"', "The user marked frame 4"]);
+    // A list that changed since, and what isn't a packet
+    assert.equal((await api("/api/marks", { note: "x", frame: 4, view: { ...view, filter: "tcp" } })).status, 409);
+    assert.equal((await api("/api/marks", { note: "x", frame: 4, rows: [[0, "a"]], view })).status, 400);
+    assert.equal((await api("/api/marks", { note: "x", frame: 999, view })).status, 400);
+    assert.equal((await api("/api/marks", { note: "x", frames: [999] })).json.count, 0);
+    assert.deepEqual((await api("/api/events/take", {})).json.events.filter((e) => /marked/.test(e.text)), [], "nothing marked, nothing to tell");
+    assert.equal((await api("/api/state")).json.marks.length, 3);
+    await api("/api/marks/clear", {});
+  });
+
   await check("a set whose members are separated by spaces gets a hint to use commas", async () => {
     const bad = await api("/api/filter/check?filter=" + encodeURIComponent("frame.number in {4 6}"));
     assert.equal(bad.json.ok, false);

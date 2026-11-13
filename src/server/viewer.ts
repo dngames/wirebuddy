@@ -11,6 +11,7 @@ import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type Sh
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
+import { aboutText, answered, openQuestion, withQuestion } from "./questions.ts";
 import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
@@ -37,6 +38,7 @@ import { VERSION } from "../shared/version.ts";
 import { countRanges, framesFilter, inRanges, mergeRanges, type Ranges } from "../shared/ranges.ts";
 import type {
   AskResult,
+  Question,
   NowResult,
   ConvRow,
   CaptureState,
@@ -111,6 +113,8 @@ export interface SharkdPhs {
 
 const LIVE_RELOAD_MS = 1000;
 const MAX_QUESTION = 2000;
+/** What a QUESTION event tells the agent about answering. */
+const answerHow = (id: number): string => `question ${id}: answer in the chat and with answer_question, so the user sees it in the page`;
 /** Longest frame set a question to the agent lists. */
 const MAX_QUESTION_FRAMES = 2000;
 /** Longest span a held Now flags. */
@@ -182,6 +186,7 @@ export class Viewer extends EventEmitter {
   private liveFailures = 0;
   private loadedSize = -1;
   private noticeId = 0;
+  private questionId = 0;
   private readonly wiresharkBin: string | null;
   private readonly profile: string | undefined;
   private readonly editcap: string;
@@ -1768,11 +1773,32 @@ export class Viewer extends EventEmitter {
     if (about) frames = this.framesAbout(about);
     else if (this.state.file) frames = this.selectedOrCurrent();
     const count = countRanges(frames);
-    const subject = count === 0 ? "" : count === 1 ? ` about frame ${frames[0][0]}` : ` about ${count} packets`;
+    const subject = count === 0 ? "" : ` about ${aboutText(frames[0][0], count)}`;
     const listed = framesFilter(frames, MAX_QUESTION_FRAMES) ?? `frames ${frames[0][0]} to ${frames[frames.length - 1][1]} (too many ranges to list)`;
     const woken = this.events.watched();
-    this.events.add("QUESTION", `The user asks you${subject}: ${text}`, count > 1 ? { frames: listed } : undefined);
+    const id = this.recordQuestion(text, about?.view.file ?? this.state.file, frames[0]?.[0] ?? null, count);
+    this.events.add("QUESTION", `The user asks you${subject} (${answerHow(id)}): ${text}`, count > 1 ? { frames: listed } : undefined);
     return { woken };
+  }
+
+  /** Keeps a question the user asked the agent, for the page to show its answer; its id. */
+  private recordQuestion(text: string, file: string | null, frame: number | null, count: number): number {
+    const id = ++this.questionId;
+    this.store.set({ questions: withQuestion(this.state.questions, { id, at: Date.now(), text, file, frame, count }) });
+    return id;
+  }
+
+  /**
+   * The agent's answer to a question of the user's (the oldest unanswered
+   * one without `id`), shown in the page; `frame` is selected for the user
+   * to look at. Refused when there is no such open question.
+   */
+  answerQuestion(text: string, id?: number, frame?: number): Question {
+    const question = openQuestion(this.state.questions, id);
+    const questions = answered(this.state.questions, question, text, Date.now());
+    if (frame !== undefined) this.select(frame, "agent");
+    this.store.set({ questions });
+    return question;
   }
 
   /**
@@ -1856,7 +1882,8 @@ export class Viewer extends EventEmitter {
                 ? `No packet came meanwhile; frame ${frames[0]} is the last one before${remark}.`
                 : `${spanned === 1 ? `Frame ${frames[0]} came` : `Frames ${frames[0]} to ${frames[1]} came`} meanwhile${remark}.`;
       const from = held ? end - held : end - NOW_BACK_S;
-      this.events.add("QUESTION", `The user ${held ? `held Now for ${secs}` : "pressed Now"} in the live capture, without words: what happened ${held ? "then" : "just before"}? ${where}`, {
+      const id = this.recordQuestion(held ? `Held Now for ${secs}` : "Pressed Now", left ? null : path, frames[0] ?? null, held && spanned ? spanned : frames.length ? 1 : 0);
+      this.events.add("QUESTION", `The user ${held ? `held Now for ${secs}` : "pressed Now"} in the live capture, without words (${answerHow(id)}): what happened ${held ? "then" : "just before"}? ${where}`, {
         filter: `frame.time_epoch >= ${(Math.floor(from * 1000) / 1000).toFixed(3)} && frame.time_epoch <= ${(Math.ceil(end * 1000) / 1000).toFixed(3)}`,
       });
     }

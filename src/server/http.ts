@@ -9,6 +9,7 @@ import { ReportedError } from "./events.ts";
 import { keptSummary } from "./investigation.ts";
 import { listenLoopback } from "./loopback.ts";
 import { changedFields, patchMessage } from "./patch.ts";
+import { MAX_MARKS } from "./edits.ts";
 import { TargetExists, toRanges } from "./export.ts";
 import { OBJECT_KINDS, objectDir } from "./objects.ts";
 import { ApiError } from "./paneldata.ts";
@@ -17,10 +18,10 @@ import { CAPTURE_FILE } from "./capturefile.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { CONV_TYPES, type ConvType } from "./stats.ts";
 import type { Viewer } from "./viewer.ts";
-import type { CaptureRequest, CaptureState, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, FindingsResult, ForgetResult, IoGraphSpec, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
+import type { CaptureRequest, CaptureState, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, FindingsResult, ForgetResult, IoGraphSpec, MarkResult, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { leftOutText } from "../shared/ownport.ts";
-import type { Ranges } from "../shared/ranges.ts";
+import { countRanges, type Ranges } from "../shared/ranges.ts";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -101,7 +102,13 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/open": async (_q, b) => (await viewer.open(String(b.path ?? "")), ok),
     "/api/close": async () => (await viewer.close(), ok),
     "/api/reload": async () => (await viewer.reload(true), ok),
-    "/api/marks": (_q, b) => (viewer.mark(numbers(b.frames), String(b.note ?? ""), "user"), ok),
+    // The frames given, else the packets the dialog was opened for, in the view it showed
+    "/api/marks": (_q, b): MarkResult => {
+      const view = viewKey(b.view);
+      const frames = view ? rangeFrames(viewer.framesAbout({ frame: b.frame ?? null, rows: rowRanges(b.rows), view })) : numbers(b.frames);
+      const marked = viewer.mark(frames, String(b.note ?? ""), "user").frames;
+      return { ok: true, ...commentResult(marked) };
+    },
     "/api/marks/clear": (_q, b) => (viewer.clearMarks(b.frames ? numbers(b.frames) : undefined), ok),
     "/api/marks/toggle": () => (viewer.toggleMarks("user"), ok),
     "/api/marks/displayed": (_q, b) => (viewer.markDisplayed(flag(b.on, "on"), "user"), ok),
@@ -314,6 +321,12 @@ function numbers(value: unknown): number[] {
   return value.map(Number).filter(Number.isInteger);
 }
 
+/** The frame numbers of `ranges`; refused when they are more than can be marked. */
+function rangeFrames(ranges: Ranges): number[] {
+  if (countRanges(ranges) > MAX_MARKS) throw new HttpError(400, `at most ${MAX_MARKS} frames can be marked`);
+  return ranges.flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i));
+}
+
 /** Row ranges as [first, last] integer pairs; absent means none given. */
 function rowRanges(value: unknown): Ranges | undefined {
   if (value === undefined || value === null) return undefined;
@@ -399,6 +412,10 @@ function userActivity(path: string, b: any, result: unknown, capture: CaptureSta
       const f = String(b.filter ?? "").trim();
       if (r && r.ok === false) return { level: "WARNING", text: `The user's display filter "${f}" was rejected: ${r.error ?? "invalid"}` };
       return { level: "INFO", text: f ? `The user applied the display filter "${f}"` : "The user cleared the display filter" };
+    }
+    case "/api/marks": {
+      const r = result as MarkResult;
+      return r.count ? { level: "INFO", text: `The user marked ${framesText(r)}${b.note ? ` with the note ${quoted(b.note)}` : ""}` } : null;
     }
     case "/api/marks/toggle":
       return { level: "INFO", text: "The user marked or unmarked the selected packets" };
