@@ -33,6 +33,7 @@ import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, S
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
+import { PanelOffers } from "./offers.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
@@ -195,8 +196,6 @@ const MAX_TAIL_FAILURES = 3;
 const WARM_ROWS = 500;
 /** How long after a client last asked for the list's newest rows the rows it gains are still read ahead. */
 const FOLLOWED_MS = 3000;
-/** How often unmatched panel offers are checked again during a live capture. */
-const OFFER_LIVE_MS = 30_000;
 /** The prelude's preferences for the Decode As entries, and for how applying them went. */
 const DECODE_AS = "wirebuddy.decode_as";
 const DECODE_AS_STATUS = "wirebuddy.decode_as_status";
@@ -226,16 +225,6 @@ export class Viewer extends EventEmitter {
   private readonly panelData: PanelData;
   /** Why the epoch changed last, for the panels' reset. */
   private epochWhy = "file";
-  /** Panel offers for the open file: matched ones (with their filter), invalid filters, dismissed ones. */
-  private offerFile: string | null = null;
-  private readonly offerMatched = new Map<string, { offer: PanelOffer; filter: string }>();
-  private readonly offerErrors = new Map<string, { filter: string; error: string }>();
-  private readonly offerDismissed = new Set<string>();
-  private offerSeq = 0;
-  private offerRun: Promise<void> = Promise.resolve();
-  private offerTimer: NodeJS.Timeout | null = null;
-  /** Offer filters that matched no packet of the file up to a frame, for the file and epoch they were checked with. */
-  private offerChecked = { file: "", epoch: -1, to: new Map<string, number>() };
   /** Inode and first bytes of the file read last: another file at the same path, or other first bytes, is a rewritten capture. */
   private loadedIno = 0;
   private loadedHead: Buffer = Buffer.alloc(0);
@@ -261,6 +250,23 @@ export class Viewer extends EventEmitter {
   private readonly profile: string | undefined;
   private readonly editcap: string;
   private readonly mergecap: string;
+  /** The panels offered for the open file. */
+  private readonly offers = new PanelOffers({
+    state: () => this.state,
+    set: (patch) => this.set(patch),
+    offers: () => this.extensions.offers(),
+    checkFilter: (filter) => this.checkFilter(filter),
+    warn: (text) => this.events.add("WARNING", text),
+    capturing: () => this.capture.running,
+    followingCapture: () => this.followingCapture(),
+    heldReason: (filter) => this.heldReason(filter),
+    liveTail: () => this.tail,
+    tailWorked: (tail) => this.tailWorked(tail),
+    tailFailed: (tail, err) => this.tailFailed(tail, err),
+    memoryShort: () => this.memoryShort(),
+    anyMatch: (filters, release) => this.panelData.anyMatch(filters, release),
+    isOpen: (name) => this.panels.isOpen(name),
+  });
   /** What Follow Stream and Export Objects ask of this viewer. */
   private readonly streamsView: StreamsView = {
     engine: () => this.engine,
@@ -372,7 +378,7 @@ export class Viewer extends EventEmitter {
     this.panels = new Panels(this.extensions, this.events, opts.panelRuntime ?? "");
     this.panels.on("change", () => {
       this.set({ panels: this.panels.list() });
-      this.showOffers();
+      this.offers.showOffers();
     });
     this.sharkdBin = opts.sharkd ?? "sharkd";
     const env = () => this.extensions.env();
@@ -486,7 +492,7 @@ export class Viewer extends EventEmitter {
           this.finalRead = false;
           this.publishTail();
         })
-        .then(() => this.checkOffers(false), () => {});
+        .then(() => this.offers.checkOffers(false), () => {});
     });
     this.investigations = opts.investigations ?? null;
     if (this.investigations) {
@@ -804,7 +810,7 @@ export class Viewer extends EventEmitter {
           this.events.add("WARNING", text);
           this.emit("toast", "error", text);
         }
-        void this.checkOffers(true);
+        void this.offers.checkOffers(true);
       } catch (err) {
         const message = printable((err as Error).message);
         this.set({ loading: false, loadError: message.includes(file) ? message : `${file}: ${message}` });
@@ -1328,7 +1334,7 @@ export class Viewer extends EventEmitter {
         epoch: this.newEpoch("closed"),
         tail: null,
       });
-      void this.checkOffers(true);
+      void this.offers.checkOffers(true);
     });
   }
 
@@ -2527,7 +2533,7 @@ export class Viewer extends EventEmitter {
       this.set({ epoch: this.newEpoch(why) });
       this.panelData.hold(false);
       // A panel's offer may need a protocol only this brings
-      void this.checkOffers(true);
+      void this.offers.checkOffers(true);
     }
   }
 
@@ -2799,7 +2805,7 @@ export class Viewer extends EventEmitter {
     const list = this.extensions.listing();
     for (const e of list.extensions) {
       if (!e.panel) continue;
-      const bad = this.offerErrors.get(e.name);
+      const bad = this.offers.errorOf(e.name);
       if (bad) e.panel.offerError = `invalid offer filter "${bad.filter}": ${bad.error}`;
       if (!this.panels.isOpen(e.name)) continue;
       e.panel.open = true;
@@ -2808,138 +2814,12 @@ export class Viewer extends EventEmitter {
     return list;
   }
 
-  /**
-   * Checks the offers of enabled panels against the open capture (`all`: also
-   * the ones matched already): each filter is checked, then whether a packet
-   * matches it (see offerMatches). Matches show as panelOffers.
-   */
-  private checkOffers(all: boolean): Promise<void> {
-    const seq = ++this.offerSeq;
-    if (this.offerTimer) clearTimeout(this.offerTimer);
-    this.offerTimer = null;
-    this.offerRun = this.offerPass(seq, all).catch((err) => {
-      if (seq !== this.offerSeq) return;
-      this.showOffers();
-      // Another file or extensions meanwhile: the pass that follows checks again
-      if (!(err instanceof ApiError && ["stale", "busy", "no-capture", "gone"].includes(err.code))) this.events.add("WARNING", `Checking the panels' offers failed: ${printable((err as Error).message)}`);
-    });
-    return this.offerRun;
-  }
-
-  private async offerPass(seq: number, all: boolean): Promise<void> {
-    const file = this.state.file;
-    if (file !== this.offerFile) {
-      this.offerFile = file;
-      this.offerMatched.clear();
-      this.offerDismissed.clear();
-      this.showOffers();
-    }
-    const offers = this.extensions.offers();
-    // Offers gone or changed since are no offers any more
-    for (const [name, m] of this.offerMatched) if (!offers.some((o) => o.name === name && o.filter === m.filter)) this.offerMatched.delete(name);
-    for (const [name, e] of this.offerErrors) if (!offers.some((o) => o.name === name && o.filter === e.filter)) this.offerErrors.delete(name);
-    const valid: typeof offers = [];
-    for (const o of offers.filter((x) => all || !this.offerMatched.has(x.name))) {
-      const check = await this.checkFilter(o.filter);
-      if (seq !== this.offerSeq) return;
-      if (check.ok) {
-        this.offerErrors.delete(o.name);
-        valid.push(o);
-        continue;
-      }
-      const error = check.error ?? "invalid";
-      if (this.offerErrors.get(o.name)?.error !== error) this.events.add("WARNING", `The offer filter "${o.filter}" of the panel "${o.name}" is invalid, so it is never offered: ${error}`);
-      this.offerErrors.set(o.name, { filter: o.filter, error });
-      this.offerMatched.delete(o.name);
-    }
-    if (file && this.state.totalFrames > 0 && valid.length) {
-      const found = await this.offerMatches(file, valid.map((o) => o.filter), () => seq === this.offerSeq);
-      if (seq !== this.offerSeq || this.state.file !== file) return;
-      for (const o of valid) {
-        // Not checked this time: as it was
-        if (!found.has(o.filter)) continue;
-        if (found.get(o.filter)) this.offerMatched.set(o.name, { offer: { name: o.name, label: o.label, text: o.text }, filter: o.filter });
-        else this.offerMatched.delete(o.name);
-      }
-    }
-    this.showOffers();
-    // A live capture may bring matching packets later
-    if (file && this.capture.running && this.followingCapture() && offers.some((o) => !this.offerMatched.has(o.name) && !this.offerErrors.has(o.name))) {
-      this.offerTimer = setTimeout(() => {
-        this.offerTimer = null;
-        if (this.capture.running && this.followingCapture()) void this.checkOffers(false);
-      }, OFFER_LIVE_MS);
-      this.offerTimer.unref();
-    }
-  }
-
-  /**
-   * Which of `filters` match a packet of `file`. Of a live capture, from
-   * slices of the live tail: each filter from the frame it was found in none
-   * up to on. Without a tail, and for filters slices can't check (see
-   * heldReason), by the panel engine reading the whole file, which waits
-   * while memory is short during a capture. Only while `wanted`.
-   */
-  private async offerMatches(file: string, filters: string[], wanted: () => boolean): Promise<Map<string, boolean>> {
-    const { epoch } = this.state;
-    if (this.offerChecked.file !== file || this.offerChecked.epoch !== epoch) this.offerChecked = { file, epoch, to: new Map() };
-    const checked = this.offerChecked.to;
-    const found = new Map<string, boolean>();
-    // Those found are checked from the start again: their match may lie before `to`
-    const advance = (fs: string[], to: number): void => {
-      if (this.offerChecked.to !== checked || !wanted()) return;
-      for (const f of fs) if (!found.get(f)) checked.set(f, Math.max(checked.get(f) ?? 0, to));
-    };
-    const held = new Set<string>();
-    for (const f of filters) if (await this.heldReason(f)) held.add(f);
-    const tail = this.tail?.file === file && !this.tail.broken() ? this.tail : null;
-    const sliced = tail ? filters.filter((f) => !held.has(f)) : [];
-    if (tail && sliced.length) {
-      try {
-        const r = await tail.anyMatch(sliced, (f) => (checked.get(f) ?? 0) + 1, wanted);
-        this.tailWorked(tail);
-        if (!wanted()) return found;
-        for (const f of sliced) found.set(f, r.found.has(f));
-        advance(sliced, r.to);
-      } catch (err) {
-        // The live tail went, broke or failed: the whole file says
-        if (!(err instanceof Superseded)) this.tailFailed(tail, err as Error);
-      }
-    }
-    const whole = filters.filter((f) => !found.has(f));
-    if (whole.length && wanted() && !(this.capture.running && this.memoryShort())) {
-      // Slices check them next time: the panel engine needn't keep the file
-      const release = this.capture.running && whole.every((f) => !held.has(f));
-      const { matches, frames } = await this.panelData.anyMatch(whole, release);
-      for (const f of whole) found.set(f, matches.get(f) ?? false);
-      advance(whole, frames);
-    }
-    return found;
-  }
-
-  /** The matched offers the user sees: not of open panels, not dismissed. */
-  private showOffers(): void {
-    const offers = this.shownOffers();
-    if (JSON.stringify(offers) !== JSON.stringify(this.state.panelOffers)) this.set({ panelOffers: offers });
-  }
-
-  private shownOffers(): PanelOffer[] {
-    const offers = [...this.offerMatched.values()].map((m) => m.offer).filter((o) => !this.panels.isOpen(o.name) && !this.offerDismissed.has(o.name));
-    return offers.sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  /** The user dismissed a panel's offer: not offered again for this file. */
   dismissOffer(name: string): void {
-    this.offerDismissed.add(name);
-    this.showOffers();
+    this.offers.dismissOffer(name);
   }
 
-  /** Panels offered for the open capture, once a check that runs now is done (or after `ms`). */
   async matchedOffers(ms = 5000): Promise<PanelOffer[]> {
-    let timer: NodeJS.Timeout | undefined;
-    await Promise.race([this.offerRun, new Promise<void>((done) => (timer = setTimeout(done, ms)))]);
-    clearTimeout(timer);
-    return this.shownOffers();
+    return this.offers.matchedOffers(ms);
   }
 
   /**
@@ -3017,7 +2897,7 @@ export class Viewer extends EventEmitter {
         this.set({ extensions: { ...this.state.extensions, revision: this.state.extensions.revision + 1 }, epoch: this.newEpoch("extensions") });
         this.panelData.hold(false);
         this.refreshExtensions();
-        void this.checkOffers(true);
+        void this.offers.checkOffers(true);
       }
       if (rolledBack) {
         // Going back without the one switched on fixed it: it stays off
@@ -3044,7 +2924,7 @@ export class Viewer extends EventEmitter {
     // A panel alone needs no sharkd restart, nor does a switch where sharkd loads no extensions
     if (this.extensions.unavailable || !this.extensions.list().find((e) => e.name === name)?.lua) {
       this.refreshExtensions();
-      void this.checkOffers(true);
+      void this.offers.checkOffers(true);
       return;
     }
     await this.reloadExtensions({ name, on });
