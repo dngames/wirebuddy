@@ -508,8 +508,11 @@ try {
       await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1, modifiers: 8 });
       await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1, modifiers: 8 });
     };
-    await click(...center(await box(row(6))));
-    await until("frame 6", async () => (await state()).selected === 6);
+    // A click on a row the list is just redrawing can be lost: clicked again until it counts
+    await until("frame 6", async () => {
+      if ((await state()).selected !== 6) await click(...center(await box(row(6))));
+      return (await state()).selected === 6;
+    });
     await shiftClick(center(await box(row(8))));
     await until("three selected", async () => (await state()).selectedCount === 3);
     await fromMenu(7, "Packets with Note");
