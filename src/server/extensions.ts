@@ -1068,7 +1068,10 @@ Rules:
 - Don't navigate or open windows: a panel that navigates is closed. One that stops responding
   for 20 s is stopped.
 - Call wb.ready() once the first view is drawn. On "reset" (another file, re-read extensions, TLS
-  keys or Decode As) throw away what you read and read again.
+  keys or Decode As) throw away what you read and read again. After File › Close the reset comes with
+  wb.view.file null: clear the panel and show "no capture" instead of reading; the next reset says
+  another capture is open. A read made while none is open rejects with .code "no-capture" (a "stale"
+  one with "stale" if the capture changed meanwhile); neither is reported to you, so they need no catch.
 - A read is a snapshot: wb.packets and wb.all miss what a live capture adds afterwards, and a panel that
   only reads at the start stays empty or stale. To follow the capture, read through wb.subscribe, or
   read again when "packets" fires (wb.view.live: a capture runs):

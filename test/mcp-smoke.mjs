@@ -580,6 +580,7 @@ try {
     assert.match(t, /wb\.ready\(\)[\s\S]*wb\.subscribe\(q/);
     // Following a live capture is the panel's job, and what it picks by must outlast a run
     assert.match(t, /wb\.packets and wb\.all miss what a live capture adds[\s\S]*wb\.subscribe\(q[\s\S]*wb\.on\("packets", draw\)/);
+    assert.match(t, /After File › Close the reset comes with\s+wb\.view\.file null[\s\S]*"no-capture"/);
     assert.match(t, /Don't pick packets by a client's TCP port[\s\S]*ephemeral ports/);
   });
   mkdirSync(join(extDir, "viewpanel", "panel"), { recursive: true });

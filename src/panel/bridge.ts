@@ -144,10 +144,15 @@ const FILTER_WAIT_MS = 5 * 60_000;
       report({ kind: "log", level, text: args.map(text).join(" ").slice(0, 2000) });
     };
   }
-  const reportError = (e: unknown): void => report({ kind: "error", message: e instanceof Error ? e.message : text(e), stack: e instanceof Error ? e.stack : "" });
+  /** A refusal that the capture closing or changing explains: the panel hears of that in a reset, and it is no bug of its own. */
+  const expected = (e: unknown): boolean => e instanceof WbError && (e.code === "no-capture" || e.code === "stale");
+  const reportError = (e: unknown): void => {
+    if (!expected(e)) report({ kind: "error", message: e instanceof Error ? e.message : text(e), stack: e instanceof Error ? e.stack : "" });
+  };
   addEventListener("error", (e) => report({ kind: "error", message: e.message, stack: e.error instanceof Error ? e.error.stack : `${e.filename}:${e.lineno}:${e.colno}` }));
   addEventListener("unhandledrejection", (e) => {
     const r = e.reason;
+    if (expected(r)) return;
     report({ kind: "error", message: r instanceof Error ? r.message : text(r), stack: r instanceof Error ? r.stack : "" });
   });
   document.addEventListener("securitypolicyviolation", (e) => report({ kind: "csp", directive: e.effectiveDirective, blocked: e.blockedURI }));

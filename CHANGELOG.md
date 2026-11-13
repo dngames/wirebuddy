@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- A panel whose capture is closed (or changed) while it reads no longer counts as a problem sent to the agent: a read with no capture open or a stale one rejects with `no-capture` or `stale`, which is not reported, and the panel guide says what a panel sees then
 - The agent's panel guide says how a panel follows a live capture (`wb.subscribe`, or reading again on the `packets` event) and not to pick packets by a client's ephemeral TCP port
 - The agent's extension guide has a template for a length-prefixed protocol over TCP (several messages in a segment, a message split over segments, every message in the Info column) and says what several messages in one packet mean for display filters and columns
 - A question to the agent (Ask Agent, Now) shows in the page: a quiet line says it is waiting, and the answer the agent gives with the new `answer_question` tool takes its place in the banner until you dismiss it; Tools › Questions to Claude… lists the session's last 20 questions with their answers, and a click selects the packet a question was about

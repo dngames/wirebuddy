@@ -47,6 +47,25 @@ wb.ready();
 `,
 );
 
+// What a panel's author writes first: draws what it read and, on a reset, says so and reads again, catching nothing
+const reader = join(home, ".local/share/wirebuddy/extensions/reader/panel");
+mkdirSync(reader, { recursive: true });
+writeFileSync(join(home, ".local/share/wirebuddy/extensions/reader/extension.json"), JSON.stringify({ label: "Reader", version: "1", panel: { title: "Reader" } }));
+writeFileSync(
+  join(reader, "main.js"),
+  `async function draw() {
+  const page = await wb.all({ filter: "tcp" });
+  wb.status("reads " + page.n + " packets of " + wb.view.file);
+}
+await draw();
+wb.on("reset", () => {
+  if (!wb.view.file) wb.status("no capture");
+  return draw();
+});
+wb.ready();
+`,
+);
+
 const offered = join(home, ".local/share/wirebuddy/extensions/offered");
 mkdirSync(join(offered, "panel"), { recursive: true });
 writeFileSync(join(offered, "extension.json"), JSON.stringify({ label: "Offered", version: "1", panel: { offer: { filter: "http.response.code == 404", text: "Show it" } } }));
@@ -430,6 +449,29 @@ try {
     await sleep(300);
     seen += await viewState();
     assert.doesNotMatch(seen, /ResizeObserver/);
+  });
+
+  await check("browser: a panel survives its capture being closed and another opened, without a problem for the agent", async () => {
+    const readerStatus = async () => (await state()).panels.find((p) => p.name === "reader")?.statusText;
+    const post = (path) => fetch(new URL(path, ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: "{}" });
+    const events = async (after) => (await (await fetch(new URL(`/api/events?after=${after}`, ui.origin), { headers: { "X-WireBuddy-Token": token } })).json());
+    const { last } = await events(Number.MAX_SAFE_INTEGER);
+    await call("panel", { action: "open", name: "reader", wait_ms: 10_000 });
+    try {
+      await until("the panel's first reading", async () => /^reads \d+ packets of http\.pcapng$/.test((await readerStatus()) ?? ""));
+      assert.equal((await post("/api/close")).status, 200);
+      await until("the panel to hear of it", async () => /no capture/i.test((await readerStatus()) ?? ""));
+      await sleep(500);
+      assert.equal((await events(last)).events.filter((e) => e.level === "ERROR" || /^Panel/.test(e.text)).length, 0, JSON.stringify((await events(last)).events));
+      assert.match(await viewState(), /^Panels open: reader \(ready, opened by agent\)$/m);
+      assert.match((await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") })).text, /29 frames/);
+      await until("the panel to read the new capture", async () => /^reads \d+ packets of http\.pcapng$/.test((await readerStatus()) ?? ""));
+      await sleep(300);
+      assert.equal((await events(last)).events.filter((e) => e.level === "ERROR").length, 0, JSON.stringify((await events(last)).events));
+    } finally {
+      await call("panel", { action: "close", name: "reader" });
+      if (!(await state()).file) await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
+    }
   });
 
   await check("browser: a mark is the first line of the selected packet's details and changes with it; Go › Marked Packets shows a long note in full", async () => {
