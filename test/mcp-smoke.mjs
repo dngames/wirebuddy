@@ -162,10 +162,13 @@ try {
   });
   await call("set_columns", { columns: [] }, (t) => assert.match(t, /Removed/));
   await call("expert_info", { min_severity: "Note" }, (t) => {
-    assert.match(t, /^4 expert items in 2 groups/);
+    // The Expert Information dialog counts all of them, Chat too
+    assert.match(t, /^12 expert items \(4 Note, 8 Chat\); listing the 4 at Note or above, in 2 groups /);
     assert.match(t, /Note \/ Sequence \/ TCP \/ This frame initiates the connection closing: 2/);
   });
-  await call("expert_info", { min_severity: "Error" }, (t) => assert.match(t, /No expert items/));
+  await call("expert_info", { min_severity: "Chat" }, (t) => assert.match(t, /^12 expert items \(4 Note, 8 Chat\) in \d+ groups /));
+  await call("expert_info", { min_severity: "Error" }, (t) => assert.match(t, /^12 expert items \(4 Note, 8 Chat\), none at Error or above$/));
+  await call("expert_info", { min_severity: "Error", filter: "dns" }, (t) => assert.match(t, /^No expert items at Error or above for "dns"$/));
   await call("io_graph", { filters: ["", "http"], interval_ms: 1 }, (t) => {
     assert.match(t, /packets per 1 ms/);
     assert.match(t, /"all packets": total 29/);

@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 - The agent's mark on a packet the user marked still replaces it, but `mark_frames` now names those frames and the notice the user gets says so
 - A packet's mark shows as the first line of its details ("Marked by Claude: note", "Marked: note"), and Go › Marked Packets shows a note in full, wrapped, not cut off
 - Opening another capture clears a display filter on `frame.number` (it named the other capture's packets) and says so; the notice of restored marks says how many the display filter hides, so they no longer read as lost
+- The agent's `expert_info` counts every expert item in its header as the Expert Information dialog does (Chat and Comment too), with the count per severity, and says how many of them it lists
 - A live capture on `lo`, `lo0` or `any` leaves out WireBuddy's own traffic (TCP on its port on the loopback addresses), which the page's fetches made with every new packet and which filled the capture, the I/O graph and Find String; your capture filter stays as typed and is combined with that, and the capture's state, the status bar and `start_capture` say it
 - Run as root, extensions and Decode As say that sharkd loads no Lua plugins for root (Wireshark's rule) and to run WireBuddy as an ordinary user, instead of "this sharkd has no Lua support"
 - The page gets only what changed of the view's state after the first, so many marks or a long selection no longer slow a live capture's updates

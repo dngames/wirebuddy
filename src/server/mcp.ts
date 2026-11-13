@@ -777,8 +777,17 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     tool(async ({ min_severity, filter, frames_per_item }) => {
       const order = ["Comment", "Chat", "Note", "Warning", "Error"];
       const rank = (sev: string) => order.indexOf(sev === "Warn" ? "Warning" : sev);
-      const items = (await viewer.expert(filter)).filter((e) => rank(e.severity) >= rank(min_severity));
-      if (!items.length) return `No expert items at ${min_severity} or above${filter ? ` for "${filter}"` : ""}`;
+      const all = await viewer.expert(filter);
+      const items = all.filter((e) => rank(e.severity) >= rank(min_severity));
+      // The Expert Information dialog counts every severity: so does the header, which also says what the list below holds
+      const bySeverity = order
+        .map((sev) => [sev, all.filter((e) => rank(e.severity) === rank(sev)).length] as const)
+        .filter(([, n]) => n)
+        .reverse()
+        .map(([sev, n]) => `${n} ${sev}`)
+        .join(", ");
+      const total = `${all.length} expert item${all.length === 1 ? "" : "s"} (${bySeverity || "none"})`;
+      if (!items.length) return `${all.length ? `${total}, none` : "No expert items"} at ${min_severity} or above${filter ? ` for "${filter}"` : ""}`;
       const groups = new Map<string, { severity: string; group: string; protocol: string; message: string; frames: number[] }>();
       for (const e of items) {
         const key = `${e.severity}|${e.group}|${e.protocol}|${e.message}`;
@@ -787,7 +796,8 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         groups.set(key, g);
       }
       const sorted = [...groups.values()].sort((a, b) => rank(b.severity) - rank(a.severity) || b.frames.length - a.frames.length);
-      const out = [`${items.length} expert items in ${sorted.length} groups${filter ? ` for "${filter}"` : ""} (severity / group / protocol / message: count, frames)`];
+      const listed = items.length === all.length ? "" : `; listing the ${items.length} at ${min_severity} or above,`;
+      const out = [`${total}${listed} in ${sorted.length} groups${filter ? ` for "${filter}"` : ""} (severity / group / protocol / message: count, frames)`];
       for (const g of sorted.slice(0, 60)) {
         const frames = g.frames.slice(0, frames_per_item).join(", ") + (g.frames.length > frames_per_item ? ", ..." : "");
         out.push(`${g.severity} / ${g.group} / ${g.protocol} / ${g.message}: ${g.frames.length}  [${frames}]`);
