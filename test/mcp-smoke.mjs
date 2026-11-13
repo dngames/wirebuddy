@@ -641,6 +641,25 @@ try {
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "reload" }, (t) => assert.match(t, /Extension "acme_tcp" loaded \(protocols: acme\)/));
+  // A Lua plugin in the user's Wireshark plugin folder with the description of the extension's protocol: the test says so, naming the file
+  const plugins = join(home, ".local/lib/wireshark/plugins");
+  mkdirSync(plugins, { recursive: true });
+  writeFileSync(join(plugins, "same-description.lua"), 'local other = Proto("othername", "ACME Messages")\nfunction other.dissector() end\n');
+  await call("extensions", { action: "test", name: "acme_tcp" }, (t) => {
+    assert.match(t, /^Extension "acme_tcp": loaded$/m);
+    assert.match(t, new RegExp(`^The Wireshark plugin ${plugins.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/same-description\\.lua failed to load because a protocol of it has the same description as one of this extension's: no two protocols can share one, and the extension came first, in the user's view too\\. Rename the extension's protocol \\(its Proto\\("name", "description"\\)\\), or remove or rename the plugin\\.$`, "m"));
+  });
+  // The reload names the extension the plugin lost to
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /WARNING A Lua plugin did not load: .*same-description\.lua:\d+: .*there cannot be two protocols with the same description\)\. A protocol of the extension "acme_tcp" has the same description or name as one in the Wireshark plugin .*same-description\.lua: only one of the two can load\. Rename the extension's protocol, or remove or rename the plugin\./));
+  // Without the plugin, the test is clean again; two extensions that clash say so at the reload, the second to load is the one that fails
+  rmSync(join(plugins, "same-description.lua"));
+  await call("extensions", { action: "test", name: "acme_tcp" }, (t) => assert.doesNotMatch(t, /failed to load because/));
+  addExtension("acme_twin", tcpTemplate);
+  await call("extensions", { action: "reload" }, (t) => {
+    assert.match(t, /WARNING Extension "acme_twin" did not load: .*there cannot be two protocols with the same description\)\. A protocol of the extension "acme_twin" has the same description or name as one in the extension "acme_tcp": only one of the two can load\. Rename the extension's protocol \(or the other extension's\)\./);
+  });
+  rmSync(join(extDir, "acme_twin"), { recursive: true });
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /^acme_tcp \[loaded\]/m));
   await call("query_packets", { filter: "acme", fields: ["frame.number", "acme.kind", "acme.length", "tcp.reassembled_in"] }, (t) => {
     // Three messages in frame 1; the split one is decoded in frame 3, the frame that completes it
     assert.match(t, /^1 \| 1 \| Status,Points,Status \| 2,4,0 \| $/m);

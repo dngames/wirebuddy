@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams", "protoclash"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -41,6 +41,7 @@ const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback, watchLines } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
+const { clashKind, protoDeclarations, sameProtocol, luaFilesBelow, clashingFile } = await import(join(out, "units.mjs"));
 const { follow, carriesTls } = await import(join(out, "units.mjs"));
 const { settingsDir, keptToken, readSetting, writeSetting, parseRecent, parseColumns } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
@@ -1233,6 +1234,29 @@ try {
     assert.deepEqual(sides(await follow({ requireFile() {}, engine: () => plain }, "HTTP", "tcp.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
     assert.equal(await carriesTls({ requireFile() {}, engine: () => ({ call: async (_m, p) => (assert.equal(p.filter, "(tcp.stream eq 0) && tls"), [{ num: 4 }]) }) }, "tcp.stream eq 0"), true);
     assert.equal(await carriesTls({ requireFile() {}, engine: () => ({ call: async () => [] }) }, "tcp.stream eq 1"), false);
+  });
+  await check("protocol clashes: the error says which kind, the Lua says which protocols, and the plugin that declares the same one is found", () => {
+    assert.equal(clashKind("...ins/x.lua:1: bad argument #2 to 'Proto' (Proto_new: there cannot be two protocols with the same description)"), "description");
+    assert.equal(clashKind("Proto_new: there cannot be two protocols with the same name"), "name");
+    assert.equal(clashKind("attempt to index a nil value"), null);
+    const lua = `local a = Proto("acme", "ACME Messages")\nlocal b = Proto.new('other', 'It\\'s other')\n-- Proto(name, desc) is computed here\nlocal c = Proto(name, "dynamic")\n`;
+    assert.deepEqual(protoDeclarations(lua), [{ name: "acme", description: "ACME Messages" }, { name: "other", description: "It\\'s other" }]);
+    assert.equal(sameProtocol([{ name: "x", description: "ACME Messages" }], protoDeclarations(lua)), true, "the description");
+    assert.equal(sameProtocol([{ name: "ACME", description: "Other words" }], protoDeclarations(lua)), true, "the name, in either case");
+    assert.equal(sameProtocol([{ name: "x", description: "y" }], protoDeclarations(lua)), false);
+    const base = mkdtempSync(join(out, "plugins-"));
+    try {
+      mkdirSync(join(base, "a/deeper"), { recursive: true });
+      writeFileSync(join(base, "a/one.lua"), 'local p = Proto("one", "First")\n');
+      writeFileSync(join(base, "a/deeper/two.lua"), 'local p = Proto("two", "ACME Messages")\n');
+      writeFileSync(join(base, "a/notlua.txt"), 'Proto("three", "ACME Messages")');
+      assert.deepEqual(luaFilesBelow([join(base, "a"), join(base, "missing")]).map((f) => f.slice(base.length + 1)), ["a/deeper/two.lua", "a/one.lua"]);
+      assert.equal(clashingFile(luaFilesBelow([base]), [{ name: "acme", description: "ACME Messages" }]), join(base, "a/deeper/two.lua"));
+      assert.equal(clashingFile(luaFilesBelow([base]), [{ name: "none", description: "nothing like it" }]), null);
+      assert.equal(clashingFile(luaFilesBelow([base]), []), null);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
   await check("watcher: prints the events that woke the agent, then up to ten before them it saw already", () => {
     const ev = (seq, level, text) => ({ seq, time: `2026-11-13T12:00:${String(seq).padStart(2, "0")}.000Z`, level, text });

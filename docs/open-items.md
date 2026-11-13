@@ -45,7 +45,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | A32 | polish | In a browser that can't isolate a panel, the warning about it is counted as "1 problem sent to Agent" in the status bar | case 2 |
 | A35 | fix | The server instructions' background watcher command names a state file of the session before the restart (checked in the round 3 fixes: WireBuddy writes the live process's file into the instructions of each start, so a client that initializes again after a restart gets the right path; the tester's bridge kept the first initialize result. Not changed) | round 3 |
 | A41 | polish | Holding Now gives no feedback but a red outline; the old "answered" banner sits under a new waiting line; the capture's packet counter and the list's count disagree during a flood; 409s in the browser console at a filter change and at stop (no visible effect) | round 3 |
-| A42 | fix | A Lua plugin in Wireshark's own plugin folder with the same protocol description as an extension makes one of them fail to load; only the reload says so, as a warning, and the extension test says "No Lua errors" | guide-only run |
 | A43 | polish | The extension guide does not say which Lua version runs, has no word on checksums (a CRC-16 in pure Lua), and does not list the buffer methods | guide-only run |
 
 ## B. Not exercised yet (what the tests did not do)
@@ -111,3 +110,5 @@ dialog keeps its text when it can't save (A38).
 Round 3, fixed afterwards: the watcher prints the activity before the event it was woken by (A39).
 Round 3, fixed afterwards: provisional rows carry a "≈" before the packet number, the status bar's text fits and its
 estimate counts down with the full read under way (A40).
+Round 3, fixed afterwards: the extension test names a Wireshark plugin whose protocol clashes with the extension's, and
+the reload's warning names the extension (A42).

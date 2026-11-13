@@ -22,6 +22,7 @@ import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, S
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
+import { clashKind } from "./protoclash.ts";
 import { Keeper, type KeptRead } from "./keeper.ts";
 import { MAX_RECENT, parseColumns, parseRecent, readSetting, writeSetting } from "./settings.ts";
 import { LuaErrors } from "./luaerrors.ts";
@@ -94,6 +95,8 @@ export interface ExtensionTest {
   hierarchy: string[];
   /** Packets still showing as undecoded payload ("data"), and, for an extension dissecting over TCP, segments of messages reassembled in a later packet (null: not over TCP). */
   undecoded?: { data: number; segments: number | null };
+  /** A protocol of the extension has the description or name of one in a Wireshark plugin of the user's, or in another extension: which of the two failed to load, and what it clashes with (null: not found). */
+  clash?: { kind: "description" | "name"; with: { plugin: string } | { extension: string } | null; failed: "extension" | "plugin" };
 }
 
 /** A sharkd "frames" row: commented packets carry their comments. */
@@ -2497,6 +2500,11 @@ export class Viewer extends EventEmitter {
       else if (failed) result.load = `error: ${printable(failed.error)}${failed.protocols.length ? ` (it registered ${failed.protocols.join(", ")} before the error; tested anyway)` : ""}`;
       else if (!loaded) result.load = "it did not load (no report from the loader)";
       else result.load = "loaded";
+      // The user's own Wireshark plugins load in this sharkd too: one that has the protocol's description fails, or makes the extension fail
+      const clashed = failed && clashKind(failed.error) ? { kind: clashKind(failed.error)!, failed: "extension" as const } : null;
+      const lost = report?.other.map((o) => ({ kind: clashKind(o), text: o })).find((o) => o.kind) ?? null;
+      const clash = clashed ?? (lost ? { kind: lost.kind!, failed: "plugin" as const } : null);
+      if (clash) result.clash = { kind: clash.kind, with: this.extensions.clashOf(name), failed: clash.failed };
       // What a failed extension registered before its error works all the same
       const protocols = loaded?.protocols ?? failed?.protocols ?? [];
       if ((!loaded && !failed?.protocols.length) || !file) return result;

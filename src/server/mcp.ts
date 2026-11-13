@@ -223,6 +223,16 @@ function panelText(r: PanelReport, title: string, opened: boolean): string {
 
 function testText(t: ExtensionTest, entries: DecodeAsEntry[]): string {
   const out = [`Extension "${t.name}": ${t.load}`];
+  if (t.clash) {
+    const c = t.clash;
+    const other = !c.with ? "another Lua plugin of Wireshark's" : "plugin" in c.with ? `the Wireshark plugin ${oneLine(c.with.plugin)}` : `the extension "${oneLine(c.with.extension)}"`;
+    const fix = `Rename the extension's protocol (its Proto("name", "description"))${c.with && "extension" in c.with ? " or the other extension's" : ""}${!c.with || "plugin" in c.with ? ", or remove or rename the plugin" : ""}.`;
+    out.push(
+      c.failed === "extension"
+        ? `It failed to load because a protocol of it has the same ${c.kind} as one in ${other}: no two protocols can share one, and ${other.startsWith("the extension") ? "the one loaded second fails" : "the plugin was first"}. ${fix}`
+        : `${other.charAt(0).toUpperCase()}${other.slice(1)} failed to load because a protocol of it has the same ${c.kind} as one of this extension's: no two protocols can share one, and the extension came first, in the user's view too. ${fix}`,
+    );
+  }
   // Nothing loaded: nothing was tested either
   if (t.load !== "loaded" && !t.protocols.length && !t.hierarchy.length && !t.crashed) return [...out, "Fix it and test again before it goes into the user's view."].join("\n");
   // A crash makes everything else in the result incomplete

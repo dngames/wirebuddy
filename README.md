@@ -229,7 +229,7 @@ An extension can also bring a **panel**: a small web page of its own (`panel/mai
 optional HTML, CSS and further modules) that WireBuddy shows in a window next to the packets and
 feeds with the open capture, also during a live capture: images or files in the traffic, video,
 point clouds, a field over time. The agent writes one when a picture says more than packet rows,
-checks it (`extensions action "test"` finds syntax errors with file and line), opens it with the
+checks it (`extensions action "test"` finds syntax errors with file and line, and a protocol whose description or name a Wireshark plugin of yours already registers, naming the file), opens it with the
 `panel` tool and gets told whether it started, what it shows and every error it throws;
 `panel action "snapshot"` gives it an image of the panel.
 

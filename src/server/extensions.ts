@@ -14,6 +14,7 @@ import { basename, delimiter, dirname, extname, join, resolve } from "node:path"
 import type { ExtensionInfo, ExtensionList } from "../shared/api.ts";
 import type { LuaReport } from "./sharkd.ts";
 import { printable } from "./text.ts";
+import { clashingFile, clashKind, luaFilesBelow, protoDeclarations, sameProtocol, type ProtoDecl } from "./protoclash.ts";
 import { entryProblem, readChecked, rootTrust, trustChecked, type RootTrust } from "./trust.ts";
 
 /** Extension folder names: also what the agent and the UI call them. */
@@ -901,6 +902,41 @@ export class Extensions {
   }
 
 
+  /** The protocols the extension's Lua files declare, as written. */
+  declarations(name: string): ProtoDecl[] {
+    const e = this.entries().find((x) => x.info.name === name);
+    if (!e) return [];
+    try {
+      return luaFiles(e.folder).flatMap((f) => protoDeclarations(readChecked(join(e.folder, f), e.trust).toString("utf8")));
+    } catch {
+      return [];
+    }
+  }
+
+  /** The Lua plugin of the user's Wireshark (personal folders, the global one) that declares a protocol with the description or name of one of `decls`: its file, else null. */
+  clashingPlugin(decls: ProtoDecl[]): string | null {
+    const config = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+    const dirs = [join(config, "wireshark/plugins"), join(homedir(), ".wireshark/plugins"), join(homedir(), ".local/lib/wireshark/plugins"), process.env.WIRESHARK_PLUGIN_DIR, this.globalDir]
+      // Not WireBuddy's own: its folder holds copies of the extensions
+      .filter((d): d is string => !!d && d !== this.overlay);
+    return clashingFile(luaFilesBelow([...new Set(dirs)]), decls);
+  }
+
+  /** What a protocol of extension `name` clashes with: a Lua plugin of the user's Wireshark, else another extension; null when neither is found. */
+  clashOf(name: string): { plugin: string } | { extension: string } | null {
+    const decls = this.declarations(name);
+    const plugin = this.clashingPlugin(decls);
+    if (plugin) return { plugin };
+    const other = this.entries().find((x) => x.info.name !== name && sameProtocol(decls, this.declarations(x.info.name)));
+    return other ? { extension: other.info.name } : null;
+  }
+
+  /** What to do about a protocol of extension `name` that clashes with `other`; "Wireshark" when it isn't known with what. */
+  clashAdvice(name: string, other: { plugin: string } | { extension: string } | null): string {
+    const what = !other ? "another Lua plugin of Wireshark's" : "plugin" in other ? `the Wireshark plugin ${printable(other.plugin)}` : `the extension "${other.extension}"`;
+    return `A protocol of the extension "${name}" has the same description or name as one in ${what}: only one of the two can load. Rename the extension's protocol${other && "extension" in other ? " (or the other extension's)" : ""}${!other || "plugin" in other ? ", or remove or rename the plugin" : ""}.`;
+  }
+
   /** Records a sharkd load report, which covers every extension it loaded; returns what changed, for the agent. */
   report(r: LuaReport): { level: "INFO" | "WARNING" | "ERROR"; text: string }[] {
     const out: { level: "INFO" | "WARNING" | "ERROR"; text: string }[] = [];
@@ -919,7 +955,8 @@ export class Extensions {
       const partly = protocols.length ? ` It registered ${protocols.join(", ")} before the error, which stays active until it loads again without.` : "";
       this.last.set(name, { status: "error", error: text + partly, protocols });
       if (before.get(name)?.error !== text + partly) {
-        out.push({ level: "WARNING", text: `Extension "${name}" did not load: ${text}.${partly} Fix its Lua, check it with extensions(action "test"), then reload` });
+        const clash = clashKind(text) ? ` ${this.clashAdvice(name, this.clashOf(name))}` : "";
+        out.push({ level: "WARNING", text: `Extension "${name}" did not load: ${text}.${partly}${clash} Fix its Lua, check it with extensions(action "test"), then reload` });
       }
     }
     if (r.crashedIn && !Object.hasOwn(this.state.off, r.crashedIn)) {
@@ -938,7 +975,18 @@ export class Extensions {
     for (const text of r.other.map(printable)) {
       if (this.otherSeen.has(text)) continue;
       this.otherSeen.add(text);
-      out.push({ level: "WARNING", text: `A Lua plugin did not load: ${text}` });
+      // A plugin that lost to an extension: which one
+      let clash = "";
+      if (clashKind(text)) {
+        for (const { name } of r.loaded) {
+          const c = this.clashOf(name);
+          if (c && "plugin" in c && text.includes(basename(c.plugin))) {
+            clash = `. ${this.clashAdvice(name, c)}`;
+            break;
+          }
+        }
+      }
+      out.push({ level: "WARNING", text: `A Lua plugin did not load: ${text}${clash}` });
     }
     return out;
   }
