@@ -183,6 +183,13 @@ try {
     assert.equal((await first()).fn, "frame");
   });
 
+  await check("a set whose members are separated by spaces gets a hint to use commas", async () => {
+    const bad = await api("/api/filter/check?filter=" + encodeURIComponent("frame.number in {4 6}"));
+    assert.equal(bad.json.ok, false);
+    assert.match(bad.json.error, /unexpected in this context.* \(separate the members of a set with commas: \{4, 6\}\)$/);
+    assert.equal((await api("/api/filter/check?filter=" + encodeURIComponent("frame.number in {4, 6}"))).json.ok, true);
+  });
+
   await check("stats", async () => {
     const phs = (await api("/api/stats/phs")).json;
     assert.equal(phs[0].proto, "frame");

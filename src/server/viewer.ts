@@ -11,6 +11,7 @@ import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type Sh
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
+import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
 import { Extensions } from "./extensions.ts";
@@ -1167,7 +1168,7 @@ export class Viewer extends EventEmitter {
       return r.warning ? { ok: true, warning: r.warning } : { ok: true };
     } catch (err) {
       const message = (err as Error).message.replace(/^Filter invalid - /, "");
-      return { ok: false, error: message + bpfHint(filter) };
+      return { ok: false, error: message + bpfHint(filter) + setHint(filter) };
     }
   }
 

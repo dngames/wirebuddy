@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "stale", "packetlist", "enginesession", "filterhints", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -34,6 +34,7 @@ const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
 const { usesFrameNumber } = await import(join(out, "units.mjs"));
 const { writeRefused } = await import(join(out, "units.mjs"));
+const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
@@ -2218,6 +2219,19 @@ esac
     const combined = await cap.checkFilter("lo", "nocombine");
     assert.deepEqual([combined.ok, combined.error], [false, "WireBuddy's own traffic can't be left out of this capture: combined is wrong"]);
     await assert.rejects(cap.start({ iface: "lo", filter: "nocombine", autostop: {}, ring: null }), /capture filter: WireBuddy's own traffic can't be left out/);
+  });
+
+  await check("filter hints: a set with spaces between its members asks for commas, others get none", () => {
+    assert.equal(setHint("frame.number in {430 432}"), " (separate the members of a set with commas: {430, 432})");
+    assert.equal(setHint("ip.src == 1.2.3.4 && tcp.port in {80 443 8080 }"), " (separate the members of a set with commas: {80, 443, 8080})");
+    assert.equal(setHint('http.host in {"a.com" "b c"}'), ' (separate the members of a set with commas: {"a.com", "b c"})');
+    assert.equal(setHint("frame.number in {4 .. 6 8}"), " (separate the members of a set with commas: {4..6, 8})");
+    assert.equal(setHint("frame.number in {430, 432}"), "");
+    assert.equal(setHint("frame.number in {4 .. 6, 8}"), "");
+    assert.equal(setHint("frame.number in {430}"), "");
+    assert.equal(setHint('http.host in {"a b", "c d"}'), "");
+    assert.equal(setHint('frame.comment contains "{1 2}"'), "");
+    assert.equal(setHint("tcp"), "");
   });
 
   await check("a refused write names the user WireBuddy runs as and the folder; other errors stay as they are", () => {
