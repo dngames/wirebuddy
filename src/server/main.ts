@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -7,6 +6,7 @@ import { parseArgs } from "node:util";
 import { Extensions } from "./extensions.ts";
 import { investigationDir } from "./investigation.ts";
 import { removeStaleSlices } from "./livetail.ts";
+import { keptToken, settingsDir } from "./settings.ts";
 import { Viewer } from "./viewer.ts";
 import { startHttp } from "./http.ts";
 import { startMcp } from "./mcp.ts";
@@ -17,8 +17,9 @@ const USAGE = `Usage: wirebuddy [options] [capture-file]
 
   --mcp               also serve MCP over stdio (for Claude Code); logs go to stderr
   --port <n>          HTTP port on 127.0.0.1 (default 8765, falls back to a free one)
-  --token <t>         session token for the UI/API, at least 16 characters (default: random;
-                      env WIREBUDDY_TOKEN, which unlike --token other local users can't see in ps)
+  --token <t>         session token for the UI/API, at least 16 characters (default: the random one
+                      kept from the last start, see below; env WIREBUDDY_TOKEN, which unlike --token
+                      other local users can't see in ps)
   --capture-dir <d>   where live captures are written (default ~/.local/share/wirebuddy/captures)
   --profile <name>    Wireshark configuration profile for dissection (also used by Open in Wireshark)
   --tls-keylog <file> decrypt TLS with this key log file (SSLKEYLOGFILE format)
@@ -28,7 +29,11 @@ const USAGE = `Usage: wirebuddy [options] [capture-file]
 
 Environment: WIREBUDDY_PORT, WIREBUDDY_TOKEN, WIREBUDDY_CAPTURE_DIR, WIREBUDDY_PROFILE
 set the defaults of the options of the same name. WIREBUDDY_EXTENSIONS lists more folders
-of Lua extensions (separated by ":"), after ~/.local/share/wirebuddy/extensions.`;
+of Lua extensions (separated by ":"), after ~/.local/share/wirebuddy/extensions.
+
+Without --token WireBuddy reuses the token of its last start, kept for you alone in
+~/.local/share/wirebuddy/state/token, so that an open page survives a restart. Delete that file
+for a new one at the next start.`;
 
 function which(name: string): string | null {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
@@ -127,13 +132,19 @@ if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(
 else void viewer.loadTlsPreference();
 
 // An empty token would let anyone on this machine in
-const token = values.token || randomBytes(16).toString("hex");
-if (token.length < 16) {
+let token = values.token;
+if (token && token.length < 16) {
   process.stderr.write("wirebuddy: the token must be at least 16 characters\n");
   process.exit(1);
 }
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), "../web");
+if (!token) {
+  // The one used last, so that a page open across a restart (an agent's client restarting its MCP server) reconnects with it
+  const kept = keptToken(settingsDir());
+  token = kept.token;
+  if (kept.problem) log(`the session token is not kept for the next start: ${kept.problem}`);
+}
 const http = await startHttp(viewer, {
   port,
   token,

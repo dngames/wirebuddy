@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -41,6 +41,7 @@ const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
+const { settingsDir, keptToken, readSetting, writeSetting } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { Edits, marksWith, marksWithout, toggledMarks, displayedMarks, refsWith, toggledRefs, refsChange, commentText, commentAt, MAX_MARKS, MAX_NOTE, MAX_TIME_REFS, StaleGenerationError } = await import(join(out, "units.mjs"));
@@ -1201,6 +1202,50 @@ try {
     }
   });
 
+  await check("session token: the one used last is kept for the user alone and reused, a file that can't be trusted is replaced, and nothing is kept in a folder that isn't the user's own", () => {
+    const base = mkdtempSync(join(out, "token-"));
+    const mode = (path) => statSync(path).mode & 0o777;
+    try {
+      assert.equal(settingsDir({ XDG_DATA_HOME: "/data" }), "/data/wirebuddy/state");
+      const dir = join(base, "wirebuddy/state");
+      const first = keptToken(dir);
+      assert.match(first.token, /^[0-9a-f]{32}$/);
+      assert.equal(first.fresh, true);
+      assert.deepEqual([mode(dir), mode(join(dir, "token"))], [0o700, 0o600]);
+      // The same one the next time: a restart keeps the open page's token good
+      assert.deepEqual(keptToken(dir), { token: first.token, fresh: false });
+      // A file others can read, a file that isn't a token, a link: each replaced by a new token, said why
+      chmodSync(join(dir, "token"), 0o644);
+      const loose = keptToken(dir);
+      assert.notEqual(loose.token, first.token);
+      assert.match(loose.problem, /can be read by other users/);
+      assert.equal(mode(join(dir, "token")), 0o600);
+      writeFileSync(join(dir, "token"), "short\n", { mode: 0o600 });
+      const junk = keptToken(dir);
+      assert.match(junk.token, /^[0-9a-f]{32}$/);
+      assert.equal(readFileSync(join(dir, "token"), "utf8"), `${junk.token}\n`);
+      const victim = join(base, "victim");
+      writeFileSync(victim, "keep", { mode: 0o600 });
+      rmSync(join(dir, "token"));
+      symlinkSync(victim, join(dir, "token"));
+      const linked = keptToken(dir);
+      assert.match(linked.problem, /is a link/);
+      assert.equal(readFileSync(victim, "utf8"), "keep");
+      assert.equal(lstatSync(join(dir, "token")).isSymbolicLink(), false);
+      // A folder that is a link is no place to keep it: a token for this run, not kept
+      mkdirSync(join(base, "real"));
+      symlinkSync(join(base, "real"), join(base, "linked"));
+      const unkept = keptToken(join(base, "linked"));
+      assert.match(unkept.token, /^[0-9a-f]{32}$/);
+      assert.ok(unkept.problem);
+      assert.deepEqual(readdirSync(join(base, "real")), []);
+      // Deleting the file is the way to a new token
+      rmSync(join(dir, "token"));
+      assert.notEqual(keptToken(dir).token, linked.token);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
   const limits = { marks: 3, note: 10, timeRefs: 2, commented: 2, comment: 20 };
   const investigation = () => ({
     marks: [{ frame: 2, note: "slow reply", by: "agent" }, { frame: 5, note: "", by: "user" }],

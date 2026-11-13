@@ -208,7 +208,7 @@ function ascending(frames: number[], what: string): void {
  * `create`, made (0700) when it is missing. Throws when it is something
  * else, or another user's. A folder others may open is closed to them.
  */
-function privateDir(dir: string, create: boolean): boolean {
+export function privateDir(dir: string, create: boolean): boolean {
   if (create) mkdirSync(dir, { recursive: true, mode: 0o700 });
   let st;
   try {

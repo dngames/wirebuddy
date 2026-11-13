@@ -23,6 +23,18 @@ with provenance: each version's npm page links to the commit and the workflow ru
   when you set one). Anyone or anything holding the viewer URL with its token can do everything
   the UI can, starting a capture included. That covers an AI agent that also has a shell or
   controls the browser pane: give WireBuddy only to agents you trust.
+- **The token is kept between starts.** Without `--token` (or `WIREBUDDY_TOKEN`) WireBuddy reuses
+  the token it made at its last start, kept in `~/.local/share/wirebuddy/state/token`, so that a
+  page open across a restart (an agent's client restarts its MCP server) reconnects by itself.
+  Before, the token was a per-process secret that the user's own processes could read through the
+  instance file while WireBuddy ran; now it is a per-user secret at rest, readable by the same
+  user alone (folder `0700`, file `0600`, never through a link, replaced if another user's, readable by
+  others or not a token), like the kept investigations. What that changes: a viewer URL that
+  leaked (shell history, a log, a transcript, a screenshot) opens every later WireBuddy of this
+  user too, until the file is deleted, where it used to die with its process; and a copy of the
+  home folder (a backup, a synced folder) carries a working token. Delete the file for a new token
+  at the next start. A token given with `--token` or `WIREBUDDY_TOKEN` is never written there, and
+  another WireBuddy of the same user on another port shares the kept one.
 - The server binds to the loopback addresses only: `127.0.0.1`, and the same port on `::1` where
   the machine has it, so that no other program can answer there for the `localhost` names
   browsers also resolve to it (the panels' hosts among them). API requests need the token in an

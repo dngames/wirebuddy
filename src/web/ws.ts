@@ -1,7 +1,7 @@
 /** WebSocket for server pushes, reconnecting with exponential backoff. */
 
-import type { ServerEvent } from "../shared/api.ts";
-import { wsUrl } from "./api.ts";
+import type { ServerEvent, ViewState } from "../shared/api.ts";
+import { get, HttpError, wsUrl } from "./api.ts";
 import { applyState, markResync, noteWsState, refreshState } from "./actions.ts";
 import { app, bus, type ConnState } from "./app.ts";
 import { toast, toastRefused } from "./toast.ts";
@@ -32,8 +32,11 @@ function open(): void {
   }
   ws = sock;
   pushSeq = null;
+  let opened = false;
   sock.onopen = () => {
+    opened = true;
     attempt = 0;
+    setUnauthorized(false);
     // The server may have restarted: the next state must not be diffed against the old one.
     markResync();
     setConn("open");
@@ -70,11 +73,32 @@ function open(): void {
   sock.onclose = () => {
     if (ws !== sock) return;
     ws = null;
+    // A socket refused before it opened says nothing of why: ask over HTTP whether the token is the reason
+    if (!opened) void probe();
     schedule();
   };
   sock.onerror = () => {
     // onclose follows and schedules the retry
   };
+}
+
+function setUnauthorized(on: boolean): void {
+  if (app.unauthorized === on) return;
+  app.unauthorized = on;
+  bus.emit("conn", app.conn);
+}
+
+/** Whether the server refuses the page's token: a restarted WireBuddy has a new one unless the old was kept, and the page can't hear 403 from the socket. */
+async function probe(): Promise<void> {
+  try {
+    await get<ViewState>("api/state");
+    setUnauthorized(false);
+  } catch (err) {
+    // Refused to connect (status 0) or any other trouble: just offline
+    setUnauthorized(err instanceof HttpError && (err.status === 401 || err.status === 403));
+  }
+  // A socket that opened meanwhile has the final word
+  if (app.conn === "open") setUnauthorized(false);
 }
 
 /** A push is missing: reconnect for a whole state, at once the first time, then with the backoff so that a server that keeps doing this is not hammered. */

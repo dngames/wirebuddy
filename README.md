@@ -150,7 +150,7 @@ Options (`--help` shows the same):
 | Option | Environment | |
 |---|---|---|
 | `--port <n>` | `WIREBUDDY_PORT` | HTTP port on 127.0.0.1 (and `::1`); default 8765, falls back to a free one |
-| `--token <t>` | `WIREBUDDY_TOKEN` | session token, at least 16 characters; default random. Prefer the variable: other local users can see command lines in `ps` |
+| `--token <t>` | `WIREBUDDY_TOKEN` | session token, at least 16 characters; default the random one the last start made, kept in `~/.local/share/wirebuddy/state/token` (delete the file for a new one). Prefer the variable: other local users can see command lines in `ps` |
 | `--capture-dir <dir>` | `WIREBUDDY_CAPTURE_DIR` | where live captures go; default `~/.local/share/wirebuddy/captures` |
 | `--profile <name>` | `WIREBUDDY_PROFILE` | Wireshark configuration profile for dissection and Open in Wireshark |
 | `--tls-keylog <file>` | | decrypt TLS with this key log file |
@@ -436,7 +436,10 @@ the questions you asked it.
 - **The session token is the only boundary.** Anyone or anything holding the viewer URL with its
   token can do everything you can in the UI, starting a capture included. That covers an AI agent
   that also has a shell or controls the browser pane: give WireBuddy only to agents you trust,
-  and don't share the URL.
+  and don't share the URL. Without `--token` the token is the one the last start made, kept for
+  you alone in `~/.local/share/wirebuddy/state/token` (folder `0700`, file `0600`), so that a page
+  open when WireBuddy restarts (as an agent's client does with its MCP server) reconnects by
+  itself; a URL that leaked therefore stays good until you delete that file or give `--token`.
 - The server listens on the loopback addresses only (`127.0.0.1`, and the same port on `::1`
   where there is one). API calls need the random per-session token in an `X-WireBuddy-Token`
   header (the WebSocket takes it in its URL); it is compared in constant time.

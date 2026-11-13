@@ -1777,6 +1777,68 @@ input[type="checkbox"] {
 
 /* ----------------------------------------------------------------- menus */
 
+/* A page that lost its server: what it shows is no longer current. Dimmed only after 3 s, so a quick reconnect doesn't flicker; back at once. */
+.main {
+  transition: opacity 0.15s, filter 0.15s;
+}
+
+.wb-offline .main {
+  opacity: 0.55;
+  filter: grayscale(0.8);
+  transition: opacity 0.4s 3s, filter 0.4s 3s;
+}
+
+.offline-notice {
+  position: fixed;
+  top: 76px;
+  left: 50%;
+  z-index: 5500;
+  width: min(560px, calc(100vw - 24px));
+  transform: translateX(-50%);
+  padding: 12px 16px 14px;
+  border: 1px solid var(--danger);
+  border-left-width: 5px;
+  border-radius: 6px;
+  background: var(--menu-bg);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.offline-notice[hidden] {
+  display: none;
+}
+
+.on-title {
+  margin-bottom: 6px;
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.offline-notice p {
+  margin: 0 0 8px;
+}
+
+.offline-notice code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.on-quiet {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 0 !important;
+  color: var(--text-dim);
+}
+
+.on-quiet .btn {
+  flex: none;
+}
+
 .menu {
   position: fixed;
   /* Above the toasts: a menu of the status bar opens where they show */

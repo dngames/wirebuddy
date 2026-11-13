@@ -1500,6 +1500,67 @@ try {
     }
   });
 
+  /** A server on the home `own`, with `args` after --port (no --token unless they give one): its token, API and how to stop it. */
+  const startOn = async (own, args = []) => {
+    const proc = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", ...args], { env: { ...env, HOME: own, XDG_CONFIG_HOME: join(own, ".config"), XDG_DATA_HOME: join(own, ".local/share"), WIREBUDDY_EXTENSIONS: "" }, stdio: ["ignore", "pipe", "ignore"] });
+    const exited = new Promise((done) => proc.on("exit", done));
+    const url = await new Promise((resolve, reject) => {
+      proc.stdout.setEncoding("utf8");
+      proc.stdout.on("data", (d) => /UI at (\S+)/.exec(d) && resolve(new URL(/UI at (\S+)/.exec(d)[1])));
+      proc.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
+    });
+    const tok = url.searchParams.get("token");
+    const call = async (path, body) => {
+      const r = await apiFetch(url.origin, tok, path, body);
+      return { status: r.status, json: await r.json() };
+    };
+    return { token: tok, api: call, stop: async () => (proc.kill("SIGTERM"), await exited) };
+  };
+
+  await check("a restart keeps the session token, for the user alone; a token given is not kept; a file that isn't a token is replaced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const state = join(own, ".local/share/wirebuddy/state");
+    const mode = (path) => statSync(path).mode & 0o777;
+    let s = await startOn(own);
+    try {
+      assert.match(s.token, /^[0-9a-f]{32}$/);
+      assert.deepEqual([mode(state), mode(join(state, "token"))], [0o700, 0o600]);
+      assert.equal(readFileSync(join(state, "token"), "utf8").trim(), s.token);
+      const first = s.token;
+      await s.stop();
+      // The same token the next time, so that a page open across the restart still holds the right one
+      s = await startOn(own);
+      assert.equal(s.token, first);
+      await s.stop();
+      // Deleting the file is the way to a new token
+      rmSync(join(state, "token"));
+      s = await startOn(own);
+      assert.notEqual(s.token, first);
+      const second = s.token;
+      await s.stop();
+      // A token given is not kept, and doesn't replace the kept one
+      s = await startOn(own, ["--token", "given-by-the-caller-0123"]);
+      assert.equal(s.token, "given-by-the-caller-0123");
+      assert.equal(readFileSync(join(state, "token"), "utf8").trim(), second);
+      await s.stop();
+      // A file that is no token, or that others can read, is replaced by a new token
+      writeFileSync(join(state, "token"), "not a token\n", { mode: 0o600 });
+      s = await startOn(own);
+      assert.notEqual(s.token, second);
+      assert.match(readFileSync(join(state, "token"), "utf8"), /^[0-9a-f]{32}\n$/);
+      const third = s.token;
+      await s.stop();
+      chmodSync(join(state, "token"), 0o644);
+      s = await startOn(own);
+      assert.notEqual(s.token, third);
+      assert.equal(mode(join(state, "token")), 0o600);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   await check("investigation: Forget unsets marks, time references and comment edits, re-reads rows and details, removes what was kept and leaves nothing to restore", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
     const own = join(dir, "home");

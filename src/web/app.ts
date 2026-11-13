@@ -34,6 +34,8 @@ export const app = {
   conn: "connecting" as ConnState,
   /** Epoch ms of the next WebSocket reconnect attempt while closed. */
   reconnectAt: 0,
+  /** The server answers but refuses this page's token (401, 403): its session ended or has another token. */
+  unauthorized: false,
   selFrame: null as number | null,
   /** Row index of selFrame in the displayed list, -1 when unknown. */
   selIndex: -1,
