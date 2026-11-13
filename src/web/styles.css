@@ -927,6 +927,11 @@ input[type="checkbox"] {
   flex: 1 1 auto;
 }
 
+/* A docked panel's window is laid over this pane (panels.ts), so its frame never moves in the page */
+.panes {
+  overflow: hidden;
+}
+
 .splitter {
   flex: none;
   height: 5px;
@@ -3385,6 +3390,139 @@ body.dlg-moving .panel-frame {
   top: 4px !important;
   width: calc(100vw - 8px) !important;
   height: calc(100vh - 8px) !important;
+}
+
+/* Docked: the window fills the dock's place, its title bar and footer share one row */
+.dlg-overlay.pn-docked {
+  z-index: 800 !important;
+}
+
+.dlg-overlay.pn-tabbed-out {
+  visibility: hidden;
+}
+
+.dlg-panel.pn-docked {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 30px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  resize: none;
+}
+
+.dlg-panel.pn-docked .dlg-titlebar {
+  grid-area: 1 / 1;
+  cursor: default;
+}
+
+.dlg-panel.pn-docked .dlg-footer {
+  grid-area: 1 / 2;
+  height: 30px;
+  padding: 0 8px;
+  border-top: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--chrome-hi);
+}
+
+.dlg-panel.pn-docked .dlg-body {
+  grid-area: 2 / 1 / 3 / 3;
+}
+
+.dlg-panel.pn-docked .dlg-close {
+  display: none;
+}
+
+.dlg-panel.pn-docked:not(.pn-max) .dlg-footer-left {
+  max-width: 260px;
+}
+
+.dlg-panel.pn-docked .dlg-footer .btn {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+/* Maximized, it is a window like any other again */
+.dlg-panel.pn-docked.pn-max {
+  display: flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+}
+
+.dlg-panel.pn-docked.pn-max .dlg-titlebar {
+  cursor: default;
+}
+
+.dlg-panel.pn-docked.pn-max .dlg-footer {
+  height: auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 0;
+  background: none;
+}
+
+.dlg-panel.pn-docked.pn-max .dlg-close {
+  display: grid;
+}
+
+.dlg-tbtn {
+  flex: none;
+  height: 22px;
+  margin-right: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.pn-tabs {
+  flex: none;
+  display: flex;
+  gap: 1px;
+  padding: 2px 4px 0;
+  overflow-x: auto;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+}
+
+.pn-tab {
+  flex: none;
+  max-width: 220px;
+  height: 22px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pn-tab.on {
+  border-color: var(--border);
+  background: var(--chrome-hi);
+  color: var(--text);
+}
+
+.pane-dock {
+  flex: none;
+}
+
+.pn-dock-area {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 640px) {
+  .dlg-panel.pn-docked:not(.pn-max) .dlg-footer-left {
+    display: none;
+  }
 }
 
 .dlg-panel.pn-hung .panel-frame {

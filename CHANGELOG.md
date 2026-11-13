@@ -15,6 +15,7 @@ All notable changes to this project are documented here. The format follows
 - The background watcher prints the activity before the problem or question too, as the server instructions say
 - Provisional rows of a big live capture carry a "≈" before the packet number and a stronger dashed edge in both themes; the status bar's text is short enough not to be cut (the rest is in its tooltip) and counts the seconds to the exact rows down with the full read under way instead of staying as it was
 - The agent's `extensions` test names a Wireshark plugin whose protocol has the same description or name as the extension's (and what to do), as the test loads the user's plugins too; the reload's warning for such a plugin, or for an extension that lost to another, names the extension
+- A panel opens docked in a pane of its own under the packet list instead of floating over it (several docked panels are tabs); Float and Dock in its title bar switch, remembered per panel, and the panel guide says to design for a wide, short area
 
 ## [0.17.0] - 2026-11-13
 

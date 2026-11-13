@@ -37,7 +37,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | A18 | polish | A user capture filter with `vlan` shifts the offsets of what follows it, the own-traffic exclusion included (irrelevant on `lo` and `any`, noted for completeness) | fixes for case 1 |
 | A19 | fix | A crash report from the active engine while the standby loads makes that load retry once more than needed | engine session work |
 
-| A24 | gap | A panel floats over the packet list and hides the columns the filter was set up to show; it can be maximized or closed, not docked | case 2 |
 | A28 | gap | The findings report leaves out the questions and answers of the session (and still covers only the open capture, see A11) | case 2 |
 | A29 | gap | Nothing in the page tells the human that the agent has seen a question or is working on it; the agent hears a question only with its next tool call unless it runs the background watcher | case 2 |
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
@@ -46,6 +45,8 @@ items, so a gap in the numbering is an item that is done (section E).
 | A35 | fix | The server instructions' background watcher command names a state file of the session before the restart (checked in the round 3 fixes: WireBuddy writes the live process's file into the instructions of each start, so a client that initializes again after a restart gets the right path; the tester's bridge kept the first initialize result. Not changed) | round 3 |
 | A41 | polish | Holding Now gives no feedback but a red outline; the old "answered" banner sits under a new waiting line; the capture's packet counter and the list's count disagree during a flood; 409s in the browser console at a filter change and at stop (no visible effect) | round 3 |
 | A43 | polish | The extension guide does not say which Lua version runs, has no word on checksums (a CRC-16 in pure Lua), and does not list the buffer methods | guide-only run |
+| A44 | gap | A panel cannot say that it wants a window: the example panels (point cloud, robot arm, CT series) are laid out for about 800×525 and are cramped in the dock's wide, short pane; the dock's default height (30 % of the page) is short for a chart on a small screen | docked panels |
+| A45 | gap | With several packets selected, Add Comment, Mark with Note and Ask Agent are still refused when the list changes under the dialog (the text stays, with the reason) | round 3 fixes |
 
 ## B. Not exercised yet (what the tests did not do)
 
@@ -112,3 +113,5 @@ Round 3, fixed afterwards: provisional rows carry a "≈" before the packet numb
 estimate counts down with the full read under way (A40).
 Round 3, fixed afterwards: the extension test names a Wireshark plugin whose protocol clashes with the extension's, and
 the reload's warning names the extension (A42).
+After 0.17.0: a panel opens docked in a pane under the packet list, floats and docks again from its title bar,
+and the choice is kept per panel (A24).
