@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { chromeOrSkip } from "./chrome.mjs";
+import * as g from "./capgen.mjs";
 import { chromePort, pageSocket, rawCdp, sleep, startChrome, suite } from "./harness.mjs";
 import { writeOddPortsCapture } from "./oddports.mjs";
 
@@ -1065,6 +1066,52 @@ try {
       await typeFilter("");
       await key("Enter", "Enter", 13);
       await until("no filter", async () => (await state()).filter === "" && !/busy/.test(await classes()));
+    }
+  });
+
+  await check("browser: a new display filter with no capture running shows the selected packet if the list still has it, else the top, whatever the follow toggle says", async () => {
+    const long = join(home, "long.pcap");
+    writeFileSync(long, Buffer.concat([g.pcapHeader(), ...Array.from({ length: 3000 }, (_, i) => g.pcapRecord(1700000000, i * 1000, g.udpFrame(i)))]));
+    const followToggle = `document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').getAttribute('aria-pressed') === 'true'`;
+    const scrolled = () => evaluate("document.querySelector('.pl-scroll').scrollTop");
+    const firstRow = () => evaluate("[...document.querySelectorAll('.pl-row')].filter((r) => !r.hidden).map((r) => Number(r.querySelector('.pl-cell')?.textContent)).sort((a, b) => a - b)[0]");
+    const setFilter = async (text) => {
+      await evaluate(`(() => { const i = document.querySelector('.fb-input'); i.focus(); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input')); })()`);
+      await key("Enter", "Enter", 13);
+      await until(`the filter ${text}`, async () => (await state()).filter === text && !(await state()).loading);
+      await sleep(400);
+    };
+    assert.match((await call("open_capture", { path: long })).text, /3000 frames/);
+    try {
+      assert.ok(await evaluate(followToggle), "the follow toggle is on");
+      for (const follow of [true, false]) {
+        if ((await evaluate(followToggle)) !== follow) await evaluate(`document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').click()`);
+        await until("the toggle", async () => (await evaluate(followToggle)) === follow);
+        await setFilter("");
+        // A packet far down that the new filter hides
+        await call("goto_frame", { frame: 2500 });
+        await until("the list at frame 2500", async () => (await state()).selected === 2500 && (await firstRow()) > 2000);
+        await setFilter("frame.number < 60");
+        await until("the list's start", async () => (await scrolled()) === 0, 3000).catch(async (err) => {
+          throw new Error(`${err.message} (follow ${follow}); ${await listed()}`);
+        });
+        assert.equal(await firstRow(), 1, `follow ${follow}`);
+        // The selected packet still in the list: shown, not the top
+        await setFilter("");
+        await call("goto_frame", { frame: 2500 });
+        await until("the list at frame 2500", async () => (await state()).selected === 2500 && (await firstRow()) > 2000);
+        await setFilter("frame.number > 1000");
+        await sleep(300);
+        assert.ok((await firstRow()) > 1000 && (await state()).selected === 2500 && (await scrolled()) > 0, `follow ${follow}: ${await listed()}`);
+        await until("frame 2500 in view", async () => (await evaluate(`!!(${row(2500)})`)) === true, 3000).catch(async (err) => {
+          throw new Error(`${err.message} (follow ${follow}); ${await listed()}`);
+        });
+      }
+    } finally {
+      if (!(await evaluate(followToggle))) await evaluate(`document.querySelector('button[aria-label="Auto Scroll in Live Capture"]').click()`);
+      await setFilter("");
+      rmSync(long, { force: true });
+      await call("open_capture", { path: join(root, "test/fixtures/http.pcapng") });
     }
   });
 

@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Applying a display filter with no capture running shows the selected packet if the list still has it, else the top of the list, not its last row; Auto Scroll in Live Capture matters only while a capture runs
 - The agent's `extensions` test says how many packets of the capture still show as undecoded payload and, for an extension over TCP, how many are segments of a message reassembled in a later packet, so those are not read as a hole
 - A panel whose capture is closed (or changed) while it reads no longer counts as a problem sent to the agent: a read with no capture open or a stale one rejects with `no-capture` or `stale`, which is not reported, and the panel guide says what a panel sees then
 - The agent's panel guide says how a panel follows a live capture (`wb.subscribe`, or reading again on the `packets` event) and not to pick packets by a client's ephemeral TCP port
