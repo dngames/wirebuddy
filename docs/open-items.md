@@ -76,7 +76,7 @@ items, so a gap in the numbering is an item that is done (section E).
 | # | Item | Recommendation |
 |---|---|---|
 | D1 | The live tail's future (fifth piece of the `viewer.ts` work depends on it) | keep it frozen, ask Wireshark upstream |
-| D2 | Release 0.17.0 | after case 2's fixes |
+| D2 | Release 0.17.0: the release commit is on main once its pull request merges; the tag `v0.17.0` is then pushed by the maintainer, which starts the release workflow | — |
 | D3 | Dependabot pull requests 8 and 9 (9 needs a fresh CI run) | — |
 | D4 | Required reviewers on the `npm` environment, as a gate before publishing | — |
 

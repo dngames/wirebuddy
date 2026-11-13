@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-13
+
 - A folder for live captures that can't be created (`--capture-dir`) says which user WireBuddy runs as and that this user can't create it, not a bare `EACCES`
 - Applying a display filter with no capture running shows the selected packet if the list still has it, else the top of the list, not its last row; Auto Scroll in Live Capture matters only while a capture runs
 - The agent's `extensions` test says how many packets of the capture still show as undecoded payload and, for an extension over TCP, how many are segments of a message reassembled in a later packet, so those are not read as a hole
@@ -139,7 +141,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/dngames/wirebuddy/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/dngames/wirebuddy/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/dngames/wirebuddy/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/dngames/wirebuddy/compare/v0.14.0...v0.14.1
