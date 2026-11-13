@@ -1038,7 +1038,9 @@ A panel is a small web page you write; WireBuddy shows it in a window of its UI 
 open capture, also while a live capture runs. Write one when a picture says more than packet rows:
 images or files in the traffic, video, point clouds, maps, a field over time. It lives in an
 extension folder, with or without a Lua dissector (topic "lua"), and runs sandboxed on an origin
-of its own: no network, no access to WireBuddy's page or API, only \`wb\`.
+of its own: no network, no access to WireBuddy's page or API, only \`wb\`. It opens docked in a pane
+under the packet list, so the user sees both (the user can float it as a window, and "size" is that
+window's size): design for a wide, short area by default, not a tall one.
 
 Folder: ${this.dir}/<name>/
   extension.json   {"label": "...", "version": "1", "description": "...",

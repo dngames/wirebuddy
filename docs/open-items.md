@@ -36,7 +36,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | A18 | polish | A user capture filter with `vlan` shifts the offsets of what follows it, the own-traffic exclusion included (irrelevant on `lo` and `any`, noted for completeness) | fixes for case 1 |
 | A19 | fix | A crash report from the active engine while the standby loads makes that load retry once more than needed | engine session work |
 
-| A24 | gap | A panel floats over the packet list and hides the columns the filter was set up to show; it can be maximized or closed, not docked | case 2 |
 | A28 | gap | The findings report leaves out the questions and answers of the session (and still covers only the open capture, see A11) | case 2 |
 | A29 | gap | Nothing in the page tells the human that the agent has seen a question or is working on it; the agent hears a question only with its next tool call unless it runs the background watcher | case 2 |
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
@@ -93,3 +92,5 @@ guide on following a live capture (A23) · a new display filter shows the select
 end (A25) · the extension test says what stayed undecoded (A26) · the README's name for the questions dialog
 (A27) · the capture folder's refused creation names the user (A13).
 Released as 0.17.0 (tag `v0.17.0`), with everything above.
+After 0.17.0: a panel opens docked in a pane under the packet list, floats and docks again from its title bar,
+and the choice is kept per panel (A24).

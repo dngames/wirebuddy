@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- A panel opens docked in a pane of its own under the packet list instead of floating over it (several docked panels are tabs); Float and Dock in its title bar switch, remembered per panel, and the panel guide says to design for a wide, short area
+
 ## [0.17.0] - 2026-11-13
 
 - A folder for live captures that can't be created (`--capture-dir`) says which user WireBuddy runs as and that this user can't create it, not a bare `EACCES`

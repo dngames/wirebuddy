@@ -13,6 +13,7 @@ import { errorText, get, HttpError, post } from "./api.ts";
 import { agentName, app, bus } from "./app.ts";
 import { Dialog } from "./dialog.ts";
 import type { MenuItem } from "./menu.ts";
+import { dockSlot, onPanesLaidOut, setDock } from "./panes.ts";
 import { toastError } from "./toast.ts";
 import { h, load, save, setText } from "./util.ts";
 
@@ -43,6 +44,14 @@ interface Win {
   probeRound: number;
   footer: HTMLElement;
   maximized: boolean;
+  title: string;
+  /** Whether the panel is meant to sit in the dock (the user's choice, kept per panel), not whether it does right now. */
+  docked: boolean;
+  /** Where it is now: in the dock's place, or floating. */
+  shown: "float" | "dock";
+  /** The floating window's place and size while the panel is docked. */
+  floatAt: { left: string; top: string; width: string; height: string } | null;
+  dockBtn: HTMLButtonElement | null;
   /** When the pointer entered the frame, or 0 while it is outside. */
   pointerIn: number;
 }
@@ -53,6 +62,14 @@ let pageInput = 0;
 const ACTIVATION_MS = 5000;
 
 const wins = new Map<string, Win>();
+/** The panels meant for the dock, the one on show among them last. */
+const dockOrder: Win[] = [];
+let dockActive: Win | null = null;
+/** Tabs for the docked panels, shown from the second one on, and the room below them that the shown panel's window fills. */
+const dockTabs = h("div", { class: "pn-tabs", role: "tablist" });
+const dockArea = h("div", { class: "pn-dock-area" });
+dockTabs.hidden = true;
+let tabsKey = "";
 /** Labels of panels closed here that the server may still list: a state sent before it heard doesn't open them again. */
 const closing = new Set<string>();
 /** Extensions with a panel, for the menus. */
@@ -64,6 +81,11 @@ export function initPanels(): void {
     if (!prev || s.panels !== prev.panels) sync(s);
   });
   window.addEventListener("message", onMessage);
+  dockSlot().append(dockTabs, dockArea);
+  // Docked windows sit over the dock's place, which the page lays out and moves around
+  new ResizeObserver(placeDock).observe(dockArea);
+  onPanesLaidOut(placeDock);
+  window.addEventListener("resize", placeDock);
   for (const type of ["pointerdown", "keydown"]) {
     window.addEventListener(
       type,
@@ -158,19 +180,29 @@ function open(p: PanelState): void {
   const dialog = new Dialog(p.title, { width: geo?.w || p.size[0], height: geo?.h || p.size[1], cls: "dlg-panel", modal: false });
   const footer = h("span", { class: "pn-status" });
   dialog.footerLeft.append(footer);
-  const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, probeRun: 0, probeRound: 0, footer, maximized: false, pointerIn: 0 };
+  // A panel opens docked: what the agent shows must not cover what the user looks at
+  const docked = load<boolean>(`panel-dock:${p.name}`, true) !== false;
+  const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, probeRun: 0, probeRound: 0, footer, maximized: false, title: p.title, docked, shown: "float", floatAt: null, dockBtn: null, pointerIn: 0 };
+  w.dockBtn = dialog.titleButton("Float", () => setDocked(w, !w.docked), "");
   dialog.button("Reload", () => void post("api/panels/reload", { name: p.name }).catch((e) => toastError(e)), { title: "Read the panel's files again and restart it" });
   const maxBtn = dialog.button("Maximize", () => {
     w.maximized = !w.maximized;
     dialog.win.classList.toggle("pn-max", w.maximized);
     maxBtn.textContent = w.maximized ? "Restore" : "Maximize";
-    // The window may have shrunk while it was maximized
-    if (!w.maximized) dialog.keepInView();
+    // Docked, it goes back to its place; floating, the window may have shrunk while it was maximized
+    placeDock();
+    if (!w.maximized && w.shown === "float") dialog.keepInView();
   });
   dialog.button("Close", () => dialog.close(), { primary: true });
   dialog.onClose = () => {
     stopWatch(w);
-    if (!w.maximized && dialog.closedSize) save(`panel:${p.name}`, dialog.closedSize);
+    if (!w.maximized && w.shown === "float" && dialog.closedSize) save(`panel:${p.name}`, dialog.closedSize);
+    else if (w.shown === "dock" && w.floatAt) {
+      // The size the floating window had
+      const size = { w: Math.round(parseFloat(w.floatAt.width)), h: Math.round(parseFloat(w.floatAt.height)) };
+      if (size.w > 0 && size.h > 0) save(`panel:${p.name}`, size);
+    }
+    leaveDock(w);
     // Closed here (Close, Esc): the server forgets it too
     if (wins.get(p.name) === w) {
       wins.delete(p.name);
@@ -186,7 +218,79 @@ function open(p: PanelState): void {
   });
   wins.set(p.name, w);
   restart(w, p);
-  dialog.show(null);
+  // Docked, it takes no focus from the packet list the user works in
+  dialog.show(docked ? false : null);
+  setDocked(w, docked, false);
+}
+
+/** Docks or floats a panel and remembers the choice. The window and its frame stay where they are in the page: only their place and size change. */
+function setDocked(w: Win, on: boolean, remember = true): void {
+  w.docked = on;
+  if (remember) save(`panel-dock:${w.name}`, on);
+  const i = dockOrder.indexOf(w);
+  if (on && i < 0) dockOrder.push(w);
+  if (!on && i >= 0) dockOrder.splice(i, 1);
+  if (on) dockActive = w;
+  else if (dockActive === w) dockActive = dockOrder[dockOrder.length - 1] ?? null;
+  placeDock();
+}
+
+/** A panel that closed takes its place in the dock with it. */
+function leaveDock(w: Win): void {
+  const i = dockOrder.indexOf(w);
+  if (i >= 0) dockOrder.splice(i, 1);
+  if (dockActive === w) dockActive = dockOrder[dockOrder.length - 1] ?? null;
+  placeDock();
+}
+
+/** Puts every window where it belongs: a docked panel's over the dock's place, the others where the user left them. */
+function placeDock(): void {
+  const docked = dockOrder.filter((w) => wins.get(w.name) === w);
+  setDock(docked.length > 0);
+  const tabbed = docked.length > 1;
+  dockTabs.hidden = !tabbed;
+  // Rebuilt only when it changed: a click must find the button it went down on
+  const key = tabbed ? docked.map((w) => `${w.title}${w === dockActive ? "*" : ""}`).join("\n") : "";
+  if (tabbed && key !== tabsKey) {
+    tabsKey = key;
+    dockTabs.replaceChildren(
+      ...docked.map((w) => {
+        const on = w === dockActive;
+        return h("button", { class: `pn-tab${on ? " on" : ""}`, role: "tab", attrs: { "aria-selected": String(on) }, title: w.title, onclick: () => {
+          dockActive = w;
+          placeDock();
+        } }, w.title);
+      }),
+    );
+  }
+  const r = dockArea.getBoundingClientRect();
+  // No room: the page shows no capture, so the panes are hidden. The panels float until it does.
+  const room = docked.length > 0 && r.width > 0 && r.height > 0;
+  for (const w of wins.values()) {
+    const dock = room && docked.includes(w);
+    const { win, overlay } = w.dialog;
+    if (dock && w.shown === "float") {
+      w.floatAt = { left: win.style.left, top: win.style.top, width: win.style.width, height: win.style.height };
+      w.shown = "dock";
+      w.dialog.movable = false;
+      win.classList.add("pn-docked");
+    } else if (!dock && w.shown === "dock") {
+      w.shown = "float";
+      w.dialog.movable = true;
+      win.classList.remove("pn-docked");
+      if (w.floatAt) Object.assign(win.style, w.floatAt);
+      w.floatAt = null;
+      w.dialog.keepInView();
+    }
+    // Under the dialogs that open over the page, until it is maximized
+    overlay.classList.toggle("pn-docked", w.shown === "dock" && !w.maximized);
+    overlay.classList.toggle("pn-tabbed-out", w.shown === "dock" && w !== dockActive);
+    if (w.shown === "dock") Object.assign(win.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    if (w.dockBtn) {
+      w.dockBtn.textContent = w.docked ? "Float" : "Dock";
+      w.dockBtn.title = w.docked ? "Take the panel out of the layout: it floats over the page" : "Put the panel in the layout, under the packet list";
+    }
+  }
 }
 
 /** A new frame for a new label: reopened, reloaded or restarted. */

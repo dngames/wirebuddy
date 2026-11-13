@@ -41,6 +41,10 @@ export class Dialog {
   /** The window's size as it closed, for onClose: by then it is gone from the page. */
   closedSize: { w: number; h: number } | null = null;
   readonly modal: boolean;
+  /** False while the window sits in a place of the page's layout: it neither moves with the pointer nor follows the window's size. */
+  movable = true;
+  private readonly titleBar: HTMLDivElement;
+  private readonly closeBtn: HTMLButtonElement;
   private closed = false;
   /** Focused element when the dialog opened. */
   private returnFocus: HTMLElement | null = null;
@@ -49,6 +53,8 @@ export class Dialog {
     this.titleEl = h("span", { class: "dlg-title-text" }, title);
     const closeBtn = h("button", { class: "dlg-close", title: "Close (Esc)", attrs: { "aria-label": "Close" }, onclick: () => this.close() }, icon("x"));
     const titleBar = h("div", { class: "dlg-titlebar" }, this.titleEl, closeBtn);
+    this.titleBar = titleBar;
+    this.closeBtn = closeBtn;
     this.body = h("div", { class: "dlg-body" });
     this.footerLeft = h("div", { class: "dlg-footer-left" });
     this.footerRight = h("div", { class: "dlg-footer-right" });
@@ -75,6 +81,13 @@ export class Dialog {
     this.titleEl.textContent = t;
   }
 
+  /** A text button in the title bar, left of the close button. */
+  titleButton(label: string, fn: () => void, title?: string): HTMLButtonElement {
+    const b = h("button", { class: "dlg-tbtn", title, onclick: fn }, label);
+    this.titleBar.insertBefore(b, this.closeBtn);
+    return b;
+  }
+
   button(label: string, fn: () => void, opts: { primary?: boolean; disabled?: boolean; title?: string } = {}): HTMLButtonElement {
     const b = h("button", { class: `btn${opts.primary ? " primary" : ""}`, disabled: !!opts.disabled, title: opts.title, onclick: fn }, label);
     this.footerRight.appendChild(b);
@@ -91,7 +104,8 @@ export class Dialog {
     restack();
   }
 
-  show(focus?: HTMLElement | null): void {
+  /** `focus` false leaves the focus where it is. */
+  show(focus?: HTMLElement | null | false): void {
     watchMainFocus();
     watchModalFocus();
     watchResize();
@@ -103,6 +117,7 @@ export class Dialog {
     const r = this.win.getBoundingClientRect();
     this.win.style.left = `${Math.max(8, (window.innerWidth - r.width) / 2)}px`;
     this.win.style.top = `${Math.max(8, (window.innerHeight - r.height) / 3)}px`;
+    if (focus === false) return;
     const target =
       focus ??
       this.body.querySelector<HTMLElement>("input, select, textarea") ??
@@ -142,7 +157,7 @@ export class Dialog {
   }
 
   private startDrag(e: PointerEvent): void {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+    if (!this.movable || e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
     const bar = e.currentTarget as HTMLElement;
     bar.setPointerCapture(e.pointerId);
@@ -246,6 +261,7 @@ function watchResize(): void {
     const h = window.innerHeight;
     const was = viewport!;
     for (const d of open) {
+      if (!d.movable) continue;
       const r = d.win.getBoundingClientRect();
       if (w < was.w && r.right > w) d.win.style.left = `${r.right <= was.w ? clamp(r.left, 4, w - r.width - 4) : clamp(r.left, KEEP_X - r.width, w - KEEP_X)}px`;
       if (h < was.h && r.bottom > h) d.win.style.top = `${r.bottom <= was.h ? clamp(r.top, 4, h - r.height - 4) : clamp(r.top, 0, h - KEEP_Y)}px`;
