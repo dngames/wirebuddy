@@ -13,6 +13,7 @@ All notable changes to this project are documented here. The format follows
 - The agent's `follow_stream` of a TLS stream names the client and the server the right way round (the page's Follow dialog too), and a TCP follow of a stream that carries TLS, with a key log set, says that the decrypted stream comes with protocol TLS or HTTP
 - Add Comment, Mark Packet with Note and Ask Agent for one packet go by its frame number: a display filter set while the dialog is open no longer loses the text, and when the capture changed the dialog stays open with the text and says why
 - The background watcher prints the activity before the problem or question too, as the server instructions say
+- Provisional rows of a big live capture carry a "≈" before the packet number and a stronger dashed edge in both themes; the status bar's text is short enough not to be cut (the rest is in its tooltip) and counts the seconds to the exact rows down with the full read under way instead of staying as it was
 
 ## [0.17.0] - 2026-11-13
 

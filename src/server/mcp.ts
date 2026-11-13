@@ -11,6 +11,7 @@ import type { PanelReport } from "./panels.ts";
 import { frameList } from "./edits.ts";
 import { aboutText, MAX_ANSWER, openQuestions } from "./questions.ts";
 import { otherCapture } from "../shared/questions.ts";
+import { secondsToExact } from "../shared/tail.ts";
 import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, Question, TreeNode } from "../shared/api.ts";
@@ -276,15 +277,12 @@ function decodeAsText(r: DecodeAsResult, table?: string, value?: number): string
   return `${text}\n${entries}`;
 }
 
-/** "4 s" for a duration in ms. */
-function seconds(ms: number): string {
-  return `${Math.max(1, Math.round(ms / 1000))} s`;
-}
-
 /** When the agent's tools see provisional packets. */
 function whenRead(t: ProvisionalTail): string {
+  const secs = secondsToExact(t, Date.now());
   return {
-    read: `with the next full read, in about ${seconds(t.readMs)}`,
+    // What is left of the read under way, not what a read took last time
+    read: `with the next full read${secs === null ? " (the one under way takes longer than the last)" : `, in about ${secs} s`}`,
     stop: `once the capture stops (full reads wait: ${t.paused})`,
     reading: "once the full read under way finishes",
     reload: `once a full read succeeds (View › Reload)${t.paused ? ` (${t.paused})` : ""}`,

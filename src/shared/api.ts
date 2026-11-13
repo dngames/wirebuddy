@@ -284,6 +284,8 @@ export interface ProvisionalTail {
   held: string | null;
   /** How long a full read of the file takes now, in ms: provisional packets turn exact with the next one. */
   readMs: number;
+  /** When the full read under way began (epoch ms), null while none runs: the next one starts within a second of the capture growing. */
+  readingSince: number | null;
   /**
    * Why full reads wait (not enough memory for another copy, or the last
    * full read failed), else null; the capture is read in full once it

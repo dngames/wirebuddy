@@ -425,7 +425,8 @@ the questions you asked it.
 - During a live capture, one `sharkd` answers requests while the other re-reads the growing
   file; then they swap, so the UI never waits for a reload.
 - Once such a re-read takes a second or more, the packets that arrived since are listed within
-  about a second anyway, in italics, until the next re-read replaces them: two more `sharkd` read
+  about a second anyway, in italics, with a "≈" before the number and a dashed edge, until the
+  next re-read replaces them (the status bar counts them and says in how many seconds): two more `sharkd` read
   them from slices of the file (about 64 MiB at most) that also hold the packets before them, the
   start of their connections, the messages under way and the answers still owed, so they nearly
   always read as the full read will. Display filters on stream indices, TCP conversation

@@ -960,7 +960,7 @@ export class Viewer extends EventEmitter {
     const tail = this.listedTail;
     if (!tail) return null;
     const readMs = this.lastReadMs || (this.readStartedAt ? Date.now() - this.readStartedAt : 0);
-    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, paused: this.paused, exactAfter: this.exactAfter() };
+    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, readingSince: this.readStartedAt || null, paused: this.paused, exactAfter: this.exactAfter() };
   }
 
   /** What makes provisional packets exact (see ProvisionalTail.exactAfter). */
@@ -982,7 +982,7 @@ export class Viewer extends EventEmitter {
     const tail = this.tailState();
     const was = this.state.tail;
     if (!tail && !was) return;
-    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused && tail.exactAfter === was.exactAfter) return;
+    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused && tail.exactAfter === was.exactAfter && tail.readingSince === was.readingSince) return;
     const grew = (tail?.displayed ?? 0) !== (was?.displayed ?? 0);
     // A selected provisional packet the filter lists now gets its row
     const { selected, selectedIndex, selectedRows } = this.state;

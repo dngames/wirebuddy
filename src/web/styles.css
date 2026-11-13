@@ -1174,7 +1174,16 @@ input[type="checkbox"] {
   top: 0;
   bottom: 0;
   left: 0;
-  border-left: 2px dashed var(--text-faint);
+  border-left: 3px dashed var(--text-dim);
+}
+
+/* "≈" at the left of the packet number cell: it is read from slices and exact with the next full read. Out of the cell's flow, so it costs the number no room, and never copied */
+.pl-row.prov .pl-cm + .pl-cell::before {
+  content: "≈";
+  position: absolute;
+  left: 7px;
+  font-style: normal;
+  font-weight: 700;
 }
 
 .pl-overlay {
@@ -1702,8 +1711,8 @@ input[type="checkbox"] {
 }
 
 .sb-live {
-  flex: 0 1 auto;
-  min-width: 0;
+  /* Short, and never cut: the file name gives way first */
+  flex: 0 0 auto;
   color: var(--text-dim);
   font-style: italic;
 }
@@ -1775,8 +1784,6 @@ input[type="checkbox"] {
   }
 }
 
-/* ----------------------------------------------------------------- menus */
-
 /* A page that lost its server: what it shows is no longer current. Dimmed only after 3 s, so a quick reconnect doesn't flicker; back at once. */
 .main {
   transition: opacity 0.15s, filter 0.15s;
@@ -1838,6 +1845,8 @@ input[type="checkbox"] {
 .on-quiet .btn {
   flex: none;
 }
+
+/* ----------------------------------------------------------------- menus */
 
 .menu {
   position: fixed;

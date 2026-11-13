@@ -405,12 +405,16 @@ try {
   await check("the packet list marks provisional rows, the status bar counts them (headless Chrome)", async () => {
     browser = await openBrowser(wb.ui);
     if (!browser) return;
-    const page = async () => JSON.parse(await browser.evaluate(`JSON.stringify({ prov: [...document.querySelectorAll('.pl-row.prov')].filter((r) => r.style.display !== 'none').map((r) => r.title), live: document.querySelector('.sb-live')?.hidden ? '' : document.querySelector('.sb-live')?.textContent })`) ?? "{}");
+    const page = async () => JSON.parse(await browser.evaluate(`JSON.stringify({ prov: [...document.querySelectorAll('.pl-row.prov')].filter((r) => r.style.display !== 'none').map((r) => r.title), live: document.querySelector('.sb-live')?.hidden ? '' : document.querySelector('.sb-live')?.textContent, liveTitle: document.querySelector('.sb-live')?.title, mark: (() => { const r = [...document.querySelectorAll('.pl-row.prov')].find((x) => x.style.display !== 'none'); return r ? getComputedStyle(r.querySelector('.pl-cm + .pl-cell'), '::before').content : ''; })(), fits: (() => { const l = document.querySelector('.sb-live'); return !!l && l.scrollWidth <= l.clientWidth + 1; })() })`) ?? "{}");
     let seenPage = {};
     for (const end = Date.now() + 15_000; !(seenPage.prov?.length && seenPage.live) && Date.now() < end; await sleep(200)) seenPage = await page();
     assert.ok(seenPage.prov?.length, "provisional rows in the list");
     assert.match(seenPage.prov[0], /^Provisional: /);
-    assert.match(seenPage.live, /^[\d,]+ provisional · exact after the next full read/);
+    assert.match(seenPage.live, /^[\d,]+ provisional · exact (in ≈\d+ s|when the read ends)$/);
+    // Marked in the list itself (a "≈" before the number), and the bar's text fits whole
+    assert.equal(seenPage.mark, '"≈"');
+    assert.equal(seenPage.fits, true, "the status bar's text is cut");
+    assert.match(seenPage.liveTitle, /Marked in the list; the next full read makes them exact\./);
   });
 
   await check("display filters: provisional matches, held for stream indices", async () => {

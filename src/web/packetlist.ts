@@ -10,6 +10,7 @@
 
 import type { PacketRow, RowsResponse, ViewState } from "../shared/api.ts";
 import { countRanges, inRanges, mergeRanges, toggleInRanges, type Ranges } from "../shared/ranges.ts";
+import { secondsToExact } from "../shared/tail.ts";
 import { get, HttpError } from "./api.ts";
 import * as act from "./actions.ts";
 import { agentName, app, bus, captureActive, hooks } from "./app.ts";
@@ -592,8 +593,9 @@ function render(): void {
 /** Tooltip of provisional rows. */
 function provisionalTitle(): string {
   const t = app.state?.tail;
+  const secs = t ? secondsToExact(t, Date.now()) : null;
   const when = {
-    read: `with the next full read of the capture (about ${Math.max(1, Math.round((t?.readMs ?? 0) / 1000))} s)`,
+    read: `with the next full read of the capture${secs === null ? "" : ` (about ${secs} s)`}`,
     stop: "once the capture stops",
     reading: "once the full read under way finishes",
     reload: "once read in full (View › Reload)",
