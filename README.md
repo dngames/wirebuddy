@@ -65,7 +65,10 @@ The viewer itself works like Wireshark:
 - **The investigation stays with the capture:** marks with their notes, time references and
   packet comments edited in the viewer are kept in WireBuddy's data folder and come back when
   you open the capture (or a copy of it) again, also after another capture or a restart; File ›
-  Forget Kept Marks and Comments… goes back to what the capture file holds.
+  Forget Kept Marks and Comments… goes back to what the capture file holds. A restart also
+  keeps the custom columns and the recent files list, and the session token, so that a page open
+  across it reconnects by itself (see Security). It does not keep the display filter, the
+  questions to the agent with their answers, Decode As entries or the selected packet.
 - **A findings report:** File › Write Findings Report… (or the agent's `write_findings`) writes
   what an investigation found as one Markdown file: your or the agent's summary, the capture's
   facts, a table of the marked packets with their notes, and the packets with comments, in the

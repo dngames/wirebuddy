@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 - A page that is open when WireBuddy restarts reconnects by itself: without `--token` the session token is the one the last start made, kept for the user alone in `~/.local/share/wirebuddy/state/token` (delete it for a new one; SECURITY.md says what that changes)
 - A page whose token the server refuses (another token, a session that ended) says so in a notice over the page, with where the current address comes from, and keeps trying; a page that lost its server dims what it shows after a few seconds
+- A restart keeps the custom columns and the recent files list (the display filter and the questions are not kept, which the README now says)
+
+- A page that is open when WireBuddy restarts reconnects by itself: without `--token` the session token is the one the last start made, kept for the user alone in `~/.local/share/wirebuddy/state/token` (delete it for a new one; SECURITY.md says what that changes)
+- A page whose token the server refuses (another token, a session that ended) says so in a notice over the page, with where the current address comes from, and keeps trying; a page that lost its server dims what it shows after a few seconds
 
 ## [0.17.0] - 2026-11-13
 

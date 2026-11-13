@@ -43,7 +43,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
 | A31 | polish | A reopened capture's panel briefly showed "0 samples" (a race on reset; not looked into) | case 2 |
 | A32 | polish | In a browser that can't isolate a panel, the warning about it is counted as "1 problem sent to Agent" in the status bar | case 2 |
-| A34 | gap | A restart keeps marks, notes, time references, comments and extensions (and says so), but drops the display filter, the custom columns and the questions with their answers without a word; the recent files list is empty | round 3 |
 | A35 | fix | The server instructions' background watcher command names a state file of the session before the restart | round 3 |
 | A36 | fix | A question about packets (Ask Agent, Now) stays "waiting" with its packet number when another capture is opened or started; `answer_question` answers it without a warning, and the questions list shows "packet 400" without the capture's name (see also A14) | round 3 |
 | A37 | fix | `follow_stream` with TLS keys set: the default still shows ciphertext with no hint to ask for TLS or HTTP, and with protocol TLS the directions are labelled the wrong way round | round 3 |
@@ -106,3 +105,7 @@ end (A25) · the extension test says what stayed undecoded (A26) · the README's
 Released as 0.17.0 (tag `v0.17.0`), with everything above.
 Round 3, fixed afterwards: the session token is kept between starts, so an open page reconnects after a restart, and a
 page whose token is refused says so in a notice over the page (A33).
+Round 3, fixed afterwards: the session token is kept between starts, so an open page reconnects after a restart, and a
+page whose token is refused says so in a notice over the page (A33).
+Round 3, fixed afterwards: custom columns and the recent files are kept across a restart, and the README says the display
+filter and the questions are not (A34).

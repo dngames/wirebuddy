@@ -120,6 +120,7 @@ const viewer = new Viewer({
   extensions,
   panelRuntime: join(dirname(fileURLToPath(import.meta.url)), "../panel"),
   investigations: investigationDir(),
+  settings: settingsDir(),
 });
 // The status bar's count only: never a reason not to start
 try {
@@ -130,6 +131,7 @@ try {
 const tlsKeylog = values["tls-keylog"];
 if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(`TLS key log: ${(err as Error).message}`));
 else void viewer.loadTlsPreference();
+void viewer.restoreColumns();
 
 // An empty token would let anyone on this machine in
 let token = values.token;

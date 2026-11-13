@@ -1492,7 +1492,7 @@ try {
       // The page asks before Open, Close and Start Capture again: edits not exported and not kept
       assert.deepEqual([st.kept, st.commentEdits], [false, 1]);
       assert.equal((await warned()).length, 1, (await eventsSince(s, 0)).join("\n"));
-      const events = (await s.api(`/api/events?after=0`)).json.events.filter((e) => e.text.startsWith("Could not keep"));
+      const events = (await s.api(`/api/events?after=0`)).json.events.filter((e) => e.text.startsWith("Could not keep the marks"));
       assert.deepEqual(events.map((e) => e.repeated ?? 1), [1]);
     } finally {
       await s.stop();
@@ -1555,6 +1555,50 @@ try {
       s = await startOn(own);
       assert.notEqual(s.token, third);
       assert.equal(mode(join(state, "token")), 0o600);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("a restart keeps the custom columns and the recent files, and says so; files that don't check out are ignored whole, the agent told", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const state = join(own, ".local/share/wirebuddy/state");
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(40, 7502));
+    let s = await startOn(own);
+    try {
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal((await s.api("/api/columns", { columns: [{ field: "udp.srcport", title: "SPort" }, { field: "frame.len", title: "" }] })).json.ok, true);
+      const columns = (await s.api("/api/state")).json.customColumns;
+      assert.deepEqual(columns.map((c) => c.title), ["SPort", "Frame Length"]);
+      await s.stop();
+      // The columns and the recent file are back, with the columns announced
+      s = await startOn(own);
+      await waitFor("the columns", async () => (await s.api("/api/state")).json.customColumns.length === 2);
+      assert.deepEqual((await s.api("/api/state")).json.customColumns, columns);
+      assert.deepEqual((await s.api("/api/recent")).json.files.map((f) => f.path), [a]);
+      assert.ok((await eventsSince(s, 0)).includes("INFO Restored the custom columns of the run before: SPort, Frame Length"));
+      // Opening a capture puts the columns into its list
+      await s.api("/api/open", { path: a });
+      assert.equal((await s.api("/api/state")).json.columns.slice(-2).join(","), "SPort,Frame Length");
+      // Removing the columns keeps nothing of them
+      await s.api("/api/columns", { columns: [] });
+      await s.stop();
+      s = await startOn(own);
+      assert.deepEqual((await s.api("/api/state")).json.customColumns, []);
+      await s.stop();
+      // Files that don't check out are ignored whole: no columns, no recent files; the agent hears of those
+      writeFileSync(join(state, "columns.json"), '[{"field":"udp.srcport"}]', { mode: 0o600 });
+      writeFileSync(join(state, "recent.json"), '{"files":1}', { mode: 0o600 });
+      s = await startOn(own);
+      await waitFor("the warnings", async () => (await eventsSince(s, 0)).filter((t) => t.startsWith("WARNING ")).length === 2);
+      assert.deepEqual((await s.api("/api/state")).json.customColumns, []);
+      assert.deepEqual((await s.api("/api/recent")).json.files, []);
+      const warned = (await eventsSince(s, 0)).filter((t) => t.startsWith("WARNING "));
+      assert.ok(warned.some((t) => t.includes("columns.json is not what WireBuddy writes there, so it is ignored")), warned.join("\n"));
+      assert.ok(warned.some((t) => t.includes("recent.json is not what WireBuddy writes there, so it is ignored")), warned.join("\n"));
     } finally {
       await s.stop();
       rmSync(dir, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 /**
  * What WireBuddy keeps of its own between runs, apart from the investigations
- * of captures: the session token.
+ * of captures: the session token, the custom columns and the recent files.
  * Small files in a folder of the user's own (`0700`, files `0600`, never
  * through a link), in the data folder next to the investigations. What is
  * read back is checked whole: a file that doesn't check out is ignored.
@@ -9,13 +9,20 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import type { CustomColumn } from "../shared/api.ts";
 import { privateDir } from "./investigation.ts";
 
 /** Largest file written or read. */
 const MAX_BYTES = 64 * 1024;
 /** What WireBuddy makes a session token of: 128 random bits. */
 const TOKEN = /^[0-9a-f]{32}$/;
+/** Recent files kept, and the longest path. */
+export const MAX_RECENT = 20;
+const MAX_PATH = 4096;
+/** The most custom columns and the longest field and title the viewer takes. */
+export const MAX_KEPT_COLUMNS = 10;
+const MAX_TITLE = 60;
 
 /** WireBuddy's folder for what it keeps for the user: in `$XDG_DATA_HOME`, else `~/.local/share`. */
 export function settingsDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -95,4 +102,42 @@ export function keptToken(dir: string): { token: string; fresh: boolean; problem
     return { token, fresh: true, problem: `${(err as Error).message}` };
   }
   return { token, fresh: true, ...(problem ? { problem: `${problem}; made a new one` } : {}) };
+}
+
+/** `text` as a list of recent files: absolute paths, the newest first; null when it isn't one. */
+export function parseRecent(text: string): string[] | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(raw) || raw.length > MAX_RECENT) return null;
+  const files: string[] = [];
+  for (const f of raw) {
+    if (typeof f !== "string" || !f || f.length > MAX_PATH || !isAbsolute(f) || f.includes("\0") || files.includes(f)) return null;
+    files.push(f);
+  }
+  return files;
+}
+
+/** `text` as custom columns, checked as the viewer sets them; null when it isn't a list of those. */
+export function parseColumns(text: string): CustomColumn[] | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(raw) || raw.length > MAX_KEPT_COLUMNS) return null;
+  const columns: CustomColumn[] = [];
+  for (const c of raw) {
+    if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+    const { field, title, ...rest } = c as Record<string, unknown>;
+    if (Object.keys(rest).length) return null;
+    if (typeof field !== "string" || !field || field.length > 128 || /[\u0000-\u0020\u007f-\u009f]/.test(field)) return null;
+    if (typeof title !== "string" || !title.trim() || title.length > MAX_TITLE || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(title)) return null;
+    columns.push({ field, title });
+  }
+  return columns;
 }

@@ -41,7 +41,7 @@ const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
 const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
-const { settingsDir, keptToken, readSetting, writeSetting } = await import(join(out, "units.mjs"));
+const { settingsDir, keptToken, readSetting, writeSetting, parseRecent, parseColumns } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { Edits, marksWith, marksWithout, toggledMarks, displayedMarks, refsWith, toggledRefs, refsChange, commentText, commentAt, MAX_MARKS, MAX_NOTE, MAX_TIME_REFS, StaleGenerationError } = await import(join(out, "units.mjs"));
@@ -1246,6 +1246,28 @@ try {
       rmSync(base, { recursive: true, force: true });
     }
   });
+  await check("kept settings: the recent files and the custom columns are read back only when they check out, in files of the user's own", () => {
+    const base = mkdtempSync(join(out, "settings-"));
+    try {
+      const dir = join(base, "state");
+      assert.equal(readSetting(dir, "recent.json"), null);
+      writeSetting(dir, "recent.json", JSON.stringify(["/a/one.pcap", "/b/two.pcapng"]));
+      assert.equal(statSync(join(dir, "recent.json")).mode & 0o777, 0o600);
+      assert.deepEqual(parseRecent(readSetting(dir, "recent.json")), ["/a/one.pcap", "/b/two.pcapng"]);
+      for (const bad of ["", "{}", "[1]", '["relative.pcap"]', '["/a","/a"]', JSON.stringify(Array(21).fill(0).map((_, i) => `/f${i}`)), '["/a\u0000b"]']) assert.equal(parseRecent(bad), null, bad);
+      assert.deepEqual(parseColumns('[{"field":"tcp.srcport","title":"SPort"},{"field":"frame.len","title":"Length"}]'), [{ field: "tcp.srcport", title: "SPort" }, { field: "frame.len", title: "Length" }]);
+      assert.deepEqual(parseColumns("[]"), []);
+      for (const bad of ["", "{}", '[{"field":"a"}]', '[{"field":"a","title":""}]', '[{"field":"a b","title":"t"}]', '[{"field":"a","title":"t","extra":1}]', '["a"]', JSON.stringify(Array(11).fill({ field: "a", title: "t" }))]) assert.equal(parseColumns(bad), null, bad);
+      // A file that is too big, or a link, is refused
+      writeFileSync(join(dir, "big.json"), "x".repeat(70 * 1024), { mode: 0o600 });
+      assert.throws(() => readSetting(dir, "big.json"), /bigger/);
+      symlinkSync(join(base, "elsewhere"), join(dir, "link.json"));
+      assert.throws(() => readSetting(dir, "link.json"));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   const limits = { marks: 3, note: 10, timeRefs: 2, commented: 2, comment: 20 };
   const investigation = () => ({
     marks: [{ frame: 2, note: "slow reply", by: "agent" }, { frame: 5, note: "", by: "user" }],

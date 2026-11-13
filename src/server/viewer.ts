@@ -22,6 +22,7 @@ import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
 import { Keeper, type KeptRead } from "./keeper.ts";
+import { MAX_RECENT, parseColumns, parseRecent, readSetting, writeSetting } from "./settings.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
 import { PacketList, clipRanges, listChanged, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
@@ -298,6 +299,10 @@ export class Viewer extends EventEmitter {
   private readonly commentEtts = { node: -1, item: -2 };
   /** Where the marks, time references and edited comments of each capture are kept; null: nowhere. */
   private readonly investigations: string | null;
+  /** Where the custom columns and the recent files are kept (see settings.ts); null: nowhere. */
+  private readonly settings: string | null;
+  /** What keeping them already told the agent. */
+  private readonly settingsTold = new Set<string>();
   readonly capture: Capture;
   readonly recent: string[] = [];
 
@@ -316,6 +321,8 @@ export class Viewer extends EventEmitter {
     panelRuntime?: string;
     /** WireBuddy's folder of investigations kept per capture (see investigation.ts); none without. */
     investigations?: string;
+    /** WireBuddy's folder for the custom columns and recent files kept across restarts (see settings.ts); none without. */
+    settings?: string;
   }) {
     super();
     this.extensions = opts.extensions ?? new Extensions();
@@ -412,6 +419,8 @@ export class Viewer extends EventEmitter {
         })
         .then(() => this.offers.checkOffers(false), () => {});
     });
+    this.settings = opts.settings ?? null;
+    this.recent.push(...(this.readSetting("recent.json", parseRecent) ?? []));
     this.investigations = opts.investigations ?? null;
     if (this.investigations) {
       try {
@@ -1339,7 +1348,7 @@ export class Viewer extends EventEmitter {
   }
 
   /** Sets the packet list's custom columns (an empty list removes them). */
-  setColumns(columns: CustomColumn[], by: "user" | "agent"): Promise<FilterCheck> {
+  setColumns(columns: CustomColumn[], by: "user" | "agent", keep = true): Promise<FilterCheck> {
     return this.exclusive(async () => {
       if (columns.length > MAX_CUSTOM_COLUMNS) return { ok: false, error: `at most ${MAX_CUSTOM_COLUMNS} custom columns` };
       try {
@@ -1359,6 +1368,7 @@ export class Viewer extends EventEmitter {
         columns: this.state.file ? [...this.baseColumns, ...customColumns.map((c) => c.title)] : [],
         generation: this.state.generation + 1,
       });
+      if (keep) this.keepSetting("columns.json", JSON.stringify(customColumns));
       if (by === "agent") this.notice(customColumns.length ? `Columns: ${customColumns.map((c) => c.title).join(", ")}` : "Removed the custom columns");
       return { ok: true };
     });
@@ -2279,7 +2289,48 @@ export class Viewer extends EventEmitter {
     const i = this.recent.indexOf(file);
     if (i >= 0) this.recent.splice(i, 1);
     this.recent.unshift(file);
-    this.recent.length = Math.min(this.recent.length, 20);
+    this.recent.length = Math.min(this.recent.length, MAX_RECENT);
+    this.keepSetting("recent.json", JSON.stringify(this.recent));
+  }
+
+  /** What `file` in the settings folder holds, read by `parse`; null for none, or one that doesn't check out (ignored whole, told once). */
+  private readSetting<T>(file: string, parse: (text: string) => T | null): T | null {
+    if (!this.settings) return null;
+    try {
+      const text = readSetting(this.settings, file);
+      if (text === null) return null;
+      const kept = parse(text);
+      if (kept) return kept;
+      this.settingsProblem(`${join(this.settings, file)} is not what WireBuddy writes there, so it is ignored`);
+    } catch (err) {
+      this.settingsProblem(`Could not read ${join(this.settings, file)}: ${(err as Error).message}`);
+    }
+    return null;
+  }
+
+  private keepSetting(file: string, text: string): void {
+    if (!this.settings) return;
+    try {
+      writeSetting(this.settings, file, text);
+    } catch (err) {
+      // One text for all of them: a folder that can't be written says so once
+      this.settingsProblem(`Could not keep the custom columns and the recent files in ${this.settings}: ${(err as Error).message}`);
+    }
+  }
+
+  private settingsProblem(text: string): void {
+    if (this.settingsTold.has(text)) return;
+    this.settingsTold.add(text);
+    this.events.add("WARNING", text);
+  }
+
+  /** Brings back the custom columns kept by the run before, if this Wireshark still has their fields; says so. */
+  async restoreColumns(): Promise<void> {
+    const kept = this.readSetting("columns.json", parseColumns);
+    if (!kept?.length) return;
+    const r = await this.setColumns(kept, "user", false);
+    if (r.ok) this.events.add("INFO", `Restored the custom columns of the run before: ${this.state.customColumns.map((c) => c.title).join(", ")}`);
+    else this.settingsProblem(`The custom columns kept by the run before were not restored: ${r.error}`);
   }
 
   private requireFile(): void {
