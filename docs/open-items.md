@@ -43,11 +43,10 @@ items, so a gap in the numbering is an item that is done (section E).
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
 | A31 | polish | A reopened capture's panel briefly showed "0 samples" (a race on reset; not looked into) | case 2 |
 | A32 | polish | In a browser that can't isolate a panel, the warning about it is counted as "1 problem sent to Agent" in the status bar | case 2 |
-| A35 | fix | The server instructions' background watcher command names a state file of the session before the restart | round 3 |
+| A35 | fix | The server instructions' background watcher command names a state file of the session before the restart (checked in the round 3 fixes: WireBuddy writes the live process's file into the instructions of each start, so a client that initializes again after a restart gets the right path; the tester's bridge kept the first initialize result. Not changed) | round 3 |
 | A36 | fix | A question about packets (Ask Agent, Now) stays "waiting" with its packet number when another capture is opened or started; `answer_question` answers it without a warning, and the questions list shows "packet 400" without the capture's name (see also A14) | round 3 |
 | A37 | fix | `follow_stream` with TLS keys set: the default still shows ciphertext with no hint to ask for TLS or HTTP, and with protocol TLS the directions are labelled the wrong way round | round 3 |
 | A38 | fix | If the list changes while the Add Comment dialog is open (the agent sets a filter), saving fails and the typed text is lost | round 3 |
-| A39 | polish | The background watcher prints one line and exits, without the recent activity the instructions promise | round 3 |
 | A40 | gap | In a live capture too big to re-read each second the newest rows are not marked as provisional in the list; only the status bar says so, its text is cut, and its estimate goes stale once the traffic stops | round 3 |
 | A41 | polish | Holding Now gives no feedback but a red outline; the old "answered" banner sits under a new waiting line; the capture's packet counter and the list's count disagree during a flood; 409s in the browser console at a filter change and at stop (no visible effect) | round 3 |
 | A42 | fix | A Lua plugin in Wireshark's own plugin folder with the same protocol description as an extension makes one of them fail to load; only the reload says so, as a warning, and the extension test says "No Lua errors" | guide-only run |
@@ -109,3 +108,8 @@ Round 3, fixed afterwards: the session token is kept between starts, so an open 
 page whose token is refused says so in a notice over the page (A33).
 Round 3, fixed afterwards: custom columns and the recent files are kept across a restart, and the README says the display
 filter and the questions are not (A34).
+Round 3, fixed afterwards: the session token is kept between starts, so an open page reconnects after a restart, and a
+page whose token is refused says so in a notice over the page (A33).
+Round 3, fixed afterwards: custom columns and the recent files are kept across a restart, and the README says the display
+filter and the questions are not (A34).
+Round 3, fixed afterwards: the watcher prints the activity before the event it was woken by (A39).

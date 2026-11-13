@@ -1,7 +1,7 @@
 /**
  * `wirebuddy --watch <instance file>`: waits for the running viewer's next
  * problem or question for the agent, prints it with what the user did since
- * the agent last looked, and exits. An agent runs it as a background command
+ * the agent last looked and the activity before that, and exits. An agent runs it as a background command
  * to be woken when the user runs into trouble or asks it something.
  */
 
@@ -10,6 +10,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ViewerEvent } from "../shared/api.ts";
 import { eventLines } from "./events.ts";
+
+/** Events of the activity before the ones the agent is woken with that the watcher prints too: the context, which the agent saw already. */
+const RECENT_EVENTS = 10;
 
 /** One long-poll request; the watcher loops until a problem or question comes. */
 const POLL_MS = 50_000;
@@ -51,6 +54,13 @@ export function removeInstance(file: string): void {
   rmSync(file, { force: true });
 }
 
+/** What the watcher prints: the events that woke the agent, then the `earlier` ones before them (what it already saw), as lines. */
+export function watchLines(woke: ViewerEvent[], earlier: ViewerEvent[]): string[] {
+  const first = Math.min(...woke.map((e) => e.seq).filter((seq) => seq > 0));
+  const before = earlier.filter((e) => e.seq < first).slice(-RECENT_EVENTS);
+  return [...eventLines(woke), ...(before.length ? ["Recent activity before it, which you saw already:", ...eventLines(before).map((l) => `  ${l}`)] : [])];
+}
+
 export async function watch(file: string, out: (line: string) => void = (l) => console.log(l)): Promise<number> {
   let instance: Instance;
   try {
@@ -77,7 +87,9 @@ export async function watch(file: string, out: (line: string) => void = (l) => c
       const r = await call<Since>(`/api/events?after=${after}&wait=${POLL_MS}&problems=1`);
       if (r.events.length) {
         const { events } = await call<{ events: ViewerEvent[] }>("/api/events/take", { method: "POST", body: "{}" });
-        for (const line of eventLines(events)) out(line);
+        // The log, for the context: the newest events of all, the first of those taken and the ones after it among them
+        const log = (await call<Since>("/api/events?after=0")).events;
+        for (const line of watchLines(events, log)) out(line);
         return 0;
       }
       after = r.last;

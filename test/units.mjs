@@ -39,7 +39,7 @@ const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
-const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
+const { instanceFile, writeInstance, listenLoopback, watchLines } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
 const { settingsDir, keptToken, readSetting, writeSetting, parseRecent, parseColumns } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
@@ -1202,6 +1202,19 @@ try {
     }
   });
 
+  await check("watcher: prints the events that woke the agent, then up to ten before them it saw already", () => {
+    const ev = (seq, level, text) => ({ seq, time: `2026-11-13T12:00:${String(seq).padStart(2, "0")}.000Z`, level, text });
+    const log = Array.from({ length: 14 }, (_, i) => ev(i + 1, "INFO", `did ${i + 1}`));
+    log.push(ev(15, "QUESTION", "is this normal?"));
+    const lines = watchLines([log[14]], log);
+    assert.equal(lines[0], "12:00:15 QUESTION is this normal?");
+    assert.match(lines[1], /^Recent activity before it/);
+    assert.deepEqual(lines.slice(2), log.slice(4, 14).map((e) => `  12:00:${String(e.seq).padStart(2, "0")} INFO ${e.text}`));
+    // What the agent is woken with is not repeated as context; a summary line (seq 0) doesn't hide the rest
+    const two = watchLines([ev(0, "INFO", "3 earlier events not shown (0 problems)"), log[13], log[14]], log);
+    assert.equal(two.filter((l) => /did 14|is this normal/.test(l)).length, 2);
+    assert.equal(watchLines([log[0]], log).length, 1);
+  });
   await check("session token: the one used last is kept for the user alone and reused, a file that can't be trusted is replaced, and nothing is kept in a folder that isn't the user's own", () => {
     const base = mkdtempSync(join(out, "token-"));
     const mode = (path) => statSync(path).mode & 0o777;

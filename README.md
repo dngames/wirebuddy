@@ -293,7 +293,7 @@ hears of it, together with other problems (a file that won't open, a rejected fi
 capture, a crashed `sharkd`) and what you do in the viewer, with its next WireBuddy tool call; the
 status bar counts the problems waiting for it. To react while you work, Claude runs
 `wirebuddy --watch <instance-file>` as a background command: it waits for the next problem or
-question, prints it and exits, which wakes Claude.
+question, prints it with the activity before it and exits, which wakes Claude.
 
 To ask about packets without switching to the chat, right-click them in the packet list and
 choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packets…**). The question
