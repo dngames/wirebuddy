@@ -2523,3 +2523,11 @@ esac
     assert.equal(waitingState(open(7, 5), "Claude"), "seen · waiting for the answer");
   });
 
+  await check("a display filter tests frame.number: found outside quotes, not in other names", () => {
+    for (const f of ["frame.number in {928, 943}", "tcp && frame.number > 10", "!(frame.number==3)"]) assert.equal(usesFrameNumber(f), true, f);
+    for (const f of ["", "tcp.port == 80", 'frame.comment contains "frame.number"', "myframe.number == 1", "frame.number_x == 1", "frame.numbers == 1"]) assert.equal(usesFrameNumber(f), false, f);
+  });
+} finally {
+  rmSync(out, { recursive: true, force: true });
+}
+finish();
