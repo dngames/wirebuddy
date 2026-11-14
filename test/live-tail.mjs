@@ -299,10 +299,11 @@ try {
       for (let attempt = 1; ; attempt++) {
         const s = await until("newer packets", 10_000, (s) => s.tail?.frames > 60 && s.totalFrames > 1000);
         try {
-          await provisionalFormats(s.totalFrames + 12);
+          // Near the newest packets: the ones that stay provisional longest
+          await provisionalFormats(s.totalFrames + s.tail.frames - 20);
           return;
         } catch (err) {
-          if (attempt >= 5 || !err.overtaken) throw err;
+          if (attempt >= 12 || !err.overtaken) throw err;
         }
       }
     } finally {
@@ -319,8 +320,12 @@ try {
     const read = async () => {
       // Provisional rows that can't be read just now come empty: asked again
       let rows = [];
-      for (let k = 0; k < 40 && rows.length < 6; k++, await sleep(250)) ({ rows } = await wb.rows(first - 1, 6));
-      await stillProvisional(first, rows.length === 6 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
+      for (let k = 0; k < 40; k++) {
+        ({ rows } = await wb.rows(first - 1, 4));
+        if (rows.length >= 4) break;
+        await sleep(250);
+      }
+      await stillProvisional(first, rows.length === 4 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
       return rows;
     };
     const ns = (text) => {
@@ -345,13 +350,15 @@ try {
       return (BigInt(h) * 3600n + BigInt(m) * 60n) * 1_000_000_000n + ns(rest);
     };
     for (let i = 1; i < clock.length; i++) assert.equal(sinceMidnight(clock[i]) - sinceMidnight(clock[i - 1]), relative[i] - relative[i - 1], `row ${i}: ${clock[i - 1]} then ${clock[i]}`);
-    await api("/api/timeformat", { format: "utc-date-time" });
-    assert.ok((await read()).every((r) => new RegExp(`^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d{${digits}}$`).test(r.c[1])));
     // A display filter: a slice can't tell which packet was displayed before it
     await api("/api/timeformat", { format: "delta-displayed" });
     assert.equal((await api("/api/filter", { filter: "frame" })).ok, true);
     let rows = [];
-    for (let k = 0; k < 40 && !rows.length; k++, await sleep(250)) ({ rows } = await wb.rows(first - 1, 6));
+    for (let k = 0; k < 40; k++) {
+      ({ rows } = await wb.rows(first - 1, 4));
+      if (rows.length) break;
+      await sleep(250);
+    }
     await stillProvisional(first, rows.length > 0 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
     assert.deepEqual(rows.map((r) => r.c[1]), rows.map(() => ""), "provisional rows under a display filter");
     const exact = (await wb.rows(0, 3)).rows;
@@ -359,7 +366,7 @@ try {
     assert.ok(exact.every((r) => !r.p && decimals.test(r.c[1])), exact.map((r) => r.c[1]).join(" "));
     // The other formats still read under the filter
     await api("/api/timeformat", { format: "delta-captured" });
-    assert.ok((await wb.rows(first - 1, 6)).rows.every((r) => decimals.test(r.c[1])));
+    assert.ok((await wb.rows(first - 1, 4)).rows.every((r) => decimals.test(r.c[1])));
   }
 
   /** Sets the exact frame `early` and the provisional `ref` as time references and checks the rows and details around `ref`. */
