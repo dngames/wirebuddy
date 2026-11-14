@@ -65,7 +65,10 @@ The viewer itself works like Wireshark:
 - **The investigation stays with the capture:** marks with their notes, time references and
   packet comments edited in the viewer are kept in WireBuddy's data folder and come back when
   you open the capture (or a copy of it) again, also after another capture or a restart; File ›
-  Forget Kept Marks and Comments… goes back to what the capture file holds.
+  Forget Kept Marks and Comments… goes back to what the capture file holds. A restart also
+  keeps the custom columns and the recent files list, and the session token, so that a page open
+  across it reconnects by itself (see Security). It does not keep the display filter, the
+  questions to the agent with their answers, Decode As entries or the selected packet.
 - **A findings report:** File › Write Findings Report… (or the agent's `write_findings`) writes
   what an investigation found as one Markdown file: your or the agent's summary, the capture's
   facts, a table of the marked packets with their notes, and the packets with comments, in the
@@ -150,7 +153,7 @@ Options (`--help` shows the same):
 | Option | Environment | |
 |---|---|---|
 | `--port <n>` | `WIREBUDDY_PORT` | HTTP port on 127.0.0.1 (and `::1`); default 8765, falls back to a free one |
-| `--token <t>` | `WIREBUDDY_TOKEN` | session token, at least 16 characters; default random. Prefer the variable: other local users can see command lines in `ps` |
+| `--token <t>` | `WIREBUDDY_TOKEN` | session token, at least 16 characters; default the random one the last start made, kept in `~/.local/share/wirebuddy/state/token` (delete the file for a new one). Prefer the variable: other local users can see command lines in `ps` |
 | `--capture-dir <dir>` | `WIREBUDDY_CAPTURE_DIR` | where live captures go; default `~/.local/share/wirebuddy/captures` |
 | `--profile <name>` | `WIREBUDDY_PROFILE` | Wireshark configuration profile for dissection and Open in Wireshark |
 | `--tls-keylog <file>` | | decrypt TLS with this key log file |
@@ -226,9 +229,16 @@ An extension can also bring a **panel**: a small web page of its own (`panel/mai
 optional HTML, CSS and further modules) that WireBuddy shows in a window next to the packets and
 feeds with the open capture, also during a live capture: images or files in the traffic, video,
 point clouds, a field over time. The agent writes one when a picture says more than packet rows,
-checks it (`extensions action "test"` finds syntax errors with file and line), opens it with the
+checks it (`extensions action "test"` finds syntax errors with file and line, and a protocol whose description or name a Wireshark plugin of yours already registers, naming the file), opens it with the
 `panel` tool and gets told whether it started, what it shows and every error it throws;
 `panel action "snapshot"` gives it an image of the panel.
+
+A panel opens **docked**: it takes a pane of its own under the packet list, with a splitter like the
+others (its height is remembered), so the list, the panel, the details and the bytes are all in
+view, and nothing the agent set up in the list is covered. **Float** in its title bar turns it into
+a window over the page, **Dock** puts it back; the choice is remembered per panel. Reload, Maximize
+and Close work either way, and a maximized panel returns to the state it had. A second docked
+panel shares the pane with the first as tabs.
 
 You open panels under **View › Panels** or in Analyze › Extensions. An extension can offer its
 panel for captures it fits (`"offer": {"filter": "rtp", "text": "Play the video"}`): the offer
@@ -290,7 +300,7 @@ hears of it, together with other problems (a file that won't open, a rejected fi
 capture, a crashed `sharkd`) and what you do in the viewer, with its next WireBuddy tool call; the
 status bar counts the problems waiting for it. To react while you work, Claude runs
 `wirebuddy --watch <instance-file>` as a background command: it waits for the next problem or
-question, prints it and exits, which wakes Claude.
+question, prints it with the activity before it and exits, which wakes Claude.
 
 To ask about packets without switching to the chat, right-click them in the packet list and
 choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packets…**). The question
@@ -422,7 +432,8 @@ the questions you asked it.
 - During a live capture, one `sharkd` answers requests while the other re-reads the growing
   file; then they swap, so the UI never waits for a reload.
 - Once such a re-read takes a second or more, the packets that arrived since are listed within
-  about a second anyway, in italics, until the next re-read replaces them: two more `sharkd` read
+  about a second anyway, in italics, with a "≈" before the number and a dashed edge, until the
+  next re-read replaces them (the status bar counts them and says in how many seconds): two more `sharkd` read
   them from slices of the file (about 64 MiB at most) that also hold the packets before them, the
   start of their connections, the messages under way and the answers still owed, so they nearly
   always read as the full read will. Display filters on stream indices, TCP conversation
@@ -436,7 +447,10 @@ the questions you asked it.
 - **The session token is the only boundary.** Anyone or anything holding the viewer URL with its
   token can do everything you can in the UI, starting a capture included. That covers an AI agent
   that also has a shell or controls the browser pane: give WireBuddy only to agents you trust,
-  and don't share the URL.
+  and don't share the URL. Without `--token` the token is the one the last start made, kept for
+  you alone in `~/.local/share/wirebuddy/state/token` (folder `0700`, file `0600`), so that a page
+  open when WireBuddy restarts (as an agent's client does with its MCP server) reconnects by
+  itself; a URL that leaked therefore stays good until you delete that file or give `--token`.
 - The server listens on the loopback addresses only (`127.0.0.1`, and the same port on `::1`
   where there is one). API calls need the random per-session token in an `X-WireBuddy-Token`
   header (the WebSocket takes it in its URL); it is compared in constant time.

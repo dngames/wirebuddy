@@ -59,6 +59,9 @@ export function startsWith(after: { length: number; at: (i: number) => number },
   return true;
 }
 
+/** The list a dialog was opened on: its capture alone when it names its packets by frame number, which no display filter changes. */
+export type AboutView = { file: string; filter: string; generation?: number } | { file: string; filter?: undefined; generation?: undefined };
+
 /** Whether a request made for `view` (a list the page showed) is for a list the view has replaced or changed in place since. */
 export function listChanged(view: { file: string; filter: string; generation?: number }, now: { file: string | null; filter: string; rowsSince: number }): boolean {
   return view.file !== now.file || view.filter !== now.filter || (view.generation ?? Infinity) < now.rowsSince;

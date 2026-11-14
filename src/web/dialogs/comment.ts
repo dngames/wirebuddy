@@ -50,8 +50,8 @@ export function openCommentDialog(edit?: { frame: number; index: number; text: s
   const s = app.state;
   if (!s?.file || current?.isOpen) return;
   // The comment goes to the packets selected now, even if the selection changes while typing
-  const about = { frame: app.selFrame, rows: app.selRows, view: { file: s.file, filter: s.filter, generation: s.generation } };
-  const count = countRanges(about.rows) || (about.frame !== null ? 1 : 0);
+  const about = act.packetsAbout(s);
+  const count = countRanges(app.selRows) || (about.frame !== null ? 1 : 0);
   if (!edit && !count) return;
   const d = new Dialog(edit ? "Edit Packet Comment" : "Add Packet Comment", { width: 460, cls: "dlg-comment" });
   current = d;
@@ -74,7 +74,7 @@ export function openCommentDialog(edit?: { frame: number; index: number; text: s
       d.close();
       if (app.conn !== "open") void act.refreshState();
     } catch (e) {
-      const stale = edit ? "The comment changed meanwhile; close this and choose it again" : "The packet list changed; close this and select the packets again";
+      const stale = edit ? "The comment changed meanwhile; close this and choose it again" : act.staleAbout(about);
       showErr(e instanceof HttpError && e.status === 409 ? stale : errorText(e));
     } finally {
       okBtn.disabled = false;

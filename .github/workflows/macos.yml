@@ -164,6 +164,11 @@ jobs:
         env:
           CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         run: node test/browser-control.mjs
+      - name: test/browser-restart.mjs
+        if: ${{ !cancelled() }}
+        env:
+          CHROME: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        run: node test/browser-restart.mjs
 
       # npm run test:live is the same three files; here each one reports on its own
       - name: test/live-smoke.mjs

@@ -18,6 +18,7 @@ import { CAPTURE_FILE } from "./capturefile.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { CONV_TYPES, type ConvType } from "./stats.ts";
 import type { Viewer } from "./viewer.ts";
+import type { AboutView } from "./packetlist.ts";
 import type { CaptureRequest, CaptureState, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, FindingsResult, ForgetResult, IoGraphSpec, MarkResult, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
 import { leftOutText } from "../shared/ownport.ts";
@@ -104,7 +105,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/reload": async () => (await viewer.reload(true), ok),
     // The frames given, else the packets the dialog was opened for, in the view it showed
     "/api/marks": (_q, b): MarkResult => {
-      const view = viewKey(b.view);
+      const view = aboutView(b.view);
       const frames = view ? rangeFrames(viewer.framesAbout({ frame: b.frame ?? null, rows: rowRanges(b.rows), view })) : numbers(b.frames);
       const marked = viewer.mark(frames, String(b.note ?? ""), "user").frames;
       return { ok: true, ...commentResult(marked) };
@@ -118,7 +119,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     // The packets the dialog was opened for, in the view it showed, else the selected ones
     "/api/comments": async (_q, b) => {
       const comment = text(b.comment, "comment");
-      const view = viewKey(b.view);
+      const view = aboutView(b.view);
       const frames = view ? viewer.framesAbout({ frame: b.frame ?? null, rows: rowRanges(b.rows), view }) : b.frames !== undefined ? toRanges(numbers(b.frames)) : viewer.selectedOrCurrent();
       return commentResult(await viewer.addComment(frames, comment, "user"));
     },
@@ -163,7 +164,7 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/events/take": () => ({ events: viewer.events.take() }),
     "/api/agent/ask": (_q, b) => {
       // The packets the dialog was opened for, in the view it showed
-      const view = viewKey(b.view);
+      const view = aboutView(b.view);
       return viewer.askAgent(String(b.question ?? ""), view && { frame: b.frame ?? null, rows: rowRanges(b.rows), view });
     },
     "/api/now": (_q, b) => viewer.markNow(Number(b.heldMs) || 0, b.at === undefined ? undefined : Number(b.at)),
@@ -555,6 +556,13 @@ function viewKey(value: unknown): { file: string; filter: string; generation?: n
   }
   if (v.generation !== undefined && !Number.isInteger(v.generation)) throw new HttpError(400, "view.generation must be an integer");
   return { file: v.file, filter: v.filter, generation: v.generation as number | undefined };
+}
+
+/** The view a dialog's request names its packets in: `viewKey`, or the capture alone for packets named by frame number. */
+function aboutView(value: unknown): AboutView | undefined {
+  const file = (value as { file?: unknown } | null | undefined)?.file;
+  if (value && typeof value === "object" && typeof file === "string" && Object.keys(value).length === 1) return { file };
+  return viewKey(value);
 }
 
 function flag(value: unknown, name: string): boolean {

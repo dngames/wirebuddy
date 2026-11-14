@@ -463,6 +463,9 @@ try {
     assert.match(t, /new file needs/);
   });
 
+  // A question asked of a packet of this capture
+  assert.equal((await post("/api/select", { frame: 12 })).status, 200);
+  assert.equal((await post("/api/agent/ask", { question: "Which one is it?" })).status, 200);
   // A protocol Wireshark knows on a port it doesn't expect: one decode_as call
   const oddPorts = join(out, "odd-ports.pcap");
   writeOddPortsCapture(oddPorts);
@@ -473,6 +476,14 @@ try {
     assert.match(t, /; the display filter "frame\.number in \{1, 2\}" was cleared: frame\.number names the packets of the capture open before/);
   });
   await call("get_view_state", {}, (t) => assert.match(t, /^Display filter: \(none\)$/m));
+  // A question about a packet of the capture open before is about another capture now: the agent is told, and its frame is refused
+  await call("get_view_state", {}, (t) => assert.match(t, /^  4 \(asked [^)]+\) about frame 12 of http\.pcapng, not the open capture: Which one is it\?$/m));
+  await call("answer_question", { text: "It is the second one", id: 4, frame: 3 }, (t, r) => {
+    assert.ok(r.isError);
+    assert.match(t, /question 4 was about frame 12 of http\.pcapng, not the open capture \(odd-ports\.pcap\): frame would select a packet of the wrong capture/);
+  });
+  assert.equal((await viewState()).selected, null, "no packet of the open capture was selected");
+  await call("answer_question", { text: "It is the second one", id: 4 }, (t) => assert.match(t, /^Answered question 4 \(about frame 12 of http\.pcapng, not the open capture\); none waiting\. The question was about http\.pcapng, not the open capture: the user read it with the packet numbers of that capture/));
   await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" }, (t) => {
     assert.match(t, /^udp\.port 50000 now decodes as RTP \(before: no dissector, so heuristics or Data\)\. 5 frames match "rtp && udp\.port == 50000"\.$/m);
     assert.match(t, /^Decode As entries \(1, until WireBuddy exits\): udp\.port 50000 → rtp \(agent\)$/m);
@@ -630,6 +641,25 @@ try {
     assert.match(t, /No Lua errors/);
   });
   await call("extensions", { action: "reload" }, (t) => assert.match(t, /Extension "acme_tcp" loaded \(protocols: acme\)/));
+  // A Lua plugin in the user's Wireshark plugin folder with the description of the extension's protocol: the test says so, naming the file
+  const plugins = join(home, ".local/lib/wireshark/plugins");
+  mkdirSync(plugins, { recursive: true });
+  writeFileSync(join(plugins, "same-description.lua"), 'local other = Proto("othername", "ACME Messages")\nfunction other.dissector() end\n');
+  await call("extensions", { action: "test", name: "acme_tcp" }, (t) => {
+    assert.match(t, /^Extension "acme_tcp": loaded$/m);
+    assert.match(t, new RegExp(`^The Wireshark plugin ${plugins.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/same-description\\.lua failed to load because a protocol of it has the same description as one of this extension's: no two protocols can share one, and the extension came first, in the user's view too\\. Rename the extension's protocol \\(its Proto\\("name", "description"\\)\\), or remove or rename the plugin\\.$`, "m"));
+  });
+  // The reload names the extension the plugin lost to
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /WARNING A Lua plugin did not load: .*same-description\.lua:\d+: .*there cannot be two protocols with the same description\)\. A protocol of the extension "acme_tcp" has the same description or name as one in the Wireshark plugin .*same-description\.lua: only one of the two can load\. Rename the extension's protocol, or remove or rename the plugin\./));
+  // Without the plugin, the test is clean again; two extensions that clash say so at the reload, the second to load is the one that fails
+  rmSync(join(plugins, "same-description.lua"));
+  await call("extensions", { action: "test", name: "acme_tcp" }, (t) => assert.doesNotMatch(t, /failed to load because/));
+  addExtension("acme_twin", tcpTemplate);
+  await call("extensions", { action: "reload" }, (t) => {
+    assert.match(t, /WARNING Extension "acme_twin" did not load: .*there cannot be two protocols with the same description\)\. A protocol of the extension "acme_twin" has the same description or name as one in the extension "acme_tcp": only one of the two can load\. Rename the extension's protocol \(or the other extension's\)\./);
+  });
+  rmSync(join(extDir, "acme_twin"), { recursive: true });
+  await call("extensions", { action: "reload" }, (t) => assert.match(t, /^acme_tcp \[loaded\]/m));
   await call("query_packets", { filter: "acme", fields: ["frame.number", "acme.kind", "acme.length", "tcp.reassembled_in"] }, (t) => {
     // Three messages in frame 1; the split one is decoded in frame 3, the frame that completes it
     assert.match(t, /^1 \| 1 \| Status,Points,Status \| 2,4,0 \| $/m);

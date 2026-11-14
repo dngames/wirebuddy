@@ -3,6 +3,7 @@
 import type { AskResult } from "../../shared/api.ts";
 import { countRanges } from "../../shared/ranges.ts";
 import { errorText, HttpError, post } from "../api.ts";
+import * as act from "../actions.ts";
 import { agentName, app } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import { toast } from "../toast.ts";
@@ -18,8 +19,8 @@ export function openAskDialog(): void {
   if (!s?.agent.attached || current?.isOpen) return;
   const name = agentName();
   // The question is about the packets shown now, even if the selection changes while typing
-  const about = s.file ? { frame: app.selFrame, rows: app.selRows, view: { file: s.file, filter: s.filter, generation: s.generation } } : null;
-  const count = about ? countRanges(about.rows) || (about.frame !== null ? 1 : 0) : 0;
+  const about = s.file ? act.packetsAbout(s) : null;
+  const count = about ? countRanges(app.selRows) || (about.frame !== null ? 1 : 0) : 0;
   const d = new Dialog(`Ask ${name}`, { width: 460, cls: "dlg-ask" });
   current = d;
   const subject = count > 1 ? `About the ${fmtInt(count)} selected packets` : count === 1 && app.selFrame !== null ? `About packet ${app.selFrame}` : "About the capture";
@@ -41,7 +42,7 @@ export function openAskDialog(): void {
       d.close();
       toast("info", r.woken ? `Sent to ${name}` : `Sent. ${name} gets it with its next step`);
     } catch (e) {
-      showErr(e instanceof HttpError && e.status === 409 ? "The packet list changed; close this and select the packets again" : errorText(e));
+      showErr(e instanceof HttpError && e.status === 409 && about ? act.staleAbout(about) : errorText(e));
     } finally {
       sendBtn.disabled = false;
     }

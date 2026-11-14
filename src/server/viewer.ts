@@ -12,6 +12,7 @@ import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } f
 import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
 import { aboutText, answered, openQuestion, withQuestion } from "./questions.ts";
+import { otherCapture } from "../shared/questions.ts";
 import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
 import { checkSummary } from "./markdown.ts";
@@ -21,14 +22,16 @@ import { FT_FRAMENUM, heldReason, LiveTail, removeStaleSlices, streamNumbered, S
 import { availableBytes, memoryShort, rssBytes } from "./memory.ts";
 import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts";
 import type { CapturedObject, ObjectKind } from "./objects.ts";
+import { clashKind } from "./protoclash.ts";
 import { Keeper, type KeptRead } from "./keeper.ts";
+import { MAX_RECENT, parseColumns, parseRecent, readSetting, writeSetting } from "./settings.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
-import { PacketList, clipRanges, listChanged, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
+import { PacketList, clipRanges, listChanged, type AboutView, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
 import { Panels } from "./panels.ts";
 import { StaleGenerationError } from "./stale.ts";
 import { conversations, endpoints, expert, find, frameAt, ioGraph, phs, type ConvType, type StatsView } from "./stats.ts";
-import { FOLLOW_LIMIT, capturedObjects, follow, saveObjects, type StreamsView } from "./streams.ts";
+import { FOLLOW_LIMIT, capturedObjects, carriesTls, follow, saveObjects, type StreamsView } from "./streams.ts";
 import { printable } from "./text.ts";
 import { changeText, framesWithRefs, refBefore, refsOf, refTimeError, refTimeFilter, usesRefTime, type RowRefs } from "./timerefs.ts";
 import { initialState, ViewStore } from "./viewstore.ts";
@@ -92,6 +95,8 @@ export interface ExtensionTest {
   hierarchy: string[];
   /** Packets still showing as undecoded payload ("data"), and, for an extension dissecting over TCP, segments of messages reassembled in a later packet (null: not over TCP). */
   undecoded?: { data: number; segments: number | null };
+  /** A protocol of the extension has the description or name of one in a Wireshark plugin of the user's, or in another extension: which of the two failed to load, and what it clashes with (null: not found). */
+  clash?: { kind: "description" | "name"; with: { plugin: string } | { extension: string } | null; failed: "extension" | "plugin" };
 }
 
 /** A sharkd "frames" row: commented packets carry their comments. */
@@ -298,6 +303,10 @@ export class Viewer extends EventEmitter {
   private readonly commentEtts = { node: -1, item: -2 };
   /** Where the marks, time references and edited comments of each capture are kept; null: nowhere. */
   private readonly investigations: string | null;
+  /** Where the custom columns and the recent files are kept (see settings.ts); null: nowhere. */
+  private readonly settings: string | null;
+  /** What keeping them already told the agent. */
+  private readonly settingsTold = new Set<string>();
   readonly capture: Capture;
   readonly recent: string[] = [];
 
@@ -316,6 +325,8 @@ export class Viewer extends EventEmitter {
     panelRuntime?: string;
     /** WireBuddy's folder of investigations kept per capture (see investigation.ts); none without. */
     investigations?: string;
+    /** WireBuddy's folder for the custom columns and recent files kept across restarts (see settings.ts); none without. */
+    settings?: string;
   }) {
     super();
     this.extensions = opts.extensions ?? new Extensions();
@@ -412,6 +423,8 @@ export class Viewer extends EventEmitter {
         })
         .then(() => this.offers.checkOffers(false), () => {});
     });
+    this.settings = opts.settings ?? null;
+    this.recent.push(...(this.readSetting("recent.json", parseRecent) ?? []));
     this.investigations = opts.investigations ?? null;
     if (this.investigations) {
       try {
@@ -950,7 +963,7 @@ export class Viewer extends EventEmitter {
     const tail = this.listedTail;
     if (!tail) return null;
     const readMs = this.lastReadMs || (this.readStartedAt ? Date.now() - this.readStartedAt : 0);
-    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, paused: this.paused, exactAfter: this.exactAfter() };
+    return { frames: tail.frames, displayed: tail.listed(), unfiltered: tail.unfiltered(), held: tail.held, readMs, readingSince: this.readStartedAt || null, paused: this.paused, exactAfter: this.exactAfter() };
   }
 
   /** What makes provisional packets exact (see ProvisionalTail.exactAfter). */
@@ -972,7 +985,7 @@ export class Viewer extends EventEmitter {
     const tail = this.tailState();
     const was = this.state.tail;
     if (!tail && !was) return;
-    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused && tail.exactAfter === was.exactAfter) return;
+    if (tail && was && tail.frames === was.frames && tail.displayed === was.displayed && tail.unfiltered === was.unfiltered && tail.held === was.held && tail.paused === was.paused && tail.exactAfter === was.exactAfter && tail.readingSince === was.readingSince) return;
     const grew = (tail?.displayed ?? 0) !== (was?.displayed ?? 0);
     // A selected provisional packet the filter lists now gets its row
     const { selected, selectedIndex, selectedRows } = this.state;
@@ -1339,7 +1352,7 @@ export class Viewer extends EventEmitter {
   }
 
   /** Sets the packet list's custom columns (an empty list removes them). */
-  setColumns(columns: CustomColumn[], by: "user" | "agent"): Promise<FilterCheck> {
+  setColumns(columns: CustomColumn[], by: "user" | "agent", keep = true): Promise<FilterCheck> {
     return this.exclusive(async () => {
       if (columns.length > MAX_CUSTOM_COLUMNS) return { ok: false, error: `at most ${MAX_CUSTOM_COLUMNS} custom columns` };
       try {
@@ -1359,6 +1372,7 @@ export class Viewer extends EventEmitter {
         columns: this.state.file ? [...this.baseColumns, ...customColumns.map((c) => c.title)] : [],
         generation: this.state.generation + 1,
       });
+      if (keep) this.keepSetting("columns.json", JSON.stringify(customColumns));
       if (by === "agent") this.notice(customColumns.length ? `Columns: ${customColumns.map((c) => c.title).join(", ")}` : "Removed the custom columns");
       return { ok: true };
     });
@@ -1766,7 +1780,7 @@ export class Viewer extends EventEmitter {
    * dialog showed, refused once that view is gone), else the selected ones.
    * It wakes the agent's `--watch`, else comes with its next tool result.
    */
-  askAgent(question: string, about?: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): AskResult {
+  askAgent(question: string, about?: { frame: number | null; rows?: Ranges; view: AboutView }): AskResult {
     if (!this.state.agent.attached) throw new Error("no agent is attached");
     const text = printable(question.replace(/\s+/g, " ").trim()).slice(0, MAX_QUESTION);
     if (!text) throw new Error("the question is empty");
@@ -1797,6 +1811,9 @@ export class Viewer extends EventEmitter {
    */
   answerQuestion(text: string, id?: number, frame?: number): Question {
     const question = openQuestion(this.state.questions, id);
+    const other = otherCapture(question, this.state.file);
+    // Its answer is welcome, but a packet of the open capture isn't what it was about
+    if (frame !== undefined && other) throw new Error(`question ${question.id} was about ${aboutText(question.frame, question.count)} of ${other}, not the open capture${this.state.file ? ` (${basename(this.state.file)})` : " (none is open)"}: frame would select a packet of the wrong capture; answer without frame`);
     const questions = answered(this.state.questions, question, text, Date.now());
     if (frame !== undefined) this.select(frame, "agent");
     this.store.set({ questions });
@@ -1939,9 +1956,13 @@ export class Viewer extends EventEmitter {
   /**
    * The packets a dialog was opened for: the rows `rows` (else the frame
    * `frame`) of the list `view` showed; refused once that list is gone.
+   * A `view` with the capture alone names a frame, whatever the filter is.
    */
-  framesAbout({ frame, rows, view }: { frame: number | null; rows?: Ranges; view: { file: string; filter: string; generation?: number } }): Ranges {
-    if (listChanged(view, this.state)) {
+  framesAbout({ frame, rows, view }: { frame: number | null; rows?: Ranges; view: AboutView }): Ranges {
+    if (view.filter === undefined) {
+      if (rows?.length) throw new Error("rows belong to a list: the view needs its filter");
+      if (view.file !== this.state.file) throw new StaleGenerationError("the capture changed since you chose the packets; select them again");
+    } else if (listChanged(view, this.state)) {
       throw new StaleGenerationError("the packet list changed since you chose the packets; select them again");
     }
     if (rows?.length) return this.framesOfRows(this.checkRows(rows));
@@ -2244,6 +2265,11 @@ export class Viewer extends EventEmitter {
     return follow(this.streamsView, proto, filter, limit);
   }
 
+  /** Whether the packets `filter` names (a followed stream) carry TLS. */
+  async carriesTls(filter: string): Promise<boolean> {
+    return carriesTls(this.streamsView, filter);
+  }
+
   async capturedObjects(kind: ObjectKind, engine = this.engine): Promise<CapturedObject[]> {
     return capturedObjects(this.streamsView, kind, engine);
   }
@@ -2279,7 +2305,48 @@ export class Viewer extends EventEmitter {
     const i = this.recent.indexOf(file);
     if (i >= 0) this.recent.splice(i, 1);
     this.recent.unshift(file);
-    this.recent.length = Math.min(this.recent.length, 20);
+    this.recent.length = Math.min(this.recent.length, MAX_RECENT);
+    this.keepSetting("recent.json", JSON.stringify(this.recent));
+  }
+
+  /** What `file` in the settings folder holds, read by `parse`; null for none, or one that doesn't check out (ignored whole, told once). */
+  private readSetting<T>(file: string, parse: (text: string) => T | null): T | null {
+    if (!this.settings) return null;
+    try {
+      const text = readSetting(this.settings, file);
+      if (text === null) return null;
+      const kept = parse(text);
+      if (kept) return kept;
+      this.settingsProblem(`${join(this.settings, file)} is not what WireBuddy writes there, so it is ignored`);
+    } catch (err) {
+      this.settingsProblem(`Could not read ${join(this.settings, file)}: ${(err as Error).message}`);
+    }
+    return null;
+  }
+
+  private keepSetting(file: string, text: string): void {
+    if (!this.settings) return;
+    try {
+      writeSetting(this.settings, file, text);
+    } catch (err) {
+      // One text for all of them: a folder that can't be written says so once
+      this.settingsProblem(`Could not keep the custom columns and the recent files in ${this.settings}: ${(err as Error).message}`);
+    }
+  }
+
+  private settingsProblem(text: string): void {
+    if (this.settingsTold.has(text)) return;
+    this.settingsTold.add(text);
+    this.events.add("WARNING", text);
+  }
+
+  /** Brings back the custom columns kept by the run before, if this Wireshark still has their fields; says so. */
+  async restoreColumns(): Promise<void> {
+    const kept = this.readSetting("columns.json", parseColumns);
+    if (!kept?.length) return;
+    const r = await this.setColumns(kept, "user", false);
+    if (r.ok) this.events.add("INFO", `Restored the custom columns of the run before: ${this.state.customColumns.map((c) => c.title).join(", ")}`);
+    else this.settingsProblem(`The custom columns kept by the run before were not restored: ${r.error}`);
   }
 
   private requireFile(): void {
@@ -2433,6 +2500,11 @@ export class Viewer extends EventEmitter {
       else if (failed) result.load = `error: ${printable(failed.error)}${failed.protocols.length ? ` (it registered ${failed.protocols.join(", ")} before the error; tested anyway)` : ""}`;
       else if (!loaded) result.load = "it did not load (no report from the loader)";
       else result.load = "loaded";
+      // The user's own Wireshark plugins load in this sharkd too: one that has the protocol's description fails, or makes the extension fail
+      const clashed = failed && clashKind(failed.error) ? { kind: clashKind(failed.error)!, failed: "extension" as const } : null;
+      const lost = report?.other.map((o) => ({ kind: clashKind(o), text: o })).find((o) => o.kind) ?? null;
+      const clash = clashed ?? (lost ? { kind: lost.kind!, failed: "plugin" as const } : null);
+      if (clash) result.clash = { kind: clash.kind, with: this.extensions.clashOf(name), failed: clash.failed };
       // What a failed extension registered before its error works all the same
       const protocols = loaded?.protocols ?? failed?.protocols ?? [];
       if ((!loaded && !failed?.protocols.length) || !file) return result;

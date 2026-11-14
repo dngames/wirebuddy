@@ -16,6 +16,7 @@ import { icon } from "./icons.ts";
 import { toggleMenuAt } from "./menu.ts";
 import { dismissOffer, openPanel } from "./panels.ts";
 import { baseName, fmtInt, fmtPct, fmtSize, h, setText, setTitle } from "./util.ts";
+import { secondsToExact } from "../shared/tail.ts";
 import { reconnectNow } from "./ws.ts";
 
 /** Panel offers shown at once. */
@@ -141,18 +142,21 @@ export function createStatusBar(): HTMLElement {
     liveSeg.hidden = !tail?.frames;
     liveSeg.classList.toggle("paused", !!tail?.paused);
     if (tail?.frames) {
-      const secs = Math.max(1, Math.round(tail.readMs / 1000));
+      const secs = secondsToExact(tail, Date.now());
+      const reading = tail.readingSince !== null;
+      // Short, so that the bar doesn't cut it: the rest is in the tooltip
       const when = {
-        read: `exact after the next full read (≈${secs} s)`,
-        stop: "exact once the capture stops",
-        reading: "exact once the full read under way finishes",
-        reload: "exact once read in full (View › Reload)",
+        read: secs === null ? "exact when the read ends" : `exact in ≈${secs} s`,
+        stop: "exact when it stops",
+        reading: "exact when the read ends",
+        reload: "exact after Reload",
       }[tail.exactAfter];
-      const unfiltered = tail.unfiltered ? ` · ${fmtInt(tail.unfiltered)} not filtered yet` : "";
-      setText(liveSeg, `${fmtInt(tail.frames)} provisional · ${when}${unfiltered}`);
+      setText(liveSeg, `${fmtInt(tail.frames)} provisional · ${when}`);
+      const unfiltered = tail.unfiltered ? `\n${fmtInt(tail.unfiltered)} of them are not checked against the display filter yet.` : "";
       const held = tail.held ? `\nThe display filter lists them only once read in full: ${tail.held}.` : "";
       const paused = tail.paused ? `\nFull reads wait: ${tail.paused}.` : "";
-      setTitle(liveSeg, `Packets that arrived after WireBuddy last read the whole capture (it takes about ${secs} s), read from the newest packets with their connections' start. Shown in italics; the next full read makes them exact.${held}${paused}`);
+      const next = tail.exactAfter !== "read" ? "" : secs === null ? "\nThe full read under way takes longer than the last one did." : reading ? `\nThe full read under way finishes in about ${secs} s.` : `\nThe next full read takes about ${secs} s.`;
+      setTitle(liveSeg, `Packets that arrived after WireBuddy last read the whole capture, read from the newest packets with their connections' start. Marked in the list; the next full read makes them exact.${next}${unfiltered}${held}${paused}`);
     }
 
     // Panels whose offer matches the capture: a chip opens one, × hides it for this file

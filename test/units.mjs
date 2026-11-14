@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams", "protoclash"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -39,8 +39,11 @@ const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
 const { macAcl, macMountProblem, rootTrust } = await import(join(out, "units.mjs"));
 const { apart, verdict, MARGIN_MS } = await import(join(out, "units.mjs"));
-const { instanceFile, writeInstance, listenLoopback } = await import(join(out, "units.mjs"));
+const { instanceFile, writeInstance, listenLoopback, watchLines } = await import(join(out, "units.mjs"));
 const { machineTag, interfaceSignature, availableMemory, ViewStore, PacketList, clipRanges, startsWith, listChanged, rowOf } = await import(join(out, "units.mjs"));
+const { clashKind, protoDeclarations, sameProtocol, luaFilesBelow, clashingFile } = await import(join(out, "units.mjs"));
+const { follow, carriesTls } = await import(join(out, "units.mjs"));
+const { settingsDir, keptToken, readSetting, writeSetting, parseRecent, parseColumns } = await import(join(out, "units.mjs"));
 const { investigationKey, investigationDir, investigationContent, readInvestigation, writeInvestigation, removeInvestigation, pruneInvestigations, serializeInvestigation, nothingToKeep, InvalidInvestigation, MAX_INVESTIGATION_BYTES, setAsideInvestigation, keptSummary } = await import(join(out, "units.mjs"));
 
 const { Edits, marksWith, marksWithout, toggledMarks, displayedMarks, refsWith, toggledRefs, refsChange, commentText, commentAt, MAX_MARKS, MAX_NOTE, MAX_TIME_REFS, StaleGenerationError } = await import(join(out, "units.mjs"));
@@ -1197,6 +1200,139 @@ try {
     } finally {
       if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
       else process.env.XDG_RUNTIME_DIR = saved;
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  await check("follow: a TLS stream's sides are the client that sent the Client Hello and its server, whichever way sharkd numbers them; other protocols are as sharkd says", async () => {
+    const b64 = (t) => Buffer.from(t).toString("base64");
+    // sharkd 4.6 on a TLS follow: the server as "client", and the request's payload flagged as the server's
+    const swapped = { shost: "127.0.0.1", sport: "42828", chost: "127.0.0.1", cport: "18443", payloads: [{ n: 8, d: b64("GET / HTTP/1.1\r\n\r\n"), s: 1 }, { n: 9, d: b64("HTTP/1.1 200 OK\r\n\r\n"), s: 0 }] };
+    const right = { shost: "127.0.0.1", sport: "18443", chost: "127.0.0.1", cport: "42828", payloads: [{ n: 8, d: b64("GET / HTTP/1.1\r\n\r\n"), s: 0 }, { n: 9, d: b64("HTTP/1.1 200 OK\r\n\r\n"), s: 1 }] };
+    const view = (follows, hello) => ({
+      requireFile() {},
+      engine: () => ({
+        call: async (method, params) => {
+          if (method === "follow") return follows;
+          assert.equal(method, "frames");
+          assert.match(params.filter, /tls\.handshake\.type == 1/);
+          if (hello instanceof Error) throw hello;
+          return hello === null ? [] : [{ c: [hello], num: 4 }];
+        },
+      }),
+    });
+    const sides = (r) => [`${r.client.port} ${r.client.bytes}`, `${r.server.port} ${r.server.bytes}`, r.payloads.map((p) => `${p.frame}${p.server ? "S" : "C"}`).join(" ")];
+    // Swapped by sharkd: the Client Hello came from 42828
+    assert.deepEqual(sides(await follow(view(swapped, "42828"), "TLS", "tls.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
+    // Already right (another sharkd): left alone
+    assert.deepEqual(sides(await follow(view(right, "42828"), "TLS", "tls.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
+    // No Client Hello in the capture, or the lookup failing: sharkd's answer stands
+    assert.deepEqual(sides(await follow(view(swapped, null), "TLS", "tls.stream eq 0")), ["18443 19", "42828 18", "8S 9C"]);
+    assert.deepEqual(sides(await follow(view(swapped, new Error("no")), "TLS", "tls.stream eq 0"))[2], "8S 9C");
+    // HTTP and TCP follows are taken as they come, with no lookup
+    const plain = { call: async (method) => (assert.equal(method, "follow"), right) };
+    assert.deepEqual(sides(await follow({ requireFile() {}, engine: () => plain }, "HTTP", "tcp.stream eq 0")), ["42828 18", "18443 19", "8C 9S"]);
+    assert.equal(await carriesTls({ requireFile() {}, engine: () => ({ call: async (_m, p) => (assert.equal(p.filter, "(tcp.stream eq 0) && tls"), [{ num: 4 }]) }) }, "tcp.stream eq 0"), true);
+    assert.equal(await carriesTls({ requireFile() {}, engine: () => ({ call: async () => [] }) }, "tcp.stream eq 1"), false);
+  });
+  await check("protocol clashes: the error says which kind, the Lua says which protocols, and the plugin that declares the same one is found", () => {
+    assert.equal(clashKind("...ins/x.lua:1: bad argument #2 to 'Proto' (Proto_new: there cannot be two protocols with the same description)"), "description");
+    assert.equal(clashKind("Proto_new: there cannot be two protocols with the same name"), "name");
+    assert.equal(clashKind("attempt to index a nil value"), null);
+    const lua = `local a = Proto("acme", "ACME Messages")\nlocal b = Proto.new('other', 'It\\'s other')\n-- Proto(name, desc) is computed here\nlocal c = Proto(name, "dynamic")\n`;
+    assert.deepEqual(protoDeclarations(lua), [{ name: "acme", description: "ACME Messages" }, { name: "other", description: "It\\'s other" }]);
+    assert.equal(sameProtocol([{ name: "x", description: "ACME Messages" }], protoDeclarations(lua)), true, "the description");
+    assert.equal(sameProtocol([{ name: "ACME", description: "Other words" }], protoDeclarations(lua)), true, "the name, in either case");
+    assert.equal(sameProtocol([{ name: "x", description: "y" }], protoDeclarations(lua)), false);
+    const base = mkdtempSync(join(out, "plugins-"));
+    try {
+      mkdirSync(join(base, "a/deeper"), { recursive: true });
+      writeFileSync(join(base, "a/one.lua"), 'local p = Proto("one", "First")\n');
+      writeFileSync(join(base, "a/deeper/two.lua"), 'local p = Proto("two", "ACME Messages")\n');
+      writeFileSync(join(base, "a/notlua.txt"), 'Proto("three", "ACME Messages")');
+      assert.deepEqual(luaFilesBelow([join(base, "a"), join(base, "missing")]).map((f) => f.slice(base.length + 1)), ["a/deeper/two.lua", "a/one.lua"]);
+      assert.equal(clashingFile(luaFilesBelow([base]), [{ name: "acme", description: "ACME Messages" }]), join(base, "a/deeper/two.lua"));
+      assert.equal(clashingFile(luaFilesBelow([base]), [{ name: "none", description: "nothing like it" }]), null);
+      assert.equal(clashingFile(luaFilesBelow([base]), []), null);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  await check("watcher: prints the events that woke the agent, then up to ten before them it saw already", () => {
+    const ev = (seq, level, text) => ({ seq, time: `2026-11-13T12:00:${String(seq).padStart(2, "0")}.000Z`, level, text });
+    const log = Array.from({ length: 14 }, (_, i) => ev(i + 1, "INFO", `did ${i + 1}`));
+    log.push(ev(15, "QUESTION", "is this normal?"));
+    const lines = watchLines([log[14]], log);
+    assert.equal(lines[0], "12:00:15 QUESTION is this normal?");
+    assert.match(lines[1], /^Recent activity before it/);
+    assert.deepEqual(lines.slice(2), log.slice(4, 14).map((e) => `  12:00:${String(e.seq).padStart(2, "0")} INFO ${e.text}`));
+    // What the agent is woken with is not repeated as context; a summary line (seq 0) doesn't hide the rest
+    const two = watchLines([ev(0, "INFO", "3 earlier events not shown (0 problems)"), log[13], log[14]], log);
+    assert.equal(two.filter((l) => /did 14|is this normal/.test(l)).length, 2);
+    assert.equal(watchLines([log[0]], log).length, 1);
+  });
+  await check("session token: the one used last is kept for the user alone and reused, a file that can't be trusted is replaced, and nothing is kept in a folder that isn't the user's own", () => {
+    const base = mkdtempSync(join(out, "token-"));
+    const mode = (path) => statSync(path).mode & 0o777;
+    try {
+      assert.equal(settingsDir({ XDG_DATA_HOME: "/data" }), "/data/wirebuddy/state");
+      const dir = join(base, "wirebuddy/state");
+      const first = keptToken(dir);
+      assert.match(first.token, /^[0-9a-f]{32}$/);
+      assert.equal(first.fresh, true);
+      assert.deepEqual([mode(dir), mode(join(dir, "token"))], [0o700, 0o600]);
+      // The same one the next time: a restart keeps the open page's token good
+      assert.deepEqual(keptToken(dir), { token: first.token, fresh: false });
+      // A file others can read, a file that isn't a token, a link: each replaced by a new token, said why
+      chmodSync(join(dir, "token"), 0o644);
+      const loose = keptToken(dir);
+      assert.notEqual(loose.token, first.token);
+      assert.match(loose.problem, /can be read by other users/);
+      assert.equal(mode(join(dir, "token")), 0o600);
+      writeFileSync(join(dir, "token"), "short\n", { mode: 0o600 });
+      const junk = keptToken(dir);
+      assert.match(junk.token, /^[0-9a-f]{32}$/);
+      assert.equal(readFileSync(join(dir, "token"), "utf8"), `${junk.token}\n`);
+      const victim = join(base, "victim");
+      writeFileSync(victim, "keep", { mode: 0o600 });
+      rmSync(join(dir, "token"));
+      symlinkSync(victim, join(dir, "token"));
+      const linked = keptToken(dir);
+      assert.match(linked.problem, /is a link/);
+      assert.equal(readFileSync(victim, "utf8"), "keep");
+      assert.equal(lstatSync(join(dir, "token")).isSymbolicLink(), false);
+      // A folder that is a link is no place to keep it: a token for this run, not kept
+      mkdirSync(join(base, "real"));
+      symlinkSync(join(base, "real"), join(base, "linked"));
+      const unkept = keptToken(join(base, "linked"));
+      assert.match(unkept.token, /^[0-9a-f]{32}$/);
+      assert.ok(unkept.problem);
+      assert.deepEqual(readdirSync(join(base, "real")), []);
+      // Deleting the file is the way to a new token
+      rmSync(join(dir, "token"));
+      assert.notEqual(keptToken(dir).token, linked.token);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  await check("kept settings: the recent files and the custom columns are read back only when they check out, in files of the user's own", () => {
+    const base = mkdtempSync(join(out, "settings-"));
+    try {
+      const dir = join(base, "state");
+      assert.equal(readSetting(dir, "recent.json"), null);
+      writeSetting(dir, "recent.json", JSON.stringify(["/a/one.pcap", "/b/two.pcapng"]));
+      assert.equal(statSync(join(dir, "recent.json")).mode & 0o777, 0o600);
+      assert.deepEqual(parseRecent(readSetting(dir, "recent.json")), ["/a/one.pcap", "/b/two.pcapng"]);
+      for (const bad of ["", "{}", "[1]", '["relative.pcap"]', '["/a","/a"]', JSON.stringify(Array(21).fill(0).map((_, i) => `/f${i}`)), '["/a\u0000b"]']) assert.equal(parseRecent(bad), null, bad);
+      assert.deepEqual(parseColumns('[{"field":"tcp.srcport","title":"SPort"},{"field":"frame.len","title":"Length"}]'), [{ field: "tcp.srcport", title: "SPort" }, { field: "frame.len", title: "Length" }]);
+      assert.deepEqual(parseColumns("[]"), []);
+      for (const bad of ["", "{}", '[{"field":"a"}]', '[{"field":"a","title":""}]', '[{"field":"a b","title":"t"}]', '[{"field":"a","title":"t","extra":1}]', '["a"]', JSON.stringify(Array(11).fill({ field: "a", title: "t" }))]) assert.equal(parseColumns(bad), null, bad);
+      // A file that is too big, or a link, is refused
+      writeFileSync(join(dir, "big.json"), "x".repeat(70 * 1024), { mode: 0o600 });
+      assert.throws(() => readSetting(dir, "big.json"), /bigger/);
+      symlinkSync(join(base, "elsewhere"), join(dir, "link.json"));
+      assert.throws(() => readSetting(dir, "link.json"));
+    } finally {
       rmSync(base, { recursive: true, force: true });
     }
   });

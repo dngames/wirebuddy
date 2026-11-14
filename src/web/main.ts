@@ -14,6 +14,7 @@ import { createFindBar } from "./findbar.ts";
 import { nodeAtOffset, srcIndex } from "./frame.ts";
 import { menuOpen } from "./menu.ts";
 import { createMenuBar, menuBarKey } from "./menubar.ts";
+import { createOfflineNotice } from "./offline.ts";
 import { releaseNow } from "./now.ts";
 import { createPacketList, focusPacketList } from "./packetlist.ts";
 import { initPanels } from "./panels.ts";
@@ -39,6 +40,7 @@ function onGlobalKey(e: KeyboardEvent): void {
 function init(): void {
   const root = document.getElementById("app") ?? document.body.appendChild(h("div", { id: "app" }));
   document.body.appendChild(createToastHost());
+  document.body.appendChild(createOfflineNotice());
 
   const menuBar = createMenuBar();
   const toolbar = createToolbar();

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- A page that is open when WireBuddy restarts reconnects by itself: without `--token` the session token is the one the last start made, kept for the user alone in `~/.local/share/wirebuddy/state/token` (delete it for a new one; SECURITY.md says what that changes)
+- A page whose token the server refuses (another token, a session that ended) says so in a notice over the page, with where the current address comes from, and keeps trying; a page that lost its server dims what it shows after a few seconds
+- A restart keeps the custom columns and the recent files list (the display filter and the questions are not kept, which the README now says)
+- A question about packets of a capture that is not open any more names that capture in the page, in `get_view_state` and in the result of `answer_question`, which refuses a `frame` with it
+- The agent's `follow_stream` of a TLS stream names the client and the server the right way round (the page's Follow dialog too), and a TCP follow of a stream that carries TLS, with a key log set, says that the decrypted stream comes with protocol TLS or HTTP
+- Add Comment, Mark Packet with Note and Ask Agent for one packet go by its frame number: a display filter set while the dialog is open no longer loses the text, and when the capture changed the dialog stays open with the text and says why
+- The background watcher prints the activity before the problem or question too, as the server instructions say
+- Provisional rows of a big live capture carry a "≈" before the packet number and a stronger dashed edge in both themes; the status bar's text is short enough not to be cut (the rest is in its tooltip) and counts the seconds to the exact rows down with the full read under way instead of staying as it was
+- The agent's `extensions` test names a Wireshark plugin whose protocol has the same description or name as the extension's (and what to do), as the test loads the user's plugins too; the reload's warning for such a plugin, or for an extension that lost to another, names the extension
+- A panel opens docked in a pane of its own under the packet list instead of floating over it (several docked panels are tabs); Float and Dock in its title bar switch, remembered per panel, and the panel guide says to design for a wide, short area
+
 ## [0.17.0] - 2026-11-13
 
 - A folder for live captures that can't be created (`--capture-dir`) says which user WireBuddy runs as and that this user can't create it, not a bare `EACCES`

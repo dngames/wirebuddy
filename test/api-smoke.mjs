@@ -1492,8 +1492,141 @@ try {
       // The page asks before Open, Close and Start Capture again: edits not exported and not kept
       assert.deepEqual([st.kept, st.commentEdits], [false, 1]);
       assert.equal((await warned()).length, 1, (await eventsSince(s, 0)).join("\n"));
-      const events = (await s.api(`/api/events?after=0`)).json.events.filter((e) => e.text.startsWith("Could not keep"));
+      const events = (await s.api(`/api/events?after=0`)).json.events.filter((e) => e.text.startsWith("Could not keep the marks"));
       assert.deepEqual(events.map((e) => e.repeated ?? 1), [1]);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A server on the home `own`, with `args` after --port (no --token unless they give one): its token, API and how to stop it. */
+  const startOn = async (own, args = []) => {
+    const proc = spawn(process.execPath, [join(root, "dist/server/main.js"), "--port", "0", ...args], { env: { ...env, HOME: own, XDG_CONFIG_HOME: join(own, ".config"), XDG_DATA_HOME: join(own, ".local/share"), WIREBUDDY_EXTENSIONS: "" }, stdio: ["ignore", "pipe", "ignore"] });
+    const exited = new Promise((done) => proc.on("exit", done));
+    const url = await new Promise((resolve, reject) => {
+      proc.stdout.setEncoding("utf8");
+      proc.stdout.on("data", (d) => /UI at (\S+)/.exec(d) && resolve(new URL(/UI at (\S+)/.exec(d)[1])));
+      proc.on("exit", (code) => reject(new Error(`server exited with ${code}`)));
+    });
+    const tok = url.searchParams.get("token");
+    const call = async (path, body) => {
+      const r = await apiFetch(url.origin, tok, path, body);
+      return { status: r.status, json: await r.json() };
+    };
+    return { token: tok, api: call, stop: async () => (proc.kill("SIGTERM"), await exited) };
+  };
+
+  await check("a restart keeps the session token, for the user alone; a token given is not kept; a file that isn't a token is replaced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const state = join(own, ".local/share/wirebuddy/state");
+    const mode = (path) => statSync(path).mode & 0o777;
+    let s = await startOn(own);
+    try {
+      assert.match(s.token, /^[0-9a-f]{32}$/);
+      assert.deepEqual([mode(state), mode(join(state, "token"))], [0o700, 0o600]);
+      assert.equal(readFileSync(join(state, "token"), "utf8").trim(), s.token);
+      const first = s.token;
+      await s.stop();
+      // The same token the next time, so that a page open across the restart still holds the right one
+      s = await startOn(own);
+      assert.equal(s.token, first);
+      await s.stop();
+      // Deleting the file is the way to a new token
+      rmSync(join(state, "token"));
+      s = await startOn(own);
+      assert.notEqual(s.token, first);
+      const second = s.token;
+      await s.stop();
+      // A token given is not kept, and doesn't replace the kept one
+      s = await startOn(own, ["--token", "given-by-the-caller-0123"]);
+      assert.equal(s.token, "given-by-the-caller-0123");
+      assert.equal(readFileSync(join(state, "token"), "utf8").trim(), second);
+      await s.stop();
+      // A file that is no token, or that others can read, is replaced by a new token
+      writeFileSync(join(state, "token"), "not a token\n", { mode: 0o600 });
+      s = await startOn(own);
+      assert.notEqual(s.token, second);
+      assert.match(readFileSync(join(state, "token"), "utf8"), /^[0-9a-f]{32}\n$/);
+      const third = s.token;
+      await s.stop();
+      chmodSync(join(state, "token"), 0o644);
+      s = await startOn(own);
+      assert.notEqual(s.token, third);
+      assert.equal(mode(join(state, "token")), 0o600);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("a restart keeps the custom columns and the recent files, and says so; files that don't check out are ignored whole, the agent told", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const own = join(dir, "home");
+    const state = join(own, ".local/share/wirebuddy/state");
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(40, 7502));
+    let s = await startOn(own);
+    try {
+      assert.equal((await s.api("/api/open", { path: a })).status, 200);
+      assert.equal((await s.api("/api/columns", { columns: [{ field: "udp.srcport", title: "SPort" }, { field: "frame.len", title: "" }] })).json.ok, true);
+      const columns = (await s.api("/api/state")).json.customColumns;
+      assert.deepEqual(columns.map((c) => c.title), ["SPort", "Frame Length"]);
+      await s.stop();
+      // The columns and the recent file are back, with the columns announced
+      s = await startOn(own);
+      await waitFor("the columns", async () => (await s.api("/api/state")).json.customColumns.length === 2);
+      assert.deepEqual((await s.api("/api/state")).json.customColumns, columns);
+      assert.deepEqual((await s.api("/api/recent")).json.files.map((f) => f.path), [a]);
+      assert.ok((await eventsSince(s, 0)).includes("INFO Restored the custom columns of the run before: SPort, Frame Length"));
+      // Opening a capture puts the columns into its list
+      await s.api("/api/open", { path: a });
+      assert.equal((await s.api("/api/state")).json.columns.slice(-2).join(","), "SPort,Frame Length");
+      // Removing the columns keeps nothing of them
+      await s.api("/api/columns", { columns: [] });
+      await s.stop();
+      s = await startOn(own);
+      assert.deepEqual((await s.api("/api/state")).json.customColumns, []);
+      await s.stop();
+      // Files that don't check out are ignored whole: no columns, no recent files; the agent hears of those
+      writeFileSync(join(state, "columns.json"), '[{"field":"udp.srcport"}]', { mode: 0o600 });
+      writeFileSync(join(state, "recent.json"), '{"files":1}', { mode: 0o600 });
+      s = await startOn(own);
+      await waitFor("the warnings", async () => (await eventsSince(s, 0)).filter((t) => t.startsWith("WARNING ")).length === 2);
+      assert.deepEqual((await s.api("/api/state")).json.customColumns, []);
+      assert.deepEqual((await s.api("/api/recent")).json.files, []);
+      const warned = (await eventsSince(s, 0)).filter((t) => t.startsWith("WARNING "));
+      assert.ok(warned.some((t) => t.includes("columns.json is not what WireBuddy writes there, so it is ignored")), warned.join("\n"));
+      assert.ok(warned.some((t) => t.includes("recent.json is not what WireBuddy writes there, so it is ignored")), warned.join("\n"));
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("a comment or mark for one packet goes by its frame number and capture: a display filter set meanwhile doesn't refuse it, another capture does, rows still need their list", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-kept-"));
+    const a = join(dir, "a.pcapng");
+    writeFileSync(a, udpCapture(40, 7502));
+    const s = await keptServer(join(dir, "home"));
+    try {
+      await s.api("/api/open", { path: a });
+      const st = (await s.api("/api/state")).json;
+      const view = { file: a, filter: st.filter, generation: st.generation };
+      // The agent sets a filter while the dialog is open
+      assert.equal((await s.api("/api/filter", { filter: "udp.dstport == 7502 && frame.number > 10" })).json.ok, true);
+      // The packet's own number and its capture, whatever the list shows now: saved
+      assert.deepEqual((await s.api("/api/comments", { comment: "kept text", frame: 6, view: { file: a } })).json.frames, [6]);
+      assert.deepEqual((await s.api("/api/marks", { note: "m", frame: 7, view: { file: a } })).json.frames, [7]);
+      // Rows are of one list, and refused once it changed; with the capture alone they have no list
+      assert.equal((await s.api("/api/comments", { comment: "late", frame: 6, rows: [[0, 0]], view })).status, 409);
+      assert.equal((await s.api("/api/comments", { comment: "x", frame: 6, rows: [[0, 0]], view: { file: a } })).status, 400);
+      // Another capture is the one thing that stops it, with its reason
+      const r = await s.api("/api/comments", { comment: "elsewhere", frame: 6, view: { file: "/elsewhere.pcapng" } });
+      assert.deepEqual([r.status, r.json.error], [409, "the capture changed since you chose the packets; select them again"]);
+      assert.equal((await s.api("/api/comments", { comment: "no such", frame: 9999, view: { file: a } })).status, 400);
+      assert.deepEqual([(await s.api("/api/state")).json.commentEdits, (await s.api("/api/frame?num=6")).json.row.cm], [1, ["kept text"]]);
     } finally {
       await s.stop();
       rmSync(dir, { recursive: true, force: true });

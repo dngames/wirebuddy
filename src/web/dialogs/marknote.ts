@@ -35,7 +35,7 @@ export function openMarkNoteDialog(): void {
   const s = app.state;
   if (!s?.file || current?.isOpen) return;
   // The mark goes to the packets selected now, even if the selection changes while typing
-  const about = { frame: app.selFrame, rows: app.selRows, view: { file: s.file, filter: s.filter, generation: s.generation } };
+  const about = act.packetsAbout(s);
   const count = selectedCount();
   if (!count) return;
   const mark = markOfSelected();
@@ -54,7 +54,7 @@ export function openMarkNoteDialog(): void {
       d.close();
       if (app.conn !== "open") void act.refreshState();
     } catch (e) {
-      err.textContent = e instanceof HttpError && e.status === 409 ? "The packet list changed; close this and select the packets again" : errorText(e);
+      err.textContent = e instanceof HttpError && e.status === 409 ? act.staleAbout(about) : errorText(e);
       err.hidden = false;
     } finally {
       okBtn.disabled = false;
