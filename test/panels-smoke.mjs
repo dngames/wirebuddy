@@ -37,6 +37,10 @@ writeFileSync(join(home, "outside.js"), "1;\n");
 symlinkSync(join(home, "outside.js"), join(extDir, "linked", "panel", "lib.js"));
 addPanel("badmanifest", { "main.js": "1;\n" }, { label: "x", panel: { permissions: ["everything"] } });
 
+addPanel("baddock", { "main.js": "1;\n" }, { label: "x", panel: { dock: "no" } });
+addPanel("windowed", { "main.js": "wb.ready();\n" }, { label: "Windowed", version: "1", panel: { title: "Windowed", dock: false } });
+addPanel("dockedon", { "main.js": "wb.ready();\n" }, { label: "Docked on", version: "1", panel: { dock: true } });
+
 const { proc: server, base } = await startServer({ token, env });
 const port = Number(new URL(base).port);
 
@@ -133,6 +137,21 @@ try {
     assert.match(ext(list, "linked").error, /lib\.js is a symbolic link/);
     assert.match(ext(list, "badmanifest").error, /panel: permissions may only list "control"/);
     assert.equal((await api("/api/panels/open", { name: "nomain" })).status, 400);
+  });
+
+  await check("panels: the manifest's dock says where a panel opens when the user has not chosen: the dock unless it is false, and anything but true or false is refused", async () => {
+    const list = (await api("/api/extensions")).json;
+    assert.match(ext(list, "baddock").error, /panel: dock must be true or false/);
+    assert.equal((await api("/api/panels/open", { name: "baddock" })).status, 400);
+    const docks = {};
+    for (const name of ["hello", "windowed", "dockedon"]) {
+      assert.equal(ext(list, name).status, "loaded");
+      assert.equal((await api("/api/panels/open", { name })).status, 200);
+      docks[name] = (await api("/api/state")).json.panels.find((x) => x.name === name).dock;
+      await api("/api/panels/close", { name });
+    }
+    assert.deepEqual(docks, { hello: true, windowed: false, dockedon: true });
+    assert.deepEqual((await api("/api/state")).json.panels, []);
   });
 
   let host = "";

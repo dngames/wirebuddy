@@ -312,6 +312,8 @@ export interface PanelState {
   /** Where the frame loads it: a one-time origin of its own. */
   src: string;
   size: [number, number];
+  /** Where it opens when the user has not chosen (the manifest's "dock"): the dock, or a window of `size`. */
+  dock: boolean;
   by: "user" | "agent";
   state: "starting" | "ready" | "not-responding" | "stopped" | "error";
   /** wb.status() text, or why it stopped. */

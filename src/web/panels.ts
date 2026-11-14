@@ -180,8 +180,8 @@ function open(p: PanelState): void {
   const dialog = new Dialog(p.title, { width: geo?.w || p.size[0], height: geo?.h || p.size[1], cls: "dlg-panel", modal: false });
   const footer = h("span", { class: "pn-status" });
   dialog.footerLeft.append(footer);
-  // A panel opens docked: what the agent shows must not cover what the user looks at
-  const docked = load<boolean>(`panel-dock:${p.name}`, true) !== false;
+  // A panel opens docked, unless its manifest asks for a window: what the agent shows must not cover what the user looks at. The user's choice wins
+  const docked = load<boolean>(`panel-dock:${p.name}`, p.dock) !== false;
   const w: Win = { name: p.name, label: p.label, dialog, frame: null, origin: "", loads: 0, lastPong: 0, seq: 0, ping: 0, messages: 0, second: 0, probing: null, probeRun: 0, probeRound: 0, footer, maximized: false, title: p.title, docked, shown: "float", floatAt: null, dockBtn: null, pointerIn: 0 };
   w.dockBtn = dialog.titleButton("Float", () => setDocked(w, !w.docked), "");
   dialog.button("Reload", () => void post("api/panels/reload", { name: p.name }).catch((e) => toastError(e)), { title: "Read the panel's files again and restart it" });

@@ -156,6 +156,7 @@ export class Panels extends EventEmitter {
       title: i.title,
       src: `http://p${i.label}.localhost:${this.port}/`,
       size: i.files.manifest.size,
+      dock: i.files.manifest.dock,
       by: i.by,
       state: i.state,
       statusText: i.statusText,
