@@ -48,16 +48,11 @@ function openDecodeAsDialog(p: { transport: "tcp" | "udp"; port: number; src: nu
   const existing = app.state?.decodeAs.entries.find((e) => e.table === table && e.value === p.port);
   const options = h("datalist", { id: "da-protocols" });
   const input = h("input", { type: "text", class: "da-in", spellcheck: false, value: existing?.protocol ?? "", placeholder: "e.g. rtp, mqtt, dns", attrs: { list: "da-protocols", "aria-label": "Protocol" } });
-  const err = h("div", { class: "of-err", hidden: true });
-  const showErr = (text: string): void => {
-    err.textContent = text;
-    err.hidden = false;
-  };
+  const showErr = d.errorLine();
   d.body.append(
     h("div", { class: "da-packet" }, `This packet: ${name} ${p.src} → ${p.dst}${p.now !== null ? `, decoded as ${p.now} now` : p.payload ? "" : ", has no payload of its own"}.`),
     h("div", { class: "dlg-field" }, h("label", null, "Protocol:", input), options),
     h("div", { class: "goto-hint" }, `Every packet on ${name} port ${p.port}, in this capture and the next ones, is dissected as this protocol until WireBuddy exits; "data" shows the raw bytes.`),
-    err,
   );
   // Protocols only: their names have no dot
   let asked = 0;

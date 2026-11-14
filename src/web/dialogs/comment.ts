@@ -57,12 +57,8 @@ export function openCommentDialog(edit?: { frame: number; index: number; text: s
   current = d;
   const subject = edit ? `Comment ${edit.index + 1} of packet ${edit.frame}` : count > 1 ? `To the ${fmtInt(count)} selected packets` : `To packet ${about.frame}`;
   const input = h("textarea", { class: "ask-in", rows: 5, maxLength: MAX_COMMENT, value: edit?.text ?? "" });
-  const err = h("div", { class: "of-err", hidden: true });
-  d.body.append(h("div", { class: "goto-hint" }, subject), input, h("div", { class: "goto-hint" }, `${keyLabel("Ctrl+Enter")} saves it${edit ? "; an empty comment is deleted" : ""}.`), err);
-  const showErr = (text: string): void => {
-    err.textContent = text;
-    err.hidden = false;
-  };
+  d.body.append(h("div", { class: "goto-hint" }, subject), input, h("div", { class: "goto-hint" }, `${keyLabel("Ctrl+Enter")} saves it${edit ? "; an empty comment is deleted" : ""}.`));
+  const showErr = d.errorLine();
   const save = async (): Promise<void> => {
     const comment = input.value;
     if (!edit && !comment) return showErr("Enter a comment");

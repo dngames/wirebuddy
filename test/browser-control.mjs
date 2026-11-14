@@ -1087,7 +1087,7 @@ try {
     await evaluate("document.activeElement.select()");
     await cdp("Input.insertText", { text: "the user's" });
     await saveComment();
-    await until("the refusal", () => evaluate("document.querySelector('.dlg-comment .of-err')?.textContent === 'The comment changed meanwhile; close this and choose it again'"));
+    await until("the refusal", () => evaluate("document.querySelector('.dlg-comment .dlg-error')?.textContent === 'The comment changed meanwhile; close this and choose it again'"));
     await closeComment();
     assert.match(await viewState(), /^ {2}2: "replaced by the agent"$/m);
     // Within 300 ms of picking from the Edit menu, a press on it is taken for closing it
@@ -1341,7 +1341,7 @@ try {
     writeFileSync(exists, "x");
     const setPath = (p) => evaluate(`(() => { const i = document.querySelector('.ex-path'); i.value = ${JSON.stringify(p)}; i.dispatchEvent(new Event('input')); })()`);
     const exportIt = async () => click(...center(await box("document.querySelector('.dlg-export button.primary')")));
-    const err = () => evaluate("(() => { const e = document.querySelector('.dlg-export .of-err'); return e && !e.hidden ? e.textContent : ''; })()");
+    const err = () => evaluate("(() => { return document.querySelector('.dlg-export .dlg-error')?.textContent ?? ''; })()");
     const open = async () => {
       await post("/api/select", { frame: 4 });
       await until("frame 4 selected", async () => (await state()).selected === 4);
@@ -1593,6 +1593,59 @@ try {
       assert.equal((await box(write)).top, counting.top, "the Write button moved when the count arrived");
     } finally {
       await evaluate("window.fetch = window.__fetch");
+      await cleanPage();
+    }
+  });
+
+  await check("browser: an error a request brings back sits in the footer's free side, so Cancel and the OK button stay where they are (Decode As, Write Findings Report)", async () => {
+    const footer = (dlg) => evaluate(`JSON.stringify({ win: document.querySelector('${dlg}').getBoundingClientRect().toJSON(), buttons: [...document.querySelectorAll('${dlg} .dlg-footer button')].map((b) => [b.textContent, b.getBoundingClientRect().toJSON()]) })`).then(JSON.parse);
+    const errorLine = (dlg) => evaluate(`(() => { const e = document.querySelector('${dlg} .dlg-footer .dlg-error'); return e && JSON.stringify({ text: e.textContent, title: e.title, role: e.getAttribute('role'), height: e.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(e).lineHeight), inFooter: !!e.closest('.dlg-footer-left'), clipped: e.scrollHeight > e.clientHeight }); })()`).then((j) => j && JSON.parse(j));
+    const moves = (a, b) => a.buttons.map(([label, r], i) => [label, r.left - b.buttons[i][1].left, r.top - b.buttons[i][1].top, r.width - b.buttons[i][1].width]).filter(([, ...d]) => d.some((x) => Math.abs(x) > 0.01));
+    const sameSize = (a, b) => a.win.height === b.win.height && a.win.width === b.win.width && a.win.top === b.win.top && a.win.left === b.win.left;
+    try {
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      // Decode As with a misspelt protocol: the longest message of them, two lines
+      await fromMenu(5, "Decode As");
+      await pick("TCP Port 18080");
+      await until("the dialog", () => evaluate("document.activeElement?.classList.contains('da-in') === true"));
+      const dlg = ".dlg-decodeas";
+      const before = await footer(dlg);
+      assert.equal(await errorLine(dlg).then((e) => e.text), "", "no error yet");
+      await evaluate("document.querySelector('.da-in').value = ''");
+      await cdp("Input.insertText", { text: "mtqq" });
+      await click(...center(await box(`document.querySelector('${dlg} button.primary')`)));
+      await until("the error", async () => !!(await errorLine(dlg))?.text);
+      const shown = await errorLine(dlg);
+      assert.match(shown.text, /close matches: mqtt/);
+      assert.deepEqual([shown.title, shown.role, shown.inFooter], [shown.text, "alert", true]);
+      assert.ok(shown.height > shown.lineHeight * 1.5 && shown.height <= shown.lineHeight * 2.01, `two lines: ${JSON.stringify(shown)}`);
+      const after = await footer(dlg);
+      assert.deepEqual(moves(after, before), [], "Cancel or OK moved when the error came");
+      assert.ok(sameSize(before, after), `the dialog changed: ${JSON.stringify([before.win, after.win])}`);
+      // It goes with a new try that works... here, with the dialog closed; the buttons stay while the text is replaced
+      await evaluate("document.querySelector('.da-in').value = ''");
+      await click(...center(await box(`document.querySelector('${dlg} button.primary')`)));
+      await key("Escape", "Escape", 27);
+      await until("the dialog to close", () => evaluate("!document.querySelector('.dlg-decodeas')"));
+
+      // Write Findings Report into a folder that is not there: a short message
+      await fromMenuBar("File", "Write Findings Report…");
+      await until("the count", () => evaluate("/^The report lists /.test(document.querySelector('.dlg-findings .goto-hint')?.textContent ?? '')"));
+      const fd = ".dlg-findings";
+      const first = await footer(fd);
+      await evaluate(`(() => { const i = document.querySelector('.dlg-findings .ex-path'); i.value = ${JSON.stringify(join(home, "nonexistent", "r.md"))}; i.dispatchEvent(new Event('input')); })()`);
+      await click(...center(await box("[...document.querySelectorAll('.dlg-findings .dlg-footer button')].find((b) => b.textContent === 'Write')")));
+      await until("the error", async () => !!(await errorLine(fd))?.text);
+      assert.match((await errorLine(fd)).text, /no such directory/);
+      const second = await footer(fd);
+      assert.deepEqual(moves(second, first), [], "Cancel or Write moved when the error came");
+      assert.ok(sameSize(first, second), `the dialog changed: ${JSON.stringify([first.win, second.win])}`);
+      // A message that is longer than two lines is cut, with all of it in the tooltip
+      await evaluate("(() => { const e = document.querySelector('.dlg-findings .dlg-error'); e.textContent = e.title = 'This is a long message. '.repeat(30); })()");
+      const long = await errorLine(fd);
+      assert.ok(long.height <= long.lineHeight * 2.01 && long.clipped && long.title.length > 600, JSON.stringify(long));
+      assert.deepEqual(moves(await footer(fd), first), []);
+    } finally {
       await cleanPage();
     }
   });

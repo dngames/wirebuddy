@@ -23,11 +23,7 @@ export function openTlsDialog(): void {
   );
   const pathIn = h("input", { type: "text", class: "ex-path", spellcheck: false, value: active ?? load<string>("tlskeylog", ""), placeholder: "/path/to/sslkeys.log", attrs: { "aria-label": "Key log file" } });
   const browse = h("button", { class: "btn" }, "Browse…");
-  const err = h("div", { class: "of-err", hidden: true });
-  const showErr = (m: string | null): void => {
-    err.textContent = m ?? "";
-    err.hidden = !m;
-  };
+  const showErr = d.errorLine();
 
   browse.addEventListener("click", () =>
     openFilePicker({
@@ -52,7 +48,6 @@ export function openTlsDialog(): void {
       "Point your browser at a key log file with SSLKEYLOGFILE=… before starting it. ",
       "The capture is dissected again with those keys, so decrypted protocols (HTTP/2, HTTP …) show up in the packet list.",
     ),
-    err,
   );
 
   const decrypt = async (): Promise<void> => {

@@ -25,13 +25,9 @@ export function openAskDialog(): void {
   current = d;
   const subject = count > 1 ? `About the ${fmtInt(count)} selected packets` : count === 1 && app.selFrame !== null ? `About packet ${app.selFrame}` : "About the capture";
   const input = h("textarea", { class: "ask-in", rows: 4, maxLength: MAX_QUESTION, placeholder: "What should it look at or explain?" });
-  const err = h("div", { class: "of-err", hidden: true });
   const reach = s.agent.watching ? `${name} is watching the viewer: the question wakes it.` : `${name} isn't watching the viewer right now: it gets the question with its next step.`;
-  d.body.append(h("div", { class: "goto-hint" }, subject), input, h("div", { class: "goto-hint" }, `Enter sends. ${reach}`), err);
-  const showErr = (text: string): void => {
-    err.textContent = text;
-    err.hidden = false;
-  };
+  d.body.append(h("div", { class: "goto-hint" }, subject), input, h("div", { class: "goto-hint" }, `Enter sends. ${reach}`));
+  const showErr = d.errorLine();
   const send = async (): Promise<void> => {
     const question = input.value.trim();
     if (!question) return showErr("Enter a question");

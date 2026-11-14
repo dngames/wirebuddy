@@ -30,11 +30,7 @@ export function openFindingsDialog(): void {
   const browse = h("button", { class: "btn" }, "Browse…");
   const summaryIn = h("textarea", { class: "ask-in", rows: 6, placeholder: "What was asked, what was found, what is still open (Markdown)", attrs: { "aria-label": "Summary" } });
   const listing = h("div", { class: "goto-hint fd-listing" }, "Counting the marked and commented packets…");
-  const err = h("div", { class: "of-err", hidden: true });
-  const showErr = (m: string | null): void => {
-    err.textContent = m ?? "";
-    err.hidden = !m;
-  };
+  const showErr = d.errorLine();
 
   browse.addEventListener("click", () =>
     openFilePicker({
@@ -53,7 +49,6 @@ export function openFindingsDialog(): void {
     h("div", { class: "dlg-field ex-pathrow" }, h("label", null, "Save as:", pathIn), browse),
     h("div", { class: "dlg-field" }, h("label", null, "Summary (optional):", summaryIn)),
     listing,
-    err,
   );
   void get<FindingsSummary>("api/findings").then(
     (r) => {

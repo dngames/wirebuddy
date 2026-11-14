@@ -81,6 +81,22 @@ export class Dialog {
     this.titleEl.textContent = t;
   }
 
+  /**
+   * A line for the error a request brings back, in the footer's free left
+   * side, two lines at most and the whole text in its tooltip. The footer has
+   * room for them from the start, so Cancel and OK stay where they are when it
+   * appears and goes. Returns what shows a message, or clears the line with null.
+   */
+  errorLine(): (message: string | null) => void {
+    const line = h("div", { class: "dlg-error", role: "alert" });
+    this.footer.classList.add("has-error");
+    this.footerLeft.append(line);
+    return (message) => {
+      line.textContent = message ?? "";
+      line.title = message ?? "";
+    };
+  }
+
   /** A text button in the title bar, left of the close button. */
   titleButton(label: string, fn: () => void, title?: string): HTMLButtonElement {
     const b = h("button", { class: "dlg-tbtn", title, onclick: fn }, label);

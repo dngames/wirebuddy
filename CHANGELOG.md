@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 - The waiting line under the agent's banner and the Questions dialog say whether the agent has seen the question: "not seen by Claude yet" until its event was handed to the agent (with a tool result, or to the watcher), then "seen · waiting for the answer"; the question carries `seenAt`
 - The findings report lists the session's questions about the open capture and their answers (the open ones as open, those about another capture left out), and the dialog's line and the agent's `write_findings` result count them
 - View › Time Display Format (also in the Time column's header menu): seconds since the beginning of the capture (default), since the previous displayed or captured packet, the time of day or date and time of day, local or UTC; read from sharkd's own fields, kept across a restart with the custom columns, and `get_view_state` says which one the user's Time column shows
+- An error that a request brings back (Export Specified Packets, Write Findings Report, TLS Keys, Decode As, Add Comment, Mark with Note, Ask Agent) shows in the footer's free left side, two lines at most with the whole text in its tooltip, so Cancel and OK no longer move
 
 ## [0.18.0] - 2026-11-14
 
