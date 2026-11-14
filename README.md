@@ -309,7 +309,8 @@ choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packet
 goes to Claude with the packet numbers and wakes it if its watch is running (the dialog says
 whether it is); otherwise it comes with Claude's next step. Claude answers in the chat, and with
 `answer_question` in the page: a line under its banner says the question is waiting until it does,
-then the answer takes its place until you dismiss it, and **Tools › Questions to Claude…** (the
+first "not seen by Claude yet", and "seen · waiting for the answer" once Claude was handed the
+question (with a tool result, or by its watch), then the answer takes its place until you dismiss it, and **Tools › Questions to Claude…** (the
 page puts the attached agent's name there and in **Ask … about This Packet…**, "Agent" when it gave
 none) lists this session's questions with their answers (a click selects the packet a question was about).
 

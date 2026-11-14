@@ -9,3 +9,10 @@ export function otherCapture(q: Pick<Question, "file" | "frame" | "count">, open
   if (q.file === null || q.frame === null || q.count <= 0 || q.file === open) return null;
   return q.file.split(/[\\/]/).pop() || q.file;
 }
+
+/** Where questions without an answer stand, for the page: "not seen by Agent yet", "seen · waiting for the answer", or how many of several are not seen. */
+export function waitingState(open: readonly Pick<Question, "seenAt">[], agent: string): string {
+  const unseen = open.filter((q) => q.seenAt === null).length;
+  if (!unseen) return "seen · waiting for the answer";
+  return unseen === open.length ? `not seen by ${agent} yet` : `${unseen} not seen by ${agent} yet`;
+}

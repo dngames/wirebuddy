@@ -382,14 +382,21 @@ try {
   // A refused question is no problem for the agent
   assert.equal((await post("/api/agent/ask", { question: "  " })).status, 400);
   assert.equal((await agentState()).pending, 0);
+  // The page can tell the agent has not heard it yet; the tool result that carries it is what it hears it with
+  const seenAts = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json()).questions.map((q) => q.seenAt);
+  assert.deepEqual(await seenAts(), [null]);
+  const before = Date.now();
   await call("get_view_state", {}, (t) => {
     assert.match(t, new RegExp(`QUESTION The user asks you about frame 12 ${how(1)}: Why is this so slow\\?\\]?$`, "m"));
     assert.doesNotMatch(t, /Asking the agent failed/);
   });
+  const [first] = await seenAts();
+  assert.ok(first >= before && first <= Date.now(), `seenAt ${first}`);
   // The packets the dialog showed, not what is selected when it is sent; refused once that view is gone
   const { generation } = await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json();
   const shown = { file: fixture, filter: "", generation };
   assert.deepEqual(await (await post("/api/agent/ask", { question: "and these?", frame: 3, rows: [[1, 2]], view: shown })).json(), { woken: false });
+  assert.deepEqual(await seenAts(), [first, null]);
   await call("get_view_state", {}, (t) => assert.match(t, new RegExp(`QUESTION The user asks you about 2 packets ${how(2)}: and these\\? \\{"frames":"frame\\.number in \\{2\\.\\.3\\}"\\}\\]?$`, "m")));
   assert.equal((await post("/api/agent/ask", { question: "stale?", frame: 3, view: { ...shown, filter: "tcp" } })).status, 409);
   const asked = spawn(command[1], [command[2], "--watch", command[3]], { stdio: ["ignore", "pipe", "inherit"] });
@@ -406,6 +413,9 @@ try {
     assert.match(heard, new RegExp(`QUESTION The user asks you about 3 packets ${how(3)}: What are these\\? \\{"frames":"frame\\.number in \\{12\\.\\.14\\}"\\}`));
   });
   assert.equal((await agentState()).watching, false);
+  // The watcher took it too: that is the other way the agent hears a question
+  assert.ok((await seenAts()).every((at) => Number.isInteger(at)), "the watcher's question is seen as well");
+  assert.equal((await seenAts())[0], first, "a question seen once keeps its time");
 
   // The questions are part of the view's state, and the agent answers them in the page
   const feed = await followState(ui.origin, ui.searchParams.get("token"));
@@ -413,7 +423,7 @@ try {
     const state = async () => (await (await fetch(new URL("/api/state", ui.origin), { headers: token })).json());
     const questions = async () => (await state()).questions;
     const file = (await state()).file;
-    assert.deepEqual((await questions()).map(({ at, ...q }) => q), [
+    assert.deepEqual((await questions()).map(({ at, seenAt, ...q }) => q), [
       { id: 1, text: "Why is this so slow?", file, frame: 12, count: 1, answer: null },
       { id: 2, text: "and these?", file, frame: 2, count: 2, answer: null },
       { id: 3, text: "What are these?", file, frame: 12, count: 3, answer: null },

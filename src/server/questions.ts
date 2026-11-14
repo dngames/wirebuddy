@@ -20,8 +20,8 @@ function cut(text: string, max: number): string {
 }
 
 /** `questions` with `q` after them; the oldest go once there are more than MAX_QUESTIONS. */
-export function withQuestion(questions: readonly Question[], q: Omit<Question, "answer">): Question[] {
-  return [...questions, { ...q, text: cut(q.text, MAX_QUESTION_SHOWN), answer: null }].slice(-MAX_QUESTIONS);
+export function withQuestion(questions: readonly Question[], q: Omit<Question, "answer" | "seenAt">): Question[] {
+  return [...questions, { ...q, text: cut(q.text, MAX_QUESTION_SHOWN), seenAt: null, answer: null }].slice(-MAX_QUESTIONS);
 }
 
 /** The question `id` names, else the oldest without an answer; refused when it is none of them. */
@@ -42,6 +42,11 @@ export function answered(questions: readonly Question[], question: Question, tex
   const answer = printable(text.replace(/\s+/g, " ").trim()).slice(0, MAX_ANSWER);
   if (!answer) throw new Error("the answer is empty");
   return questions.map((q) => (q === question ? { ...q, answer: { text: answer, at } } : q));
+}
+
+/** `questions` with those `ids` names seen by the agent at `at`, unless they were already. */
+export function seen(questions: readonly Question[], ids: readonly number[], at: number): Question[] {
+  return questions.map((q) => (q.seenAt === null && ids.includes(q.id) ? { ...q, seenAt: at } : q));
 }
 
 /** Questions without an answer. */

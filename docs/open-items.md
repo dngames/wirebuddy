@@ -38,7 +38,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | A19 | fix | A crash report from the active engine while the standby loads makes that load retry once more than needed | engine session work |
 
 | A28 | gap | The findings report leaves out the questions and answers of the session (and still covers only the open capture, see A11) | case 2 |
-| A29 | gap | Nothing in the page tells the human that the agent has seen a question or is working on it; the agent hears a question only with its next tool call unless it runs the background watcher | case 2 |
 | A30 | polish | The details pane is cramped while the answer banner is open, though the bytes pane below has room to spare (dragging the splitter was not tried) | case 2 |
 | A31 | polish | A reopened capture's panel briefly showed "0 samples" (a race on reset; not looked into) | case 2 |
 | A32 | polish | In a browser that can't isolate a panel, the warning about it is counted as "1 problem sent to Agent" in the status bar | case 2 |
@@ -118,3 +117,6 @@ After 0.17.0: a panel opens docked in a pane under the packet list, floats and d
 and the choice is kept per panel (A24) · a panel asks for a window with `"dock": false` in its manifest, and the
 examples that need the room do (A44, first part).
 Released as 0.18.0 (tag `v0.18.0`): everything listed above after 0.17.0.
+After 0.18.0: the waiting line and the Questions dialog say whether the agent has seen a question: "not seen by Claude
+yet" until its event was handed to the agent with a tool result or to the watcher, then "seen · waiting for the
+answer" (A29).

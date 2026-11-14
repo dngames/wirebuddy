@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams", "protoclash"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams", "protoclash"].map((m) => `server/${m}`), "shared/isolation", "shared/questions"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -32,8 +32,9 @@ const { noLuaReason } = await import(join(out, "units.mjs"));
 const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
 const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
-const { withQuestion, openQuestion, answered, openQuestions, aboutText, MAX_QUESTIONS, MAX_QUESTION_SHOWN, MAX_ANSWER } = await import(join(out, "units.mjs"));
+const { withQuestion, openQuestion, answered, openQuestions, aboutText, seen: seenQuestions, MAX_QUESTIONS, MAX_QUESTION_SHOWN, MAX_ANSWER } = await import(join(out, "units.mjs"));
 const { usesFrameNumber } = await import(join(out, "units.mjs"));
+const { waitingState } = await import(join(out, "units.mjs"));
 const { writeRefused, checkTarget } = await import(join(out, "units.mjs"));
 const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
@@ -2500,3 +2501,33 @@ esac
   rmSync(out, { recursive: true, force: true });
 }
 finish();
+  await check("a question is seen once the agent takes its event: all of them, with only the newest events shown, each only the first time", () => {
+    const heard = [];
+    const log = new EventLog(undefined, undefined, (ids) => heard.push(ids));
+    log.add("INFO", "the user applied a filter");
+    log.take();
+    assert.deepEqual(heard, [], "no question, nothing to tell");
+    log.add("QUESTION", "one", undefined, 1);
+    log.add("QUESTION", "two", { frames: "x" }, 2);
+    assert.deepEqual(heard, [], "asked is not seen");
+    for (let i = 0; i < 40; i++) log.add("INFO", `filler ${i}`);
+    assert.deepEqual(log.take().filter((e) => e.level === "QUESTION").map((e) => e.text), ["one", "two"]);
+    assert.deepEqual(heard, [[1, 2]]);
+    assert.deepEqual(log.take(), [], "an event that was taken is not taken again");
+    assert.deepEqual(heard, [[1, 2]]);
+    log.add("QUESTION", "three", undefined, 3);
+    assert.ok(!("question" in log.take()[0]), "the id stays in the log");
+    assert.deepEqual(heard, [[1, 2], [3]]);
+    let qs = [1, 2, 3].reduce((list, id) => withQuestion(list, { id, at: id, text: `q${id}`, file: null, frame: null, count: 0 }), []);
+    assert.deepEqual(qs.map((q) => q.seenAt), [null, null, null]);
+    qs = seenQuestions(qs, [1, 3], 500);
+    assert.deepEqual(qs.map((q) => q.seenAt), [500, null, 500]);
+    assert.deepEqual(seenQuestions(qs, [1, 2], 900).map((q) => q.seenAt), [500, 900, 500], "the first time stays");
+    assert.deepEqual(qs.map((q) => q.seenAt), [500, null, 500], "the list given is not changed");
+    const open = (...seenAt) => seenAt.map((s) => ({ seenAt: s }));
+    assert.equal(waitingState(open(null), "Claude"), "not seen by Claude yet");
+    assert.equal(waitingState(open(5), "Claude"), "seen · waiting for the answer");
+    assert.equal(waitingState(open(null, 5, null), "Claude"), "2 not seen by Claude yet");
+    assert.equal(waitingState(open(7, 5), "Claude"), "seen · waiting for the answer");
+  });
+

@@ -411,6 +411,8 @@ export interface AgentNotice {
   /** Epoch milliseconds. */
   at: number;
 }
+  /** When the agent was handed the question (with a tool result, or by the watcher), null before. Epoch milliseconds. */
+  seenAt: number | null;
 
 export interface PacketRow {
   /** Frame number. */

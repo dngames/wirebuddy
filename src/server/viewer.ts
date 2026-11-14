@@ -11,7 +11,7 @@ import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type Sh
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
-import { aboutText, answered, openQuestion, withQuestion } from "./questions.ts";
+import { aboutText, answered, openQuestion, seen, withQuestion } from "./questions.ts";
 import { otherCapture } from "../shared/questions.ts";
 import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
@@ -187,6 +187,7 @@ export class Viewer extends EventEmitter {
     (pending) => this.store.set({ agent: { ...this.state.agent, pending } }),
     (watching) => this.store.set({ agent: { ...this.state.agent, watching } }),
   );
+    (ids) => this.store.set({ questions: seen(this.state.questions, ids, Date.now()) }),
   /** The frames the display filter shows, and which row is which frame. */
   private readonly list = new PacketList();
   private reloadTimer: NodeJS.Timeout | null = null;
@@ -1793,7 +1794,7 @@ export class Viewer extends EventEmitter {
     const listed = framesFilter(frames, MAX_QUESTION_FRAMES) ?? `frames ${frames[0][0]} to ${frames[frames.length - 1][1]} (too many ranges to list)`;
     const woken = this.events.watched();
     const id = this.recordQuestion(text, about?.view.file ?? this.state.file, frames[0]?.[0] ?? null, count);
-    this.events.add("QUESTION", `The user asks you${subject} (${answerHow(id)}): ${text}`, count > 1 ? { frames: listed } : undefined);
+    this.events.add("QUESTION", `The user asks you${subject} (${answerHow(id)}): ${text}`, count > 1 ? { frames: listed } : undefined, id);
     return { woken };
   }
 
@@ -1904,7 +1905,7 @@ export class Viewer extends EventEmitter {
       const id = this.recordQuestion(held ? `Held Now for ${secs}` : "Pressed Now", left ? null : path, frames[0] ?? null, held && spanned ? spanned : frames.length ? 1 : 0);
       this.events.add("QUESTION", `The user ${held ? `held Now for ${secs}` : "pressed Now"} in the live capture, without words (${answerHow(id)}): what happened ${held ? "then" : "just before"}? ${where}`, {
         filter: `frame.time_epoch >= ${(Math.floor(from * 1000) / 1000).toFixed(3)} && frame.time_epoch <= ${(Math.ceil(end * 1000) / 1000).toFixed(3)}`,
-      });
+      }, id);
     }
     return { frames, about, commented: commented.length, held: held > 0, agent, woken };
   }

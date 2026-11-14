@@ -5,10 +5,12 @@ import * as act from "../actions.ts";
 import { agentName, app, bus } from "../app.ts";
 import { Dialog } from "../dialog.ts";
 import type { MenuItem } from "../menu.ts";
-import { otherCapture } from "../../shared/questions.ts";
+import { otherCapture, waitingState } from "../../shared/questions.ts";
 import { fmtDateTime, h } from "../util.ts";
 
 let current: Dialog | null = null;
+
+const capitalized = (text: string): string => text[0].toUpperCase() + text.slice(1);
 
 /** What a question was about, as the page says packets: "packet 878", "3 packets", "" for none; "packet 878 of tank.pcap" when it is not the open capture's. */
 export function aboutPackets(q: Question): string {
@@ -47,7 +49,7 @@ export function openQuestionsDialog(): void {
         // Another capture is open now: its packet numbers are other packets
         const goes = q.frame !== null && q.file !== null && q.file === app.state?.file;
         const head = h("div", { class: "q-head" }, `${fmtDateTime(q.at)}${about ? ` · ${about}` : ""}`);
-        const answer = q.answer ? h("div", { class: "q-answer" }, h("b", null, `${agentName()} answered: `), q.answer.text) : h("div", { class: "q-wait" }, "Waiting for an answer");
+        const answer = q.answer ? h("div", { class: "q-answer" }, h("b", null, `${agentName()} answered: `), q.answer.text) : h("div", { class: "q-wait" }, capitalized(waitingState([q], agentName())));
         return h("div", { class: `q-item${goes ? " q-goes" : ""}`, title: goes ? `Select packet ${q.frame}` : undefined, onclick: goes ? () => act.jumpToFrame(q.frame!) : undefined }, head, h("div", { class: "q-text" }, q.text), answer);
       }),
     );
