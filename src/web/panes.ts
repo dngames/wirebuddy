@@ -7,8 +7,14 @@ const MIN = 44;
 /** A docked panel's title bar and a few rows of its page. */
 const DOCK_MIN = 120;
 const DEFAULT: [number, number] = [0.48, 0.3];
-/** The docked panel's share of the height the splitters leave. The list and details then share the rest as before. */
-const DOCK_DEFAULT = 0.3;
+/**
+ * With a panel docked and no sizes of the user's own: the dock takes this share of the height the
+ * splitters leave, at most DOCK_MAX pixels (a chart then has about 220 below its title bar, and the
+ * list keeps ten rows from a window of 800 pixels), and the list and the details take these shares of the rest.
+ */
+const DOCK_SHARE = 0.35;
+const DOCK_MAX = 250;
+const DOCKED: [number, number] = [0.58, 0.24];
 
 let reset = (): void => {};
 
@@ -51,10 +57,11 @@ export function createPanes(list: HTMLElement, details: HTMLElement, bytes: HTML
   const s2 = h("div", { class: "splitter", role: "separator", title: "Drag to resize, double-click to reset", attrs: { "aria-orientation": "horizontal" } });
   const root = h("div", { class: "panes" }, p1, s1, dockPane, dockSplitter, p2, s2, p3);
 
-  let fr = load<[number, number]>("panes", DEFAULT);
-  if (!Array.isArray(fr) || fr.length !== 2 || !fr.every((x) => typeof x === "number" && x > 0 && x < 1)) fr = DEFAULT;
-  let frDock = load<number>("dock", DOCK_DEFAULT);
-  if (typeof frDock !== "number" || !(frDock > 0 && frDock < 1)) frDock = DOCK_DEFAULT;
+  // What the user dragged, kept as shares of the height; null until they did
+  let fr: [number, number] | null = load<[number, number] | null>("panes", null);
+  if (!Array.isArray(fr) || fr.length !== 2 || !fr.every((x) => typeof x === "number" && x > 0 && x < 1)) fr = null;
+  let frDock: number | null = load<number | null>("dock", null);
+  if (typeof frDock !== "number" || !(frDock > 0 && frDock < 1)) frDock = null;
 
   const docked = (): boolean => !dockPane.hidden;
   const avail = (): number => root.clientHeight - s1.offsetHeight - s2.offsetHeight - dockSplitter.offsetHeight;
@@ -65,11 +72,12 @@ export function createPanes(list: HTMLElement, details: HTMLElement, bytes: HTML
     let d = 0;
     if (docked()) {
       const most = Math.max(MIN, H - 3 * MIN);
-      d = clamp(Math.round(frDock * H), Math.min(DOCK_MIN, most), most);
+      d = clamp(frDock === null ? Math.min(DOCK_MAX, Math.round(DOCK_SHARE * H)) : Math.round(frDock * H), Math.min(DOCK_MIN, most), most);
     }
     const R = H - d;
-    const a = clamp(Math.round(fr[0] * R), MIN, Math.max(MIN, R - 2 * MIN));
-    const b = clamp(Math.round(fr[1] * R), MIN, Math.max(MIN, R - a - MIN));
+    const [f0, f1] = fr ?? (d ? DOCKED : DEFAULT);
+    const a = clamp(Math.round(f0 * R), MIN, Math.max(MIN, R - 2 * MIN));
+    const b = clamp(Math.round(f1 * R), MIN, Math.max(MIN, R - a - MIN));
     return [a, d, b];
   };
 
@@ -136,10 +144,10 @@ export function createPanes(list: HTMLElement, details: HTMLElement, bytes: HTML
   dockSplitter.addEventListener("pointerdown", drag("dock"));
   s2.addEventListener("pointerdown", drag("details"));
   reset = () => {
-    fr = DEFAULT;
-    frDock = DOCK_DEFAULT;
-    save("panes", fr);
-    save("dock", frDock);
+    fr = null;
+    frDock = null;
+    save("panes", null);
+    save("dock", null);
     layout();
   };
   for (const s of [s1, dockSplitter, s2]) s.addEventListener("dblclick", reset);

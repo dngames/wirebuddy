@@ -331,6 +331,27 @@ try {
     assert.equal(await evaluate(`${win}.contains(document.activeElement)`), false);
   });
 
+  await check("browser: until a splitter is dragged, the dock's pane is sized for a chart: about 200-240 px of it where the window allows, the list keeps about ten rows, the details and bytes stay readable", async () => {
+    const sizes = () =>
+      evaluate(`(() => { const h = (c) => document.querySelector(c).getBoundingClientRect().height; return JSON.stringify({ dock: h('.pane-dock'), frame: h('.panel-frame'), details: h('.pane-details'), bytes: h('.pane-bytes'), rows: document.querySelector('.pl-scroll').clientHeight / document.querySelector('.pl-row').offsetHeight }); })()`).then(JSON.parse);
+    try {
+      for (const [width, height, chart] of [[1280, 720, [155, 190]], [1440, 900, [210, 235]], [1280, 1000, [210, 235]]]) {
+        await cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+        await until(`the ${width}x${height} layout`, async () => (await evaluate("innerHeight")) === height);
+        await sleep(300);
+        const got = await sizes();
+        const say = `${width}x${height}: ${JSON.stringify(got)}`;
+        assert.ok(got.frame >= chart[0] && got.frame <= chart[1], `chart ${say}`);
+        assert.ok(got.rows >= 9, `list ${say}`);
+        assert.ok(got.details >= 80 && got.bytes >= 60, `details and bytes ${say}`);
+      }
+      // A window with room does not grow the dock beyond what a chart needs
+      assert.ok((await sizes()).dock <= 251, "capped at 250 px");
+    } finally {
+      await cdp("Emulation.clearDeviceMetricsOverride");
+    }
+  });
+
   await check("browser: Float turns a docked panel into a window over the page, Dock puts it back, and its drawing stays", async () => {
     await evaluate("document.querySelector('.panel-frame').__mark = 'same'");
     const runs = storedRuns();

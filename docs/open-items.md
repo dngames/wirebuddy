@@ -42,7 +42,6 @@ items, so a gap in the numbering is an item that is done (section E).
 | A35 | fix | The server instructions' background watcher command names a state file of the session before the restart (checked in the round 3 fixes: WireBuddy writes the live process's file into the instructions of each start, so a client that initializes again after a restart gets the right path; the tester's bridge kept the first initialize result. Not changed) | round 3 |
 | A41 | polish | Holding Now gives no feedback but a red outline; the old "answered" banner sits under a new waiting line; the capture's packet counter and the list's count disagree during a flood; 409s in the browser console at a filter change and at stop (no visible effect) | round 3 |
 | A43 | polish | The extension guide does not say which Lua version runs, has no word on checksums (a CRC-16 in pure Lua), and does not list the buffer methods | guide-only run |
-| A44 | gap | The dock's default height (30 % of the page) is short for a chart on a small screen; the user can drag the splitter, and nothing sizes it by what the panel draws | docked panels |
 | A45 | gap | With several packets selected, Add Comment, Mark with Note and Ask Agent are still refused when the list changes under the dialog (the text stays, with the reason) | round 3 fixes |
 
 ## B. Not exercised yet (what the tests did not do)
@@ -115,10 +114,10 @@ and the choice is kept per panel (A24) · a panel asks for a window with `"dock"
 examples that need the room do (A44, first part).
 Released as 0.18.0 (tag `v0.18.0`): everything listed above after 0.17.0.
 After 0.18.0: the waiting line and the Questions dialog say whether the agent has seen a question: "not seen by Claude
-yet" until its event was handed to the agent with a tool result or to the watcher, then "seen · waiting for the
-answer" (A29) · the findings report lists the session's questions about the open capture with their answers, the open
-ones as open (A28) · View › Time Display Format, also in the Time column's header menu: seconds since the beginning of
-the capture (default), since the previous displayed or captured packet, the time of day and the date and time of day,
-local and UTC, from sharkd's own fields and kept across a restart (A1) · an error a request brings back sits in the
-footer's free left side, two lines at most with the whole text in its tooltip, so Cancel and OK stay where they are
-(A46).
+yet" until its event was handed to the agent with a tool result or to the watcher, then "seen · waiting for the answer"
+(A29) · the findings report lists the session's questions about the open capture with their answers, the open ones as
+open (A28) · View › Time Display Format, also in the Time column's header menu: seconds since the beginning of the
+capture (default), since the previous displayed or captured packet, the time of day and the date and time of day, local
+and UTC, from sharkd's own fields and kept across a restart (A1) · an error a request brings back sits in the footer's
+free left side, two lines at most with the whole text in its tooltip, so Cancel and OK stay where they are (A46) · a
+docked panel's pane defaults to 35 % of the height available, at most 250 px, and the list gets more of the rest (A44).

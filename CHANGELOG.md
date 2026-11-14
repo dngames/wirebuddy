@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows
 - The findings report lists the session's questions about the open capture and their answers (the open ones as open, those about another capture left out), and the dialog's line and the agent's `write_findings` result count them
 - View › Time Display Format (also in the Time column's header menu): seconds since the beginning of the capture (default), since the previous displayed or captured packet, the time of day or date and time of day, local or UTC; read from sharkd's own fields, kept across a restart with the custom columns, and `get_view_state` says which one the user's Time column shows
 - An error that a request brings back (Export Specified Packets, Write Findings Report, TLS Keys, Decode As, Add Comment, Mark with Note, Ask Agent) shows in the footer's free left side, two lines at most with the whole text in its tooltip, so Cancel and OK no longer move
+- A docked panel's pane defaults to 35 % of the height available, at most 250 px (a chart gets about 220 px in a 900 px window), and the packet list gets more of the rest; a height you dragged is kept as it was
 
 ## [0.18.0] - 2026-11-14
 
