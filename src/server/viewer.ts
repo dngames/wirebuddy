@@ -2194,7 +2194,12 @@ export class Viewer extends EventEmitter {
   async findingsSummary(): Promise<FindingsSummary> {
     this.requireFile();
     const { marks, commented } = await this.findingsFrames();
-    return { marks: marks.length, commented: commented.length };
+    return { marks: marks.length, commented: commented.length, questions: this.reportQuestions().length };
+  }
+
+  /** The questions a findings report lists: those about the open capture, or about no packets; not the ones about another capture. */
+  private reportQuestions(): Question[] {
+    return this.state.questions.filter((q) => !otherCapture(q, this.state.file));
   }
 
   /** What the packet list shows of frame `num`: its time, source, destination, protocol and info. */
@@ -2236,6 +2241,7 @@ export class Viewer extends EventEmitter {
     this.edits.sameCapture(capture);
     if (this.state.file !== input) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
     const s = this.state;
+    const questions = this.reportQuestions();
     const text = buildFindings({
       name: basename(input),
       path: input,
@@ -2251,6 +2257,7 @@ export class Viewer extends EventEmitter {
       summary,
       marks: markedOut,
       commented: commentedOut,
+      questions,
       moreMarks: marks.length - markedOut.length,
       moreCommented: commented.length - listed.length,
     });
@@ -2259,7 +2266,7 @@ export class Viewer extends EventEmitter {
       this.agentExports.add(resolve(path));
       this.notice(`Wrote a findings report to ${path}`);
     }
-    return { path, marks: marks.length, commented: commentedOut.length, size };
+    return { path, marks: marks.length, commented: commentedOut.length, questions: questions.length, size };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {

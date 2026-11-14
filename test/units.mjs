@@ -1655,6 +1655,7 @@ try {
     summary: "",
     marks: [],
     commented: [],
+    questions: [],
   };
   await check("findings report: a capture with nothing marked or commented is the heading and the facts", () => {
     assert.equal(buildFindings(base), "# Findings: `robot.pcapng`\n\n## Capture\n- File: `/cap/robot.pcapng`\n- 120 packets, 45678 bytes, 12.346 s\n- Written by WireBuddy 1.2.3 on 2026-11-12T10:20:30Z\n");
@@ -1718,6 +1719,45 @@ try {
         "",
       ].join("\n"),
     );
+  });
+  await check("findings report: the questions and answers, in the order asked, open ones as open, as text", () => {
+    const q = (id, extra) => ({ id, at: Date.parse("2026-11-12T09:00:00.789Z") + id * 1000, text: `q${id}`, file: "/cap/robot.pcapng", frame: null, count: 0, seenAt: null, answer: null, ...extra });
+    const text = buildFindings({
+      ...base,
+      questions: [
+        q(1, { frame: 12, count: 1, text: "Why <i>slow</i>?\n# nope", answer: { text: "A [link](http://x.example) & `code`", at: Date.parse("2026-11-12T09:30:00Z") } }),
+        q(2, { frame: 3, count: 3, text: "these | three?" }),
+        q(5, { text: "no packets" }),
+      ],
+    });
+    assert.equal(
+      text.slice(text.indexOf("## Questions and answers")),
+      [
+        "## Questions and answers",
+        "",
+        "### Question 1: packet 12",
+        "Asked by the user on 2026-11-12T09:00:01Z:",
+        "> Why \\<i\\>slow\\</i\\>?",
+        "> \\# nope",
+        "",
+        "Answered by the agent on 2026-11-12T09:30:00Z:",
+        "> A \\[link\\]\\(http\\://x\\.example\\) \\& \\`code\\`",
+        "",
+        "### Question 2: 3 packets, the first is packet 3",
+        "Asked by the user on 2026-11-12T09:00:02Z:",
+        "> these \\| three?",
+        "",
+        "Open: no answer yet.",
+        "",
+        "### Question 5",
+        "Asked by the user on 2026-11-12T09:00:05Z:",
+        "> no packets",
+        "",
+        "Open: no answer yet.",
+        "",
+      ].join("\n"),
+    );
+    assert.ok(!buildFindings(base).includes("Questions"), "no section without questions");
   });
   await check("findings report: a single time reference is named in the singular", () => {
     assert.match(buildFindings({ ...base, timeRefs: [5] }), /\n- Time references: packet 5\n/);

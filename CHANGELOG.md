@@ -7,8 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 - The waiting line under the agent's banner and the Questions dialog say whether the agent has seen the question: "not seen by Claude yet" until its event was handed to the agent (with a tool result, or to the watcher), then "seen · waiting for the answer"; the question carries `seenAt`
-
-- The waiting line under the agent's banner and the Questions dialog say whether the agent has seen the question: "not seen by Claude yet" until its event was handed to the agent (with a tool result, or to the watcher), then "seen · waiting for the answer"; the question carries `seenAt`
+- The findings report lists the session's questions about the open capture and their answers (the open ones as open, those about another capture left out), and the dialog's line and the agent's `write_findings` result count them
 
 ## [0.18.0] - 2026-11-14
 

@@ -931,7 +931,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "write_findings",
     {
-      description: "Write the findings report of the open capture to a new Markdown file: your summary, the capture's facts (file, size, display filter, Decode As, time references), a table of the marked packets with their notes, and the packets with comments. Mark and comment the packets that carry the result first (mark_frames, packet_comments): the report lists them. Text from the capture and the notes is written as plain text, never as Markdown.",
+      description: "Write the findings report of the open capture to a new Markdown file: your summary, the capture's facts (file, size, display filter, Decode As, time references), a table of the marked packets with their notes, the packets with comments, and the questions the user asked you about this capture with your answers (answer_question first: a question without one is listed as open). Mark and comment the packets that carry the result first (mark_frames, packet_comments): the report lists them. Text from the capture and the notes is written as plain text, never as Markdown.",
       inputSchema: {
         path: z.string().describe("Absolute path ending in .md; its directory must exist"),
         summary: z.string().optional().describe("Markdown in your own words: what was asked, what was found, the evidence by packet number, what is still open. Written as given, at the top; no control characters but newline and tab"),
@@ -940,7 +940,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     },
     tool(async ({ path, summary, overwrite }) => {
       const r = await viewer.writeFindings({ path, summary, overwrite }, "agent");
-      return `Wrote the findings report (${r.size} bytes: ${r.marks} marked packet${r.marks === 1 ? "" : "s"}, ${r.commented} packet${r.commented === 1 ? "" : "s"} with comments) to ${r.path}`;
+      return `Wrote the findings report (${r.size} bytes: ${r.marks} marked packet${r.marks === 1 ? "" : "s"}, ${r.commented} packet${r.commented === 1 ? "" : "s"} with comments, ${r.questions} question${r.questions === 1 ? "" : "s"}) to ${r.path}`;
     }, true, "view"),
   );
 

@@ -796,6 +796,8 @@ export interface FindingsSummary {
   marks: number;
   /** Packets with comments, as the viewer shows them: edited here, else the file's (packets read in full). */
   commented: number;
+  /** Questions to the agent about this capture, answered or not. */
+  questions: number;
 }
 
 export interface FindingsResult {
@@ -804,6 +806,8 @@ export interface FindingsResult {
   marks: number;
   /** Packets with comments written out. */
   commented: number;
+  /** Questions to the agent written out. */
+  questions: number;
   size: number;
 }
 

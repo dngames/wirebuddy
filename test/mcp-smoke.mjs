@@ -182,7 +182,7 @@ try {
   });
   // The findings report: the agent's marks with their notes, written as text; it may replace its own report, never a file of the user's
   const findingsPath = join(out, "findings.md");
-  await call("write_findings", { path: findingsPath, summary: "## Found\n\nTwo 404s." }, (t) => assert.match(t, /^Wrote the findings report \(\d+ bytes: 2 marked packets, 0 packets with comments\) to .*findings\.md/));
+  await call("write_findings", { path: findingsPath, summary: "## Found\n\nTwo 404s." }, (t) => assert.match(t, /^Wrote the findings report \(\d+ bytes: 2 marked packets, 0 packets with comments, 0 questions\) to .*findings\.md/));
   const report = readFileSync(findingsPath, "utf8").split("\n");
   assert.deepEqual(report.slice(0, 5), ["# Findings: `http.pcapng`", "", "## Found", "", "Two 404s."]);
   assert.ok(report.some((l) => /^\| 21 \| .* \| `404 request\/response` \| agent \|$/.test(l)), report.join("\n"));
@@ -494,6 +494,24 @@ try {
   });
   assert.equal((await viewState()).selected, null, "no packet of the open capture was selected");
   await call("answer_question", { text: "It is the second one", id: 4 }, (t) => assert.match(t, /^Answered question 4 \(about frame 12 of http\.pcapng, not the open capture\); none waiting\. The question was about http\.pcapng, not the open capture: the user read it with the packet numbers of that capture/));
+  // The findings report lists the questions about the open capture, answered or open, as text; those about http.pcapng are left out
+  assert.equal((await post("/api/select", { frame: 2 })).status, 200);
+  assert.equal((await post("/api/agent/ask", { question: "Is `this` <b>RTP</b>?\n# not a heading" })).status, 200);
+  await call("answer_question", { text: "Yes, [see](http://evil.example) frame 2" }, (t) => assert.match(t, /^Answered question 5 /));
+  assert.equal((await post("/api/select", { frame: 3 })).status, 200);
+  assert.equal((await post("/api/agent/ask", { question: "And this one?" })).status, 200);
+  const qReport = join(out, "questions.md");
+  await call("write_findings", { path: qReport }, (t) => assert.match(t, /^Wrote the findings report \(\d+ bytes: 0 marked packets, 0 packets with comments, 2 questions\) to .*questions\.md/));
+  const qText = readFileSync(qReport, "utf8");
+  const at = qText.indexOf("## Questions and answers");
+  assert.ok(at > 0, qText);
+  assert.match(
+    qText.slice(at),
+    /^## Questions and answers\n\n### Question 5: packet 2\nAsked by the user on \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ:\n> Is \\`this\\` \\<b\\>RTP\\<\/b\\>\? \\# not a heading\n\nAnswered by the agent on \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ:\n> Yes, \\\[see\\\]\\\(http\\:\/\/evil\\\.example\\\) frame 2\n\n### Question 6: packet 3\nAsked by the user on [^\n]+:\n> And this one\?\n\nOpen: no answer yet\.\n$/,
+  );
+  for (const left of ["Why is this so slow", "Which one is it", "and these", "What are these"]) assert.ok(!qText.includes(left), `${left} was about another capture`);
+  assert.ok(!qText.includes("<b>") && !qText.includes("](http"), "nothing the text carries is Markdown");
+  await call("answer_question", { text: "Probably." }, (t) => assert.match(t, /^Answered question 6 /));
   await call("decode_as", { action: "set", table: "udp.port", value: 50000, protocol: "rtp" }, (t) => {
     assert.match(t, /^udp\.port 50000 now decodes as RTP \(before: no dissector, so heuristics or Data\)\. 5 frames match "rtp && udp\.port == 50000"\.$/m);
     assert.match(t, /^Decode As entries \(1, until WireBuddy exits\): udp\.port 50000 → rtp \(agent\)$/m);

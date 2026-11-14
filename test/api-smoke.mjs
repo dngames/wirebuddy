@@ -701,11 +701,11 @@ try {
       await api("/api/timerefs", { frames: [10], on: true });
       const [s3, s12] = [await cellsOf(3), await cellsOf(12)];
       await api("/api/filter", { filter: "http || tcp.flags.syn == 1" });
-      assert.deepEqual((await api("/api/findings")).json, { marks: 2, commented: 2 });
+      assert.deepEqual((await api("/api/findings")).json, { marks: 2, commented: 2, questions: 0 });
 
       const written = await api("/api/findings", { path: file, summary: "## What was found\n\nThe **server** answers `GET /`.\n\n" });
       assert.equal(written.status, 200, JSON.stringify(written.json));
-      assert.deepEqual(Object.keys(written.json).sort(), ["commented", "marks", "path", "size"]);
+      assert.deepEqual(Object.keys(written.json).sort(), ["commented", "marks", "path", "questions", "size"]);
       assert.deepEqual([written.json.path, written.json.marks, written.json.commented], [file, 2, 2]);
       assert.equal(written.json.size, statSync(file).size);
       if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -735,7 +735,7 @@ try {
       assert.equal(lines[at(/^### Packet 9: /) + 2], "> plain");
       // Nothing from the notes or comments is left that Markdown could act on
       for (const raw of ["<script>", "![x](y)", "\n# heading"]) assert.ok(!text.includes(raw), raw);
-      assert.ok(lines.filter((l) => l.startsWith("#")).every((l) => /^(# Findings: |## |### Packet \d+: )/.test(l)), "no heading but the report's own");
+      assert.ok(lines.filter((l) => l.startsWith("#")).every((l) => /^(# Findings: |## |### Packet \d+: |### Question \d+)/.test(l)), "no heading but the report's own");
       assert.deepEqual(readdirSync(dir), ["report.md"], "no temporary file left");
       assert.ok((await api("/api/events/take", {})).json.events.some((e) => e.text === `The user wrote a findings report to ${file}`));
 
@@ -793,7 +793,7 @@ try {
       await api("/api/comments/edit", { frame: 4, index: 0, old: "file four", comment: "four [edited](http://evil.example)" });
       await api("/api/comments", { frames: [6], comment: "added" });
       await api("/api/comments/delete", { frame: 8, index: 0, old: "file eight" });
-      assert.deepEqual((await api("/api/findings")).json, { marks: 0, commented: 3 });
+      assert.deepEqual((await api("/api/findings")).json, { marks: 0, commented: 3, questions: 0 });
       const report = join(dir, "report.md");
       assert.deepEqual((await api("/api/findings", { path: report })).json.commented, 3);
       const lines = readFileSync(report, "utf8").split("\n");
