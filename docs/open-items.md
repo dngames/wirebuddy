@@ -47,6 +47,7 @@ items, so a gap in the numbering is an item that is done (section E).
 | A43 | polish | The extension guide does not say which Lua version runs, has no word on checksums (a CRC-16 in pure Lua), and does not list the buffer methods | guide-only run |
 | A44 | gap | The dock's default height (30 % of the page) is short for a chart on a small screen; the user can drag the splitter, and nothing sizes it by what the panel draws | docked panels |
 | A45 | gap | With several packets selected, Add Comment, Mark with Note and Ask Agent are still refused when the list changes under the dialog (the text stays, with the reason) | round 3 fixes |
+| A46 | polish | An error that a request brings back (Write Findings Report, Export Specified Packets, TLS Keys, Decode As, Add Comment, Mark with Note, Ask Agent) opens a line above the footer of these dialogs, whose top is fixed, so Cancel and the OK button slide 24 px (40 px for a message of two lines) down after the click that asked; reserving the line would leave a blank line in each dialog all the time, and putting the message in the footer's free left side cuts a long one, so neither was done | dialog sweep |
 
 ## B. Not exercised yet (what the tests did not do)
 

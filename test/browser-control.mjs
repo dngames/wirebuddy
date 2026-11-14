@@ -1529,6 +1529,77 @@ try {
     }
   });
 
+  await check("browser: Statistics › Conversations keeps its tabs where they are when a list arrives, so a click on the way to one does not land on the next", async () => {
+    const tabs = () => evaluate("JSON.stringify([...document.querySelectorAll('.dlg-stats .tab')].map((t) => Math.round(t.getBoundingClientRect().left * 10) / 10))").then(JSON.parse);
+    try {
+      // The list answers late, as it does on a big capture
+      await spyFetch({ "api/stats/conv": 1000 });
+      await fromMenuBar("Statistics", "Conversations");
+      await until("the tabs", async () => (await tabs()).length === 5);
+      const computing = await tabs();
+      assert.equal(await evaluate("/ · \\d+/.test(document.querySelector('.dlg-stats .tab.active').textContent)"), false, "the list arrived before the tabs were measured");
+      await until("the count on the tab", () => evaluate("/ · \\d+/.test(document.querySelector('.dlg-stats .tab.active').textContent)"));
+      assert.deepEqual(await tabs(), computing, "the tabs moved when the count arrived");
+    } finally {
+      await unspyFetch();
+      await cleanPage();
+    }
+  });
+
+  await check("browser: Follow Stream keeps the Show data as menu where it is when the stream arrives", async () => {
+    try {
+      await post("/api/select", { frame: 4 });
+      await until("frame 4's details", () => evaluate("document.querySelectorAll('.dt-row').length > 3"));
+      await sleep(400);
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      // The stream answers late
+      await spyFetch({ "api/follow": 1000 });
+      await fromMenu(4, "Follow");
+      await pick("TCP Stream");
+      const mode = "document.querySelector('.dlg-follow .fl-mode')";
+      await until("the dialog", async () => !!(await box(mode)));
+      const loading = await box(mode);
+      assert.equal(await evaluate("!!document.querySelector('.dlg-follow .fl-text span[data-frame]')"), false, "the stream arrived before the menu was measured");
+      await until("the stream", () => evaluate("!!document.querySelector('.dlg-follow .fl-text span[data-frame]')"), 15_000);
+      assert.equal((await box(mode)).left, loading.left, "the Show data as menu moved when the stream arrived");
+    } finally {
+      await unspyFetch();
+      await cleanPage();
+      await post("/api/filter", { filter: "" });
+      await until("no filter", async () => (await state()).filter === "");
+    }
+  });
+
+  await check("browser: a toast with a button stays where it is when another toast comes and goes", async () => {
+    const out = mkdtempSync("/tmp/wirebuddy-toasts-");
+    const setPath = (dlg, p) => evaluate(`(() => { const i = document.querySelector('.${dlg} .ex-path'); i.value = ${JSON.stringify(p)}; i.dispatchEvent(new Event('input')); })()`);
+    const open = "document.querySelector('.toast-action')";
+    try {
+      await fromMenuBar("File", "Export Specified Packets…");
+      await until("the export dialog", async () => !!(await box("document.querySelector('.dlg-export button.primary')")));
+      await setPath("dlg-export", join(out, "toast.pcapng"));
+      await click(...center(await box("document.querySelector('.dlg-export button.primary')")));
+      await until("the export toast with its button", async () => !!(await box(open)));
+      await sleep(400);
+      const alone = await box(open);
+      // A toast without a button comes: the findings report written (not through fromMenuBar, which clears the toasts)
+      await click(...center(await box("[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === 'File')")));
+      await pick("Write Findings Report…");
+      await until("the findings dialog", async () => !!(await box("document.querySelector('.dlg-findings button.primary')")));
+      await setPath("dlg-findings", join(out, "toast.md"));
+      await click(...center(await box("document.querySelector('.dlg-findings button.primary')")));
+      await until("the second toast", async () => /Wrote the findings report/.test(await toasts()));
+      await sleep(400);
+      assert.equal((await box(open)).top, alone.top, "the button moved when the second toast came");
+      // and goes, its 4.5 s gone
+      await until("the second toast gone", async () => !/Wrote the findings report/.test(await toasts()), 15_000);
+      assert.equal((await box(open)).top, alone.top, "the button moved when the second toast went");
+    } finally {
+      await cleanPage();
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
   await check("browser: File › Write Findings Report… writes the file at the chosen path and says so in a toast", async () => {
     const out = mkdtempSync("/tmp/wirebuddy-findings-");
     const file = join(out, "report.md");
