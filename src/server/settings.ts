@@ -122,7 +122,7 @@ export function parseRecent(text: string): string[] | null {
   return files;
 }
 
-/** `text` as custom columns, checked as the viewer sets them; null when it isn't a list of those. */
+/** `text` as the Time column's display format; null when it isn't one. */
 export function parseTimeFormat(text: string): TimeFormat | null {
   try {
     const raw: unknown = JSON.parse(text);
@@ -132,7 +132,7 @@ export function parseTimeFormat(text: string): TimeFormat | null {
   }
 }
 
-/** The custom columns in `text`, or null when it isn't a list WireBuddy writes. */
+/** `text` as custom columns, checked as the viewer sets them; null when it isn't a list of those. */
 export function parseColumns(text: string): CustomColumn[] | null {
   let raw: unknown;
   try {

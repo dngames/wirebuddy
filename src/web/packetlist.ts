@@ -966,7 +966,6 @@ export function createPacketList(): HTMLElement {
     if (genChanged) {
       if (sameRows) {
         stale = new Map([...stale, ...pages]);
-        // Other time references: pages asked for before come again
         // Other time references or format: pages asked for before come again
         if (prev.timeRefsRevision !== s.timeRefsRevision || prev.timeFormat !== s.timeFormat) {
           timesGen = s.generation;
