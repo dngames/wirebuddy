@@ -72,7 +72,7 @@ items, so a gap in the numbering is an item that is done (section E).
 |---|---|
 | C1 | `api-smoke` "export objects: listed without tokens…" fails when the repository is not writable by the user running the tests |
 | C2 | `browser-control`: three Set/Unset Time Reference checks fail locally as an ordinary user (they pass in CI); cause not looked into |
-| C3 | `browser-control`: Write Findings Report, two Export Objects checks and "Now in a live capture" fail now and then under load |
+| C3 | **fixed**: `browser-control`'s Write Findings Report, two Export Objects checks and "Now in a live capture" failed together under load. Cause: the findings dialog opens with a one-line "Counting…" and, when the count arrives, rewraps to two lines, so its footer slid 16 px down; a click measured before and landing after hit the footer, not Write, and the dialog stayed open and blocked the menus and the N key of the next three checks. The hint now has two lines from the start (a person could hit it too, if rarely), and each menu use and the Now check start by closing leftover dialogs, menus and toasts |
 | C4 | Two macOS browser checks time out now and then (from before) |
 | C5 | Run as root, the suites lose Lua (Wireshark loads no Lua plugins for root) and fail in every check that needs an extension or Decode As: run them as an ordinary user |
 

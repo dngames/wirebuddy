@@ -663,7 +663,18 @@ try {
     if (seen) Object.assign(seen, { point: at.map(Math.round), hit: await elementAt(...at), toasts: await toasts() });
     await click(...at);
   };
+  /** Every check starts from a clean page: what one left open (a dialog, a menu, a toast) is closed, so it fails alone. */
+  const cleanPage = async () => {
+    await evaluate("document.querySelectorAll('.dlg:not(.dlg-panel) .dlg-close').forEach((b) => b.click())");
+    if (await evaluate("!!document.querySelector('.menu')")) {
+      await key("Escape", "Escape", 27);
+      // A click on a menu's title within 300 ms of the menu closing counts as the one that closed it
+      await sleep(400);
+    }
+    await evaluate("document.querySelectorAll('.toast').forEach((t) => t.remove())");
+  };
   const fromMenuBar = async (title, ...labels) => {
+    await cleanPage();
     await click(...center(await box(`[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === ${JSON.stringify(title)})`)));
     for (const label of labels) await pick(label);
   };
@@ -1460,12 +1471,31 @@ try {
     }
   });
 
+  await check("browser: File › Write Findings Report… keeps its size while it counts, so the Write button does not move under a click", async () => {
+    // The count answers late, as it does on a slow machine
+    await evaluate("(() => { const f = window.fetch; window.__fetch = f; window.fetch = async (...a) => { if (String(a[0]).includes('api/findings')) await new Promise((r) => setTimeout(r, 1000)); return f(...a); }; })()");
+    try {
+      await fromMenuBar("File", "Write Findings Report…");
+      const write = "[...document.querySelectorAll('.dlg-findings .dlg-footer button')].find((b) => b.textContent === 'Write')";
+      await until("the dialog", async () => !!(await box(write)));
+      const counting = await box(write);
+      assert.match(await evaluate("document.querySelector('.dlg-findings .goto-hint').textContent"), /^Counting/);
+      await until("the count", () => evaluate("/^The report lists /.test(document.querySelector('.dlg-findings .goto-hint').textContent)"));
+      assert.equal((await box(write)).top, counting.top, "the Write button moved when the count arrived");
+    } finally {
+      await evaluate("window.fetch = window.__fetch");
+      await cleanPage();
+    }
+  });
+
   await check("browser: File › Write Findings Report… writes the file at the chosen path and says so in a toast", async () => {
     const out = mkdtempSync("/tmp/wirebuddy-findings-");
     const file = join(out, "report.md");
     try {
       await fromMenuBar("File", "Write Findings Report…");
       await until("the dialog", async () => (await evaluate("!!document.querySelector('.dlg-findings .ex-path')")) === true);
+      // Its buttons stay where they are when it has counted: a click on its way to Write lands on it
+      await until("the count", () => evaluate("/^The report lists /.test(document.querySelector('.dlg-findings .goto-hint').textContent)"));
       // The default is next to the capture, named after it
       assert.match(await evaluate("document.querySelector('.dlg-findings .ex-path').value"), /\/http-findings\.md$/);
       await evaluate(`(() => { const i = document.querySelector('.dlg-findings .ex-path'); i.value = ${JSON.stringify(file)}; i.dispatchEvent(new Event('input')); })()`);
@@ -1564,6 +1594,7 @@ try {
     };
     const comments = async () => (await call("get_view_state")).text;
     let w = null;
+    await cleanPage();
     try {
       // The capture before has stopped
       await until("Now off without a running capture", () => evaluate(`${button}.disabled`));

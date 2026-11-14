@@ -29,7 +29,7 @@ export function openFindingsDialog(): void {
   const pathIn = h("input", { type: "text", class: "ex-path", spellcheck: false, value: defaultPath(s.file), attrs: { "aria-label": "Report file" } });
   const browse = h("button", { class: "btn" }, "Browse…");
   const summaryIn = h("textarea", { class: "ask-in", rows: 6, placeholder: "What was asked, what was found, what is still open (Markdown)", attrs: { "aria-label": "Summary" } });
-  const listing = h("div", { class: "goto-hint" }, "Counting the marked and commented packets…");
+  const listing = h("div", { class: "goto-hint fd-listing" }, "Counting the marked and commented packets…");
   const err = h("div", { class: "of-err", hidden: true });
   const showErr = (m: string | null): void => {
     err.textContent = m ?? "";

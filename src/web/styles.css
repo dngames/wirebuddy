@@ -2069,6 +2069,12 @@ input[type="checkbox"] {
   font-size: 12px;
 }
 
+/* Two lines from the start: the findings dialog counts first and then says what it lists, in two lines, and a dialog that grows then moves its buttons away from a click on its way to them */
+.fd-listing {
+  line-height: 16px;
+  min-height: 32px;
+}
+
 .goto-hint.ex-warn {
   color: var(--warn);
 }
