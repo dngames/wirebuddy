@@ -186,8 +186,8 @@ export class Viewer extends EventEmitter {
   readonly events = new EventLog(
     (pending) => this.store.set({ agent: { ...this.state.agent, pending } }),
     (watching) => this.store.set({ agent: { ...this.state.agent, watching } }),
-  );
     (ids) => this.store.set({ questions: seen(this.state.questions, ids, Date.now()) }),
+  );
   /** The frames the display filter shows, and which row is which frame. */
   private readonly list = new PacketList();
   private reloadTimer: NodeJS.Timeout | null = null;
