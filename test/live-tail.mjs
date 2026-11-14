@@ -294,6 +294,74 @@ try {
     }
   });
 
+  await check("time display formats among provisional packets: deltas and the time of day read as for exact packets, since the previous displayed one stays empty under a display filter until the full read", async () => {
+    try {
+      for (let attempt = 1; ; attempt++) {
+        const s = await until("newer packets", 10_000, (s) => s.tail?.frames > 60 && s.totalFrames > 1000);
+        try {
+          await provisionalFormats(s.totalFrames + 12);
+          return;
+        } catch (err) {
+          if (attempt >= 5 || !err.overtaken) throw err;
+        }
+      }
+    } finally {
+      await api("/api/timeformat", { format: "relative" });
+      await api("/api/filter", { filter: "" });
+    }
+  });
+
+  /** Reads provisional frames `first`..`first+5` in each format and checks them against the relative times the same rows have. */
+  async function provisionalFormats(first) {
+    // An attempt that was overtaken by a full read left its format and filter behind
+    await api("/api/timeformat", { format: "relative" });
+    await api("/api/filter", { filter: "" });
+    const read = async () => {
+      // Provisional rows that can't be read just now come empty: asked again
+      let rows = [];
+      for (let k = 0; k < 40 && rows.length < 6; k++, await sleep(250)) ({ rows } = await wb.rows(first - 1, 6));
+      await stillProvisional(first, rows.length === 6 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
+      return rows;
+    };
+    const ns = (text) => {
+      const [whole, fraction = ""] = text.split(".");
+      return BigInt(whole) * 1_000_000_000n + BigInt(fraction.padEnd(9, "0"));
+    };
+    const rel = await read();
+    // The fake dumpcap writes microseconds: every format has the decimals the Time column has
+    const digits = rel[0].c[1].split(".")[1].length;
+    const relative = rel.map((r) => ns(r.c[1]));
+    const fmt = (n) => `${n / 1_000_000_000n}.${String(n % 1_000_000_000n).padStart(9, "0").slice(0, digits)}`;
+    await api("/api/timeformat", { format: "delta-captured" });
+    assert.deepEqual((await read()).slice(1).map((r) => r.c[1]), relative.slice(1).map((t, i) => fmt(t - relative[i])));
+    // No display filter: the previous displayed packet is the previous captured one
+    await api("/api/timeformat", { format: "delta-displayed" });
+    assert.deepEqual((await read()).slice(1).map((r) => r.c[1]), relative.slice(1).map((t, i) => fmt(t - relative[i])));
+    await api("/api/timeformat", { format: "utc-time-of-day" });
+    const clock = (await read()).map((r) => r.c[1]);
+    assert.ok(clock.every((t) => new RegExp(`^\\d\\d:\\d\\d:\\d\\d\\.\\d{${digits}}$`).test(t)), clock.join(" "));
+    const sinceMidnight = (t) => {
+      const [h, m, rest] = t.split(":");
+      return (BigInt(h) * 3600n + BigInt(m) * 60n) * 1_000_000_000n + ns(rest);
+    };
+    for (let i = 1; i < clock.length; i++) assert.equal(sinceMidnight(clock[i]) - sinceMidnight(clock[i - 1]), relative[i] - relative[i - 1], `row ${i}: ${clock[i - 1]} then ${clock[i]}`);
+    await api("/api/timeformat", { format: "utc-date-time" });
+    assert.ok((await read()).every((r) => new RegExp(`^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d{${digits}}$`).test(r.c[1])));
+    // A display filter: a slice can't tell which packet was displayed before it
+    await api("/api/timeformat", { format: "delta-displayed" });
+    assert.equal((await api("/api/filter", { filter: "frame" })).ok, true);
+    let rows = [];
+    for (let k = 0; k < 40 && !rows.length; k++, await sleep(250)) ({ rows } = await wb.rows(first - 1, 6));
+    await stillProvisional(first, rows.length > 0 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
+    assert.deepEqual(rows.map((r) => r.c[1]), rows.map(() => ""), "provisional rows under a display filter");
+    const exact = (await wb.rows(0, 3)).rows;
+    const decimals = new RegExp(`^\\d+\\.\\d{${digits}}$`);
+    assert.ok(exact.every((r) => !r.p && decimals.test(r.c[1])), exact.map((r) => r.c[1]).join(" "));
+    // The other formats still read under the filter
+    await api("/api/timeformat", { format: "delta-captured" });
+    assert.ok((await wb.rows(first - 1, 6)).rows.every((r) => decimals.test(r.c[1])));
+  }
+
   /** Sets the exact frame `early` and the provisional `ref` as time references and checks the rows and details around `ref`. */
   async function provisionalRefs(early, ref) {
     const set = await tool("time_references", { action: "set", frames: [early, ref] });

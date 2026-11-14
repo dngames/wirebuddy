@@ -33,6 +33,7 @@ export function initialState({ capture, wiresharkAvailable, decodeAsUnavailable 
     marks: [],
     timeRefs: [],
     timeRefsRevision: 0,
+    timeFormat: "relative",
     commentEdits: 0,
     commentsEdited: 0,
     commentRevision: 0,

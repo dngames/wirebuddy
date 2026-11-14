@@ -23,6 +23,7 @@ import { followItems } from "./dialogs/follow.ts";
 import { markNoteItem } from "./dialogs/marknote.ts";
 import { conversationFilters } from "./frame.ts";
 import { SEP, showMenu, type MenuItem } from "./menu.ts";
+import { timeFormatItems } from "./timeformat.ts";
 import { toastError } from "./toast.ts";
 import { clamp, copyText, csvField, fontOf, h, IS_MAC, isMod, keyLabel, keyLetter, load, measureText, save } from "./util.ts";
 
@@ -274,6 +275,8 @@ function headerMenu(j: number, x: number, y: number): void {
     { label: "Remove Column", disabled: k < 0, title: why, action: () => void act.setCustomColumns(custom.filter((_, i) => i !== k)) },
     SEP,
     { label: "Reset Custom Columns", disabled: !custom.length, action: () => void act.setCustomColumns([]) },
+    SEP,
+    { label: "Time Display Format", sub: timeFormatItems() },
   );
   showMenu(items, x, y);
 }
@@ -432,8 +435,18 @@ async function fetchPage(p: number): Promise<void> {
   }
 }
 
+/** The time format changed: the Time column fits its new text once rows of it are in. */
+let fitTime = false;
+
 function setPage(p: number, rows: PacketRow[]): void {
   pages.set(p, rows);
+  if (fitTime) {
+    fitTime = false;
+    queueMicrotask(() => {
+      const j = columns.indexOf("Time");
+      if (j >= 0 && customIndex(j) < 0) autosize(j);
+    });
+  }
   stale.delete(p);
   failed.delete(p);
   evict(p);
@@ -925,6 +938,7 @@ export function createPacketList(): HTMLElement {
   bus.on("state", (s, prev) => {
     // Measured with the row count the scroll was made in
     takeScroll();
+    if (prev && prev.timeFormat !== s.timeFormat) fitTime = true;
     // The columns keep their identity while they don't change
     if (!prev || s.columns !== prev.columns || s.customColumns !== prev.customColumns) {
       const cols = s.columns ?? [];
@@ -953,7 +967,8 @@ export function createPacketList(): HTMLElement {
       if (sameRows) {
         stale = new Map([...stale, ...pages]);
         // Other time references: pages asked for before come again
-        if (prev.timeRefsRevision !== s.timeRefsRevision) {
+        // Other time references or format: pages asked for before come again
+        if (prev.timeRefsRevision !== s.timeRefsRevision || prev.timeFormat !== s.timeFormat) {
           timesGen = s.generation;
           inflight = new Map();
         }

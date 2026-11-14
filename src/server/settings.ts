@@ -11,6 +11,7 @@ import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, renameS
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CustomColumn } from "../shared/api.ts";
+import { isTimeFormat, type TimeFormat } from "../shared/timeformat.ts";
 import { privateDir } from "./investigation.ts";
 
 /** Largest file written or read. */
@@ -122,6 +123,16 @@ export function parseRecent(text: string): string[] | null {
 }
 
 /** `text` as custom columns, checked as the viewer sets them; null when it isn't a list of those. */
+export function parseTimeFormat(text: string): TimeFormat | null {
+  try {
+    const raw: unknown = JSON.parse(text);
+    return isTimeFormat(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The custom columns in `text`, or null when it isn't a list WireBuddy writes. */
 export function parseColumns(text: string): CustomColumn[] | null {
   let raw: unknown;
   try {

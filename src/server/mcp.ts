@@ -16,6 +16,7 @@ import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, Question, TreeNode } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
+import { timeFormatLabel } from "../shared/timeformat.ts";
 import { framesFilter, inRanges, type Ranges } from "../shared/ranges.ts";
 import { toRanges } from "./export.ts";
 import { VERSION } from "../shared/version.ts";
@@ -414,6 +415,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         lines.push(`Frames: ${s.totalFrames}${s.tail ? " read in full" : ""}, displayed: ${s.displayedFrames}, duration: ${s.duration.toFixed(3)} s`);
         if (s.tail?.frames) lines.push(tailLine(s.totalFrames, s.tail));
         lines.push(`Display filter: ${s.filter || "(none)"}`);
+        if (s.timeFormat !== "relative") lines.push(`The user's Time column shows: ${timeFormatLabel(s.timeFormat).toLowerCase()} (packet rows and the agent's own packet reads show it the same way)`);
         if (s.customColumns.length) lines.push(`Custom columns: ${s.customColumns.map((c) => `${c.title} (${c.field})`).join(", ")}`);
         if (s.selected !== null && s.selected > s.totalFrames) lines.push(`Selected frame (by ${s.selectedBy}): ${s.selected} (provisional: not read in full yet)`);
         else if (s.selected !== null) {

@@ -24,7 +24,8 @@ import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts"
 import type { CapturedObject, ObjectKind } from "./objects.ts";
 import { clashKind } from "./protoclash.ts";
 import { Keeper, type KeptRead } from "./keeper.ts";
-import { MAX_RECENT, parseColumns, parseRecent, readSetting, writeSetting } from "./settings.ts";
+import { timeDigits, timeField, timeText, type TimeFormat } from "../shared/timeformat.ts";
+import { MAX_RECENT, parseColumns, parseRecent, parseTimeFormat, readSetting, writeSetting } from "./settings.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
 import { PacketList, clipRanges, listChanged, type AboutView, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
@@ -265,6 +266,8 @@ export class Viewer extends EventEmitter {
   private baseColumns: string[] = [];
   /** Their formats (%m the number, %i Info). */
   private columnFormats: string[] = [];
+  /** Decimals of the Time column's text as sharkd gave it last: the other time formats have them too. */
+  private timeDigits = 9;
   /** sharkd ftypes of fields, null when unknown; as the extensions of `typesSeq` define them. */
   private readonly fieldTypes = new Map<string, number | null>();
   private typesSeq = 0;
@@ -1128,8 +1131,8 @@ export class Viewer extends EventEmitter {
     const { epoch, columns, customColumns } = this.state;
     return {
       numbering,
-      fetch: (engine, params, refs) => this.framesWithColumns(engine, params, refs),
-      key: [epoch, ...columns, ...customColumns.map((c) => c.field), JSON.stringify(numbering)].join("\u0001"),
+      fetch: (engine, params, refs) => this.framesWithColumns(engine, params, refs, true),
+      key: [epoch, this.state.timeFormat, ...columns, ...customColumns.map((c) => c.field), JSON.stringify(numbering)].join("\u0001"),
     };
   }
 
@@ -1293,9 +1296,15 @@ export class Viewer extends EventEmitter {
   }
 
   /** sharkd "frames" rows with the custom columns appended and the comments of the file; times count from the references `refs` names (see framesWithRefs). */
-  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>, refs: RowRefs = () => []): Promise<PacketRow[]> {
+  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>, refs: RowRefs = () => [], slice = false): Promise<PacketRow[]> {
     const custom = this.state.customColumns;
-    const columns = custom.length ? columnParams(custom.map((c) => c.field)) : null;
+    // The Time column in another format: its field comes first in the second request and replaces sharkd's text
+    const format = this.state.timeFormat;
+    const timeAt = timeField(format) ? this.columnFormats.indexOf("%t") : -1;
+    const fields = [...(timeAt >= 0 ? [timeField(format)!] : []), ...custom.map((c) => c.field)];
+    const columns = fields.length ? columnParams(fields) : null;
+    // A slice lacks the packets before it: a delta from the previous displayed one can't be told in a filtered list
+    const blank = slice && format === "delta-displayed" && !!params.filter;
     // The longer request decides how many rows a part has
     return framesWithRefs(params, refs, async (base) => {
       const [rows, extra] = await Promise.all([
@@ -1303,9 +1312,20 @@ export class Viewer extends EventEmitter {
         // Custom column params replace sharkd's default columns, so they come in a second request
         columns ? engine.call<PacketRow[]>("frames", { ...base, ...columns }) : null,
       ]);
+      // The decimals the Time column has in this capture
+      for (const r of rows) {
+        const digits = timeAt >= 0 ? timeDigits(r.c[timeAt] ?? "") : null;
+        if (digits !== null) {
+          this.timeDigits = digits;
+          break;
+        }
+      }
       return rows.map((r, i) => {
-        const values = extra?.[i]?.num === r.num ? extra[i].c.map(clip) : custom.map(() => "");
-        return { num: r.num, c: [...r.c, ...values], bg: r.bg, fg: r.fg, ...(r.comments ? { cm: r.comments } : {}) };
+        const got = extra?.[i]?.num === r.num ? extra[i].c : null;
+        const values = got ? got.slice(timeAt >= 0 ? 1 : 0).map(clip) : custom.map(() => "");
+        const c = [...r.c];
+        if (timeAt >= 0 && got) c[timeAt] = blank ? "" : timeText(format, got[0] ?? "", this.timeDigits, !slice);
+        return { num: r.num, c: [...c, ...values], bg: r.bg, fg: r.fg, ...(r.comments ? { cm: r.comments } : {}) };
       });
     }, columns ?? {});
   }
@@ -1377,6 +1397,13 @@ export class Viewer extends EventEmitter {
       if (by === "agent") this.notice(customColumns.length ? `Columns: ${customColumns.map((c) => c.title).join(", ")}` : "Removed the custom columns");
       return { ok: true };
     });
+  }
+
+  /** Sets the Time column's display format; rows read again. */
+  setTimeFormat(format: TimeFormat, keep = true): void {
+    if (format === this.state.timeFormat) return;
+    this.store.set({ timeFormat: format, generation: this.state.generation + 1 });
+    if (keep) this.keepSetting("timeformat.json", JSON.stringify(format));
   }
 
   /** The field's display name, e.g. "Status Code" for http.response.code. */
@@ -2355,6 +2382,12 @@ export class Viewer extends EventEmitter {
     const r = await this.setColumns(kept, "user", false);
     if (r.ok) this.events.add("INFO", `Restored the custom columns of the run before: ${this.state.customColumns.map((c) => c.title).join(", ")}`);
     else this.settingsProblem(`The custom columns kept by the run before were not restored: ${r.error}`);
+  }
+
+  /** Brings back the Time column's format kept by the run before. */
+  restoreTimeFormat(): void {
+    const kept = this.readSetting("timeformat.json", parseTimeFormat);
+    if (kept) this.setTimeFormat(kept, false);
   }
 
   private requireFile(): void {

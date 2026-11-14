@@ -72,6 +72,7 @@
  * | GET    | /api/stats/iograph            | ?interval=<ms>&graphs=<JSON IoGraphSpec[]> | IoGraphResult    |
  * | GET    | /api/frame-at                 | ?t=<seconds since first frame>[&until=<seconds>] | { frame: number \| null } |
  * | POST   | /api/columns                  | { columns: CustomColumn[] }          | FilterCheck            |
+ * | POST   | /api/timeformat               | { format: TimeFormat }               | { ok: true }           |
  * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
  * | POST   | /api/decode-as                | DecodeAsChange                       | DecodeAsResult         |
  * | POST   | /api/export                   | ExportRequest                        | ExportResult (400 with code "exists": the file is there, ask before `overwrite`) |
@@ -119,6 +120,7 @@
  */
 
 import type { Ranges } from "./ranges.ts";
+import type { TimeFormat } from "./timeformat.ts";
 
 export interface ApiError {
   error: string;
@@ -194,6 +196,14 @@ export interface ViewState {
   timeRefs: number[];
   /** Grows with every change to the time references, also one undone before the next state: rows and details read differently. */
   timeRefsRevision: number;
+  /**
+   * What the Time column shows (View › Time Display Format): seconds since
+   * the beginning of the capture or the time reference, the default, since
+   * the previous displayed or captured packet, or the time of day (local or
+   * UTC, with or without the date). A change bumps {@link generation}. Kept
+   * across restarts with the custom columns.
+   */
+  timeFormat: TimeFormat;
   /**
    * Packets whose comments were added, edited or deleted in the viewer and
    * not exported since: an export of every packet to pcapng writes them to a

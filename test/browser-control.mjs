@@ -721,6 +721,69 @@ try {
   };
   const detailsRow = (text) => `[...document.querySelectorAll('.dt-row')].find((r) => r.querySelector('.dt-label')?.textContent === ${JSON.stringify(text)})`;
 
+  await check("browser: View › Time Display Format lists the seven formats with the one in use checked, a pick changes the Time column, and the column header's menu offers the same list", async () => {
+    const labels = ["Seconds Since Beginning of Capture", "Seconds Since Previous Displayed Packet", "Seconds Since Previous Captured Packet", "Time of Day", "Date and Time of Day", "UTC Time of Day", "UTC Date and Time of Day"];
+    const time = (frame) => evaluate(`${row(frame)}?.querySelectorAll('.pl-cell')[1]?.textContent`);
+    const formats = () => evaluate(`JSON.stringify([...document.querySelectorAll('.menu-item')].map((m) => m.textContent).filter((t) => ${JSON.stringify(labels)}.includes(t.replace(/^✓/, ''))))`).then(JSON.parse);
+    const exact = (label) => `[...document.querySelectorAll('.menu-item')].find((m) => m.textContent.replace(/^✓/, '') === ${JSON.stringify(label)})`;
+    const choose = async (label) => {
+      await until(label, async () => !!(await box(exact(label))));
+      await click(...center(await box(exact(label))));
+      // A menu title clicked within 300 ms of its menu closing is swallowed (A16)
+      await sleep(400);
+    };
+    let failure = null;
+    let step = "start";
+    // The row-holding hook of an earlier check, if it failed before it let go, must not hold this check's rows
+    await evaluate("window.__held ??= () => {}");
+    try {
+      await until("frame 5's time", async () => (await time(5)) === "0.000055355");
+      assert.equal((await state()).timeFormat, "relative");
+      await fromMenuBar("View", "Time Display Format");
+      step = "1";
+      assert.deepEqual(await formats(), labels.map((l, i) => (i ? l : `✓${l}`)));
+      await choose("Seconds Since Previous Captured Packet");
+      step = "2";
+      await until("the delta", async () => (await time(5)) === "0.000004640");
+      assert.equal((await state()).timeFormat, "delta-captured");
+      assert.equal(await evaluate("document.querySelectorAll('.pl-hcell')[1].textContent"), "Time", "the column keeps its title");
+      assert.match(await viewState(), /The user's Time column shows: seconds since previous captured packet/);
+      await fromMenuBar("View", "Time Display Format");
+      step = "3";
+      assert.deepEqual(await formats(), labels.map((l, i) => (i === 2 ? `✓${l}` : l)));
+      // Escape closes the submenu, then the menu
+      await cleanPage();
+      await cleanPage();
+      // The column header's menu: the same list, the one in use checked
+      const head = center(await box("document.querySelectorAll('.pl-hcell')[1]"));
+      await rightClick(head);
+      step = "4";
+      await until("the header's menu", () => evaluate("!!document.querySelector('.menu')")).catch(async (err) => {
+        throw new Error(`${err.message}; the click at ${head.map(Math.round)} met ${await elementAt(...head)}`);
+      });
+      await pick("Time Display Format");
+      assert.deepEqual(await formats(), labels.map((l, i) => (i === 2 ? `✓${l}` : l)));
+      await choose("UTC Time of Day");
+      step = "5";
+      await until("the time of day", async () => /^\d\d:\d\d:\d\d\.\d{9}$/.test((await time(5)) ?? ""));
+      assert.equal((await time(1)).slice(0, 8), "21:06:03");
+      assert.equal((await state()).timeFormat, "utc-time-of-day");
+      // The Time column fits the longest of the formats, which it did not before
+      await fromMenuBar("View", "Time Display Format");
+      step = "6";
+      await choose("UTC Date and Time of Day");
+      step = "7";
+      await until("the date and time", async () => /^2026-10-26 21:06:03\.\d{9}$/.test((await time(5)) ?? ""));
+      await until("the column to fit", () => evaluate(`(() => { const c = ${row(5)}?.querySelectorAll('.pl-cell')[1]; return !!c && c.scrollWidth <= c.clientWidth; })()`));
+    } catch (err) {
+      failure = new Error(`${err.message} (after: ${step})`);
+    }
+    await cleanPage();
+    await fetch(new URL("/api/timeformat", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: JSON.stringify({ format: "relative" }) });
+    await until("the default again", async () => (await time(5)) === "0.000055355");
+    if (failure) throw failure;
+  });
+
   await check("browser: page errors reach the agent, Chrome's ResizeObserver loop note doesn't", async () => {
     for (const message of ["ResizeObserver loop completed with undelivered notifications.", "a test bug"]) await evaluate(`window.dispatchEvent(new ErrorEvent("error", { message: ${JSON.stringify(message)} }))`);
     let seen = "";

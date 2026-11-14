@@ -43,7 +43,9 @@ The viewer itself works like Wireshark:
 - **Packet list, details and bytes** with Wireshark's menu bar, toolbar and keyboard shortcuts:
   coloring rules, a display filter bar with live validation and field autocompletion, linked tree
   and hex highlighting, custom columns ("Apply as Column"), time references the Time column counts
-  from, Find Packet, packet history, zoom.
+  from, View › Time Display Format (seconds since the beginning of the capture, the previous
+  displayed or the previous captured packet, the time of day or date and time of day, local or UTC;
+  also in the Time column's header menu), Find Packet, packet history, zoom.
 - **Follow Stream** like Wireshark's window (TCP, UDP, TLS, HTTP and more), and **several
   packets selected** with Ctrl+click and Shift+click to mark, copy or export them; the agent sees
   the selection too, so you can ask "what's wrong with these packets?".
@@ -66,7 +68,7 @@ The viewer itself works like Wireshark:
   packet comments edited in the viewer are kept in WireBuddy's data folder and come back when
   you open the capture (or a copy of it) again, also after another capture or a restart; File ›
   Forget Kept Marks and Comments… goes back to what the capture file holds. A restart also
-  keeps the custom columns and the recent files list, and the session token, so that a page open
+  keeps the custom columns, the Time display format and the recent files list, and the session token, so that a page open
   across it reconnects by itself (see Security). It does not keep the display filter, the
   questions to the agent with their answers, Decode As entries or the selected packet.
 - **A findings report:** File › Write Findings Report… (or the agent's `write_findings`) writes
@@ -392,7 +394,7 @@ solution; `solution/ctseries` is the panel.
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, edited packet comments, Decode As entries, capture status, open and offered panels |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, the Time column's display format, edited packet comments, Decode As entries, capture status, open and offered panels |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -534,6 +536,16 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   (GRE, VXLAN, Geneve, IP in IP, an Ethernet pseudowire) come without the start of their own
   connection unless it is among the 2000 or so packets before them, so until read in full they
   read like a capture begun mid-connection (no window scaling, TLS not decrypted).
+- The Time column's other display formats come from sharkd's own fields (`frame.time_delta_displayed`,
+  `frame.time_delta`, `frame.time`, `frame.time_utc`), in the decimals the capture's Time column has.
+  Time references count only for the default format; the delta formats show 0 for the first
+  packet. Provisional rows of a live capture show their time in every format, except since the
+  previous displayed packet while a display filter is set (their cell stays empty until the rows are
+  read in full: a slice of the file can't tell which packet was displayed before it). The agent's
+  own packet reads show the format too, and `get_view_state` says which it is. A single packet's
+  summary row (the selected packet in `get_view_state`, a row of the findings report) is read
+  without the display filter, so "since the previous displayed packet" there means the previous
+  captured one.
 - A time reference the display filter hides stays hidden, while Wireshark lists time references
   whatever the filter; the packets after it count from it all the same, and Next/Previous Time
   Reference go to it. "Open in Wireshark" doesn't take the time references along.

@@ -18,7 +18,6 @@ items, so a gap in the numbering is an item that is done (section E).
 
 | # | Kind | Item | Where it came from |
 |---|---|---|---|
-| A1 | gap | No time display format (seconds since previous packet and the like); the human had to know the field and Apply as Column | case 1 |
 | A2 | gap | Decode As takes free text only: no list of protocols to pick from | case 1 |
 | A3 | gap | The exported capture renumbers packets, so a report's packet numbers don't match it; the original number is not carried along | case 1 |
 | A4 | fix | The agent's `set_columns` replaces the human's own columns | case 1 |
@@ -119,4 +118,6 @@ Released as 0.18.0 (tag `v0.18.0`): everything listed above after 0.17.0.
 After 0.18.0: the waiting line and the Questions dialog say whether the agent has seen a question: "not seen by Claude
 yet" until its event was handed to the agent with a tool result or to the watcher, then "seen · waiting for the
 answer" (A29) · the findings report lists the session's questions about the open capture with their answers, the open
-ones as open (A28).
+ones as open (A28) · View › Time Display Format, also in the Time column's header menu: seconds since the beginning of
+the capture (default), since the previous displayed or captured packet, the time of day and the date and time of day,
+local and UTC, from sharkd's own fields and kept across a restart (A1).

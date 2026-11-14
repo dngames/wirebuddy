@@ -1,5 +1,6 @@
 /** State synchronisation and the actions the UI performs against the server. */
 
+import type { TimeFormat } from "../shared/timeformat.ts";
 import type { CaptureRequest, CustomColumn, DecodeAsChange, DecodeAsResult, ExportRequest, ExportResult, ExtensionList, FilterCheck, FindResult, FrameDetail, Mark, ViewState } from "../shared/api.ts";
 import { leftOutText } from "../shared/ownport.ts";
 import { countRanges, type Ranges } from "../shared/ranges.ts";
@@ -595,6 +596,17 @@ export async function setCustomColumns(columns: CustomColumn[]): Promise<boolean
   } catch (e) {
     toastError(e, "Changing the columns failed");
     return false;
+  }
+}
+
+/** Sets the Time column's display format (View › Time Display Format). */
+export async function setTimeFormat(format: TimeFormat): Promise<void> {
+  if (app.state?.timeFormat === format) return;
+  try {
+    await post("api/timeformat", { format });
+    if (app.conn !== "open") void refreshState();
+  } catch (e) {
+    toastError(e, "Changing the time display format failed");
   }
 }
 
