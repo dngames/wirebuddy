@@ -9,6 +9,9 @@ Panels to copy and adapt, each written against the `wb` API that the panel guide
 | `rtp-video` | H.264 over RTP, depacketized in JavaScript (RFC 6184) and played with WebCodecs; a stream picker, play and seek | `rtp-h264.lua` decodes UDP port 5004 as RTP and payload type 96 as H.264, like Decode As |
 | `lidar-wbpc` | A made-up lidar protocol, `wbpc`, as a point cloud in WebGL2: orbit, zoom, color by intensity, height or ring, scan stepping | `wbpc.lua` decodes UDP port 7502 |
 
+The three open as a window of their `size` (`"dock": false` in their `extension.json`), as a view
+that needs height does; a chart would stay docked.
+
 To try one, copy its folder into `~/.local/share/wirebuddy/extensions/` (not writable by others),
 make a capture for it and open the panel from View › Panels. The capture generators are in a
 clone of the repository, not in the npm package:

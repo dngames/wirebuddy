@@ -73,6 +73,12 @@ wb.ready();
 `,
 );
 
+// A panel that asks for a window in its manifest
+const windowed = join(home, ".local/share/wirebuddy/extensions/windowed/panel");
+mkdirSync(windowed, { recursive: true });
+writeFileSync(join(home, ".local/share/wirebuddy/extensions/windowed/extension.json"), JSON.stringify({ label: "Windowed", version: "1", panel: { title: "Windowed", dock: false } }));
+writeFileSync(join(windowed, "main.js"), "wb.ready();\n");
+
 const offered = join(home, ".local/share/wirebuddy/extensions/offered");
 mkdirSync(join(offered, "panel"), { recursive: true });
 writeFileSync(join(offered, "extension.json"), JSON.stringify({ label: "Offered", version: "1", panel: { offer: { filter: "http.response.code == 404", text: "Show it" } } }));
@@ -468,6 +474,41 @@ try {
     await until("the dock to go", dockPaneHidden);
     await call("panel", { action: "open", name: "clicker", wait_ms: 10_000 });
     await until("the panel", async () => !!(await box("document.querySelector('.panel-frame')")));
+  });
+
+  await check("browser: a panel that asks for a window opens floating, one that does not opens docked, and what the user chose for either wins", async () => {
+    await call("panel", { action: "close", name: "clicker" });
+    await until("the panel to close", () => evaluate("!document.querySelector('.panel-frame')"));
+    const opened = async (name) => {
+      await call("panel", { action: "open", name, wait_ms: 10_000 });
+      await until(`the panel ${name}`, async () => !!(await box("document.querySelector('.panel-frame')")));
+    };
+    const closed = async (name) => {
+      await call("panel", { action: "close", name });
+      await until(`the panel ${name} to close`, () => evaluate("!document.querySelector('.panel-frame')"));
+    };
+    // Its manifest says dock: false: a window of its size, the dock's pane not there
+    await opened("windowed");
+    assert.equal(await dockedNow(), false);
+    assert.equal(await dockPaneHidden(), true);
+    // The user docks it: that choice wins over the manifest the next time
+    await pressUntil(titleButton("Dock"), "Dock", dockedNow);
+    await closed("windowed");
+    await opened("windowed");
+    assert.equal(await dockedNow(), true);
+    // Without the field: docked; floated by the user, it opens floating the next time
+    await closed("windowed");
+    await opened("reader");
+    assert.equal(await dockedNow(), true);
+    await pressUntil(titleButton("Float"), "Float", async () => !(await dockedNow()));
+    await closed("reader");
+    await opened("reader");
+    assert.equal(await dockedNow(), false);
+    // Back to how the checks after it expect them
+    await pressUntil(titleButton("Dock"), "Dock", dockedNow);
+    await closed("reader");
+    await opened("clicker");
+    assert.equal(await dockedNow(), true);
   });
 
   await check("browser: a panel reopens at the size it had when it closed", async () => {

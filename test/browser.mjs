@@ -178,8 +178,6 @@ try {
     const test = await tool("extensions", { action: "test", name });
     assert.match(test, new RegExp(`Panel of "${name}": checks out`), test);
     assert.doesNotMatch(test, /warning:/, test);
-    // The examples are laid out for a window with room, not the dock's wide, short pane: the user has floated them
-    await page.evaluate(`localStorage.setItem("wirebuddy.panel-dock:${name}", "false")`);
     const opened = await tool("panel", { action: "open", name, wait_ms: 15000 });
     assert.match(opened, /ready after \d+ ms\./, opened);
     assert.doesNotMatch(opened, /Errors \[panel output\]/, opened);

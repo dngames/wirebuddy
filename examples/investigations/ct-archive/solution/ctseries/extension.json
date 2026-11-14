@@ -5,6 +5,7 @@
   "panel": {
     "title": "CT series",
     "size": [1000, 660],
+    "dock": false,
     "offer": { "filter": "dicom", "text": "Show the CT series" }
   }
 }
