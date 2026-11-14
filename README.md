@@ -238,7 +238,9 @@ others (its height is remembered), so the list, the panel, the details and the b
 view, and nothing the agent set up in the list is covered. **Float** in its title bar turns it into
 a window over the page, **Dock** puts it back; the choice is remembered per panel. Reload, Maximize
 and Close work either way, and a maximized panel returns to the state it had. A second docked
-panel shares the pane with the first as tabs.
+panel shares the pane with the first as tabs. A panel that needs height (3D, images, video) can
+say `"dock": false` in its manifest and then opens as a window of its `size` the first time; a
+chart stays docked. Your own Float or Dock choice wins over it.
 
 You open panels under **View › Panels** or in Analyze › Extensions. An extension can offer its
 panel for captures it fits (`"offer": {"filter": "rtp", "text": "Play the video"}`): the offer
