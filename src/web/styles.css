@@ -2404,6 +2404,12 @@ input[type="checkbox"] {
   color: var(--text-dim);
 }
 
+/* Conversations and Endpoints: each tab gains " · 12" when its list arrives, and a tab that widens then moves the ones after it away from a click on its way to them */
+.tab-n {
+  min-width: 124px;
+  text-align: center;
+}
+
 .tab:hover:not(.active) {
   background: var(--btn-hover);
 }
@@ -2477,7 +2483,9 @@ input[type="checkbox"] {
 }
 
 .fl-dir {
-  max-width: 400px;
+  /* Its width from the start: the options come with the stream, and a select that widens then pushes "Show data as" 300 px away from a click on its way to it */
+  width: 400px;
+  max-width: 100%;
 }
 
 .fl-stream {
@@ -2534,11 +2542,16 @@ input[type="checkbox"] {
   bottom: 34px;
   z-index: 6000;
   display: flex;
-  flex-direction: column;
+  /* The first toast stays at the corner and later ones stack above it, and one with a button (order -1) sits lowest: a toast coming or going above it must not move its button away from a click */
+  flex-direction: column-reverse;
   align-items: flex-end;
   gap: 6px;
   max-width: min(460px, calc(100vw - 24px));
   pointer-events: none;
+}
+
+.toast-has-action {
+  order: -1;
 }
 
 .toast {

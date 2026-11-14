@@ -73,6 +73,12 @@ wb.ready();
 `,
 );
 
+// A panel that asks for a window in its manifest
+const windowed = join(home, ".local/share/wirebuddy/extensions/windowed/panel");
+mkdirSync(windowed, { recursive: true });
+writeFileSync(join(home, ".local/share/wirebuddy/extensions/windowed/extension.json"), JSON.stringify({ label: "Windowed", version: "1", panel: { title: "Windowed", dock: false } }));
+writeFileSync(join(windowed, "main.js"), "wb.ready();\n");
+
 const offered = join(home, ".local/share/wirebuddy/extensions/offered");
 mkdirSync(join(offered, "panel"), { recursive: true });
 writeFileSync(join(offered, "extension.json"), JSON.stringify({ label: "Offered", version: "1", panel: { offer: { filter: "http.response.code == 404", text: "Show it" } } }));
@@ -468,6 +474,41 @@ try {
     await until("the dock to go", dockPaneHidden);
     await call("panel", { action: "open", name: "clicker", wait_ms: 10_000 });
     await until("the panel", async () => !!(await box("document.querySelector('.panel-frame')")));
+  });
+
+  await check("browser: a panel that asks for a window opens floating, one that does not opens docked, and what the user chose for either wins", async () => {
+    await call("panel", { action: "close", name: "clicker" });
+    await until("the panel to close", () => evaluate("!document.querySelector('.panel-frame')"));
+    const opened = async (name) => {
+      await call("panel", { action: "open", name, wait_ms: 10_000 });
+      await until(`the panel ${name}`, async () => !!(await box("document.querySelector('.panel-frame')")));
+    };
+    const closed = async (name) => {
+      await call("panel", { action: "close", name });
+      await until(`the panel ${name} to close`, () => evaluate("!document.querySelector('.panel-frame')"));
+    };
+    // Its manifest says dock: false: a window of its size, the dock's pane not there
+    await opened("windowed");
+    assert.equal(await dockedNow(), false);
+    assert.equal(await dockPaneHidden(), true);
+    // The user docks it: that choice wins over the manifest the next time
+    await pressUntil(titleButton("Dock"), "Dock", dockedNow);
+    await closed("windowed");
+    await opened("windowed");
+    assert.equal(await dockedNow(), true);
+    // Without the field: docked; floated by the user, it opens floating the next time
+    await closed("windowed");
+    await opened("reader");
+    assert.equal(await dockedNow(), true);
+    await pressUntil(titleButton("Float"), "Float", async () => !(await dockedNow()));
+    await closed("reader");
+    await opened("reader");
+    assert.equal(await dockedNow(), false);
+    // Back to how the checks after it expect them
+    await pressUntil(titleButton("Dock"), "Dock", dockedNow);
+    await closed("reader");
+    await opened("clicker");
+    assert.equal(await dockedNow(), true);
   });
 
   await check("browser: a panel reopens at the size it had when it closed", async () => {
@@ -1485,6 +1526,77 @@ try {
     } finally {
       await evaluate("window.fetch = window.__fetch");
       await cleanPage();
+    }
+  });
+
+  await check("browser: Statistics › Conversations keeps its tabs where they are when a list arrives, so a click on the way to one does not land on the next", async () => {
+    const tabs = () => evaluate("JSON.stringify([...document.querySelectorAll('.dlg-stats .tab')].map((t) => Math.round(t.getBoundingClientRect().left * 10) / 10))").then(JSON.parse);
+    try {
+      // The list answers late, as it does on a big capture
+      await spyFetch({ "api/stats/conv": 1000 });
+      await fromMenuBar("Statistics", "Conversations");
+      await until("the tabs", async () => (await tabs()).length === 5);
+      const computing = await tabs();
+      assert.equal(await evaluate("/ · \\d+/.test(document.querySelector('.dlg-stats .tab.active').textContent)"), false, "the list arrived before the tabs were measured");
+      await until("the count on the tab", () => evaluate("/ · \\d+/.test(document.querySelector('.dlg-stats .tab.active').textContent)"));
+      assert.deepEqual(await tabs(), computing, "the tabs moved when the count arrived");
+    } finally {
+      await unspyFetch();
+      await cleanPage();
+    }
+  });
+
+  await check("browser: Follow Stream keeps the Show data as menu where it is when the stream arrives", async () => {
+    try {
+      await post("/api/select", { frame: 4 });
+      await until("frame 4's details", () => evaluate("document.querySelectorAll('.dt-row').length > 3"));
+      await sleep(400);
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      // The stream answers late
+      await spyFetch({ "api/follow": 1000 });
+      await fromMenu(4, "Follow");
+      await pick("TCP Stream");
+      const mode = "document.querySelector('.dlg-follow .fl-mode')";
+      await until("the dialog", async () => !!(await box(mode)));
+      const loading = await box(mode);
+      assert.equal(await evaluate("!!document.querySelector('.dlg-follow .fl-text span[data-frame]')"), false, "the stream arrived before the menu was measured");
+      await until("the stream", () => evaluate("!!document.querySelector('.dlg-follow .fl-text span[data-frame]')"), 15_000);
+      assert.equal((await box(mode)).left, loading.left, "the Show data as menu moved when the stream arrived");
+    } finally {
+      await unspyFetch();
+      await cleanPage();
+      await post("/api/filter", { filter: "" });
+      await until("no filter", async () => (await state()).filter === "");
+    }
+  });
+
+  await check("browser: a toast with a button stays where it is when another toast comes and goes", async () => {
+    const out = mkdtempSync("/tmp/wirebuddy-toasts-");
+    const setPath = (dlg, p) => evaluate(`(() => { const i = document.querySelector('.${dlg} .ex-path'); i.value = ${JSON.stringify(p)}; i.dispatchEvent(new Event('input')); })()`);
+    const open = "document.querySelector('.toast-action')";
+    try {
+      await fromMenuBar("File", "Export Specified Packets…");
+      await until("the export dialog", async () => !!(await box("document.querySelector('.dlg-export button.primary')")));
+      await setPath("dlg-export", join(out, "toast.pcapng"));
+      await click(...center(await box("document.querySelector('.dlg-export button.primary')")));
+      await until("the export toast with its button", async () => !!(await box(open)));
+      await sleep(400);
+      const alone = await box(open);
+      // A toast without a button comes: the findings report written (not through fromMenuBar, which clears the toasts)
+      await click(...center(await box("[...document.querySelectorAll('.mb-title')].find((b) => b.textContent === 'File')")));
+      await pick("Write Findings Report…");
+      await until("the findings dialog", async () => !!(await box("document.querySelector('.dlg-findings button.primary')")));
+      await setPath("dlg-findings", join(out, "toast.md"));
+      await click(...center(await box("document.querySelector('.dlg-findings button.primary')")));
+      await until("the second toast", async () => /Wrote the findings report/.test(await toasts()));
+      await sleep(400);
+      assert.equal((await box(open)).top, alone.top, "the button moved when the second toast came");
+      // and goes, its 4.5 s gone
+      await until("the second toast gone", async () => !/Wrote the findings report/.test(await toasts()), 15_000);
+      assert.equal((await box(open)).top, alone.top, "the button moved when the second toast went");
+    } finally {
+      await cleanPage();
+      rmSync(out, { recursive: true, force: true });
     }
   });
 

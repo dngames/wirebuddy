@@ -5,6 +5,7 @@
   "panel": {
     "title": "HTTP gallery",
     "size": [760, 560],
+    "dock": false,
     "offer": { "filter": "http.content_type contains \"image/\"", "text": "Show images" }
   }
 }

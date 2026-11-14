@@ -5,6 +5,7 @@
   "panel": {
     "title": "RTP video",
     "size": [720, 540],
+    "dock": false,
     "offer": { "filter": "h264", "text": "Play the video" }
   }
 }

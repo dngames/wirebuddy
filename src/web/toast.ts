@@ -53,7 +53,7 @@ function show(level: "info" | "error", text: string, action?: ToastAction): void
   const last = host.lastElementChild as HTMLElement | null;
   if (last && last.dataset.text === text && !last.classList.contains("out")) last.remove();
 
-  const el = h("div", { class: `toast toast-${level}`, role: level === "error" ? "alert" : "status", data: { text } });
+  const el = h("div", { class: `toast toast-${level}${action ? " toast-has-action" : ""}`, role: level === "error" ? "alert" : "status", data: { text } });
   const remove = (): void => {
     if (el.classList.contains("out")) return;
     el.classList.add("out");

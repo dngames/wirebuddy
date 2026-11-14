@@ -5,6 +5,7 @@
   "panel": {
     "title": "Point cloud",
     "size": [800, 600],
+    "dock": false,
     "params": { "port": 7502 },
     "offer": { "filter": "wbpc", "text": "Show the point cloud" }
   }

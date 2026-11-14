@@ -470,6 +470,8 @@ export interface PanelManifest {
   /** "control": it may set the user's display filter (after a click in it). */
   permissions: string[];
   wasm: boolean;
+  /** Where it opens when the user has not chosen: in the dock (true), or as a window of "size" (false). */
+  dock: boolean;
 }
 
 /** A panel's files as read, and checked, when it opens: all its frame is ever served. */
@@ -1088,7 +1090,9 @@ images or files in the traffic, video, point clouds, maps, a field over time. It
 extension folder, with or without a Lua dissector (topic "lua"), and runs sandboxed on an origin
 of its own: no network, no access to WireBuddy's page or API, only \`wb\`. It opens docked in a pane
 under the packet list, so the user sees both (the user can float it as a window, and "size" is that
-window's size): design for a wide, short area by default, not a tall one.
+window's size): design for a wide, short area by default, not a tall one. A view that needs height (3D,
+images, video) says \`"dock": false\` in "panel" and opens as a window of "size" instead (the user's own
+Float or Dock choice still wins); a chart or a timeline stays docked.
 
 Folder: ${this.dir}/<name>/
   extension.json   {"label": "...", "version": "1", "description": "...",
@@ -1323,6 +1327,7 @@ function panelManifest(value: unknown, label: string): PanelManifest {
   const permissions = p.permissions ?? [];
   if (!Array.isArray(permissions) || !permissions.every((x) => x === "control")) throw new Error('permissions may only list "control"');
   if (p.wasm !== undefined && typeof p.wasm !== "boolean") throw new Error("wasm must be true or false");
+  if (p.dock !== undefined && typeof p.dock !== "boolean") throw new Error("dock must be true or false");
   return {
     title: typeof p.title === "string" && p.title.trim() ? printable(p.title).slice(0, 60) : label,
     size: [num(size[0], 320, 1600, 800), num(size[1], 200, 1200, 560)],
@@ -1330,6 +1335,7 @@ function panelManifest(value: unknown, label: string): PanelManifest {
     offer,
     permissions: [...new Set(permissions as string[])],
     wasm: p.wasm === true,
+    dock: p.dock !== false,
   };
 }
 

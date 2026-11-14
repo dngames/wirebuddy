@@ -138,7 +138,7 @@ export function openConvDialog(kind: Kind, initial = "ipv4"): void {
         return h(
           "button",
           {
-            class: `tab${t === type ? " active" : ""}`,
+            class: `tab tab-n${t === type ? " active" : ""}`,
             role: "tab",
             attrs: { "aria-selected": t === type ? "true" : "false" },
             onclick: () => {
