@@ -401,6 +401,8 @@ export interface Question {
   file: string | null;
   frame: number | null;
   count: number;
+  /** When the agent was handed the question (with a tool result, or by the watcher), null before. Epoch milliseconds. */
+  seenAt: number | null;
   /** What the agent answered, null while it waits. */
   answer: { text: string; at: number } | null;
 }
@@ -411,8 +413,6 @@ export interface AgentNotice {
   /** Epoch milliseconds. */
   at: number;
 }
-  /** When the agent was handed the question (with a tool result, or by the watcher), null before. Epoch milliseconds. */
-  seenAt: number | null;
 
 export interface PacketRow {
   /** Frame number. */

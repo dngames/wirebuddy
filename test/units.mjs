@@ -2493,14 +2493,6 @@ esac
     assert.deepEqual([aboutText(12, 1), aboutText(12, 3), aboutText(null, 0), aboutText(4, 0)], ["frame 12", "3 packets", "", ""]);
   });
 
-  await check("a display filter tests frame.number: found outside quotes, not in other names", () => {
-    for (const f of ["frame.number in {928, 943}", "tcp && frame.number > 10", "!(frame.number==3)"]) assert.equal(usesFrameNumber(f), true, f);
-    for (const f of ["", "tcp.port == 80", 'frame.comment contains "frame.number"', "myframe.number == 1", "frame.number_x == 1", "frame.numbers == 1"]) assert.equal(usesFrameNumber(f), false, f);
-  });
-} finally {
-  rmSync(out, { recursive: true, force: true });
-}
-finish();
   await check("a question is seen once the agent takes its event: all of them, with only the newest events shown, each only the first time", () => {
     const heard = [];
     const log = new EventLog(undefined, undefined, (ids) => heard.push(ids));

@@ -120,3 +120,6 @@ Released as 0.18.0 (tag `v0.18.0`): everything listed above after 0.17.0.
 After 0.18.0: the waiting line and the Questions dialog say whether the agent has seen a question: "not seen by Claude
 yet" until its event was handed to the agent with a tool result or to the watcher, then "seen · waiting for the
 answer" (A29).
+After 0.18.0: the waiting line and the Questions dialog say whether the agent has seen a question: "not seen by Claude
+yet" until its event was handed to the agent with a tool result or to the watcher, then "seen · waiting for the
+answer" (A29).

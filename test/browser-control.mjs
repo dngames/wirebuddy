@@ -872,6 +872,8 @@ try {
     // Not seen until the agent's next tool result carries it; then the line says so
     await until("the waiting line", async () => (await waitLine()) === "Asked Agent about packet 6 · not seen by Agent yet");
     assert.match((await banner(".qb-answer")) ?? "", /Look at frame 9/, "the answer before stays until it is dismissed");
+    await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you about frame 6/));
+    await until("the line says it was seen", async () => (await waitLine()) === "Asked Agent about packet 6 · seen · waiting for the answer");
     // A long answer wraps, in full, and is text: markup in it is not
     const markup = '<b>bold</b> & <img src=x onerror="document.title=1"> ';
     const long = `${markup}${"it keeps going and going and going ".repeat(12)}done`;
@@ -895,6 +897,8 @@ try {
     assert.match(list[1], /packet 6.*Is this the error\?Agent answered: <b>bold<\/b> &/);
     assert.match(list[2], /Wake up\?Agent answered: Look at frame 9/);
     assert.match(list[3], /What is this\?Agent answered: It is a GET request\./);
+    await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you.*And this one\?/));
+    await until("its entry says seen", async () => /And this one\?Seen · waiting for the answer/.test((await items())[0]));
     await until("the unsent one answered", async () => (await call("answer_question", { text: "Same as before." })).text.startsWith("Answered question 4"));
     await until("its answer in the list", async () => /And this one\?Agent answered: Same as before\./.test((await items())[0]));
     // The one about packet 4
@@ -956,8 +960,6 @@ try {
     await until("Add Packet Comment", () => commentBox("Add Packet Comment"));
     await cdp("Input.insertText", { text: "first line\nsecond line" });
     await saveComment();
-    await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you about frame 6/));
-    await until("the line says it was seen", async () => (await waitLine()) === "Asked Agent about packet 6 · seen · waiting for the answer");
     await until("the commented row", () => evaluate(`${row(6)}?.classList.contains('commented') === true`));
     assert.equal(await evaluate(`getComputedStyle(${row(6)}.querySelector('.pl-cm')).display`), "block");
     assert.equal(await evaluate(`${row(6)}.title`), "Comment: first line\nsecond line");
@@ -981,8 +983,6 @@ try {
     const note = "[...document.querySelectorAll('.dlg-export .goto-hint')].at(-1)";
     assert.match(await evaluate(`${note}.textContent`), /^Packet comments go along as edited \(1 packet not exported yet\)/);
     await evaluate(`(() => { const i = document.querySelector('.ex-path'); i.value = ${JSON.stringify(join(home, "x.pcap"))}; i.dispatchEvent(new Event('input')); })()`);
-    await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you.*And this one\?/));
-    await until("its entry says seen", async () => /And this one\?Seen · waiting for the answer/.test((await items())[0]));
     assert.match(await evaluate(`${note}.textContent`), /^pcap holds no packet comments/);
     await closeComment();
     // Delete "…" in the packet list's menu
