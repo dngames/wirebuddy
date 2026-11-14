@@ -117,3 +117,4 @@ the reload's warning names the extension (A42).
 After 0.17.0: a panel opens docked in a pane under the packet list, floats and docks again from its title bar,
 and the choice is kept per panel (A24) · a panel asks for a window with `"dock": false` in its manifest, and the
 examples that need the room do (A44, first part).
+Released as 0.18.0 (tag `v0.18.0`): everything listed above after 0.17.0.

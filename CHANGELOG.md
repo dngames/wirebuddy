@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-14
+
 - The Conversations and Endpoints tabs, the Show data as menu of Follow Stream and a toast's button (Open after an export) no longer move away from a click when a list or stream arrives or another toast comes and goes: the tabs have a fixed width, the direction menu has its full width from the start, and later toasts stack above the first, the ones with a button lowest
 - A panel can ask for a window with `"dock": false` in the `panel` of its extension.json (the user's Float or Dock choice still wins); the point cloud, CT series, RTP video and gallery examples do (the arm's charts stay docked), and the panel guide says when to
 - A page that is open when WireBuddy restarts reconnects by itself: without `--token` the session token is the one the last start made, kept for the user alone in `~/.local/share/wirebuddy/state/token` (delete it for a new one; SECURITY.md says what that changes)
@@ -154,7 +156,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/dngames/wirebuddy/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/dngames/wirebuddy/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/dngames/wirebuddy/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/dngames/wirebuddy/compare/v0.14.1...v0.15.0
