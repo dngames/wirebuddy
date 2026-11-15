@@ -50,6 +50,13 @@ Chrome fails.
 
 The suites are plain Node scripts; `test/harness.mjs` holds what they share: `check` and the closing summary, `sleep`, starting the server, and headless Chrome.
 
+## Open work and standing rules
+
+The list of open work and the rules the product must satisfy are kept as plain text on the
+[`status` branch](https://github.com/dngames/wirebuddy/tree/status): `BACKLOG.md`, `REQUIREMENTS.md`,
+`STATUS.md` and the owner's decisions. Look there before starting on something; bugs and ideas are
+welcome as issues.
+
 ## Guidelines
 
 - Keep the UI dependency-free and the server's dependencies minimal.
