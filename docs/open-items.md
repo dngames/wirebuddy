@@ -121,3 +121,5 @@ capture (default), since the previous displayed or captured packet, the time of 
 and UTC, from sharkd's own fields and kept across a restart (A1) · an error a request brings back sits in the footer's
 free left side, two lines at most with the whole text in its tooltip, so Cancel and OK stay where they are (A46) · a
 docked panel's pane defaults to 35 % of the height available, at most 250 px, and the list gets more of the rest (A44).
+
+Released as 0.19.0 (tag `v0.19.0`): everything listed above after 0.18.0.
