@@ -1,6 +1,7 @@
 # Status
 
-**2026-11-15, 22:36 UTC:** main = `e1037f4` (release 0.19.0, PR 30). Tag `v0.19.0` is to be pushed by the owner. No batch branch in assembly.
+**2026-11-15, 22:36 UTC:** main = `b21f990` (PR 31: the open-items list left docs; before it `e1037f4`, release 0.19.0, PR 30). Tag `v0.19.0`
+goes on `e1037f4` and is to be pushed by the owner, after the fix of B-045 is in (the release runs the same check). No batch branch in assembly.
 
 Working branch `claude/beautiful-noether-f96fnh` = `87035ca`, a merge of main after the squash of PR 30; its
 tree is identical to main's. The branch is not ahead of main in content.
@@ -8,7 +9,7 @@ tree is identical to main's. The branch is not ahead of main in content.
 ## In flight
 | Topic | Session | Branch | State |
 |---|---|---|---|
-| nothing | | | The first status files are drafted; the first real work starts from the backlog |
+| B-045, the live-tail time format check | one implementer | `fix/live-tail-time-format-check` (local) | in work |
 
 ## Who owns which paths
 One orchestrator session owns the status files and every merge. Implementers get one topic each, on their own
@@ -34,6 +35,6 @@ branch, and touch only the paths of their topic.
 - Suites run as an ordinary user, never root: Wireshark loads no Lua plugins for root.
 - These status files are public as plain text on this branch; process documents and their tools stay out of the
   public repository (decision 3, 2026-11-15).
-- Open work is the backlog file, not GitHub issues. 44 items after the first sweep; items B-030 to B-044 are the
+- Open work is the backlog file, not GitHub issues. 45 items; items B-030 to B-044 are the
   owner's points of 2026-11-15 and the branch check.
 - Dependabot pull requests 8 and 9 are open and have not been looked at (B-034).
