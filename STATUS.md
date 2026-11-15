@@ -1,10 +1,11 @@
 # Status
 
 **2026-11-15, 22:36 UTC:** main = `b21f990` (PR 31: the open-items list left docs; before it `e1037f4`, release 0.19.0, PR 30). Tag `v0.19.0`
-goes on `e1037f4` and is to be pushed by the owner, after the fix of B-045 is in (the release runs the same check). No batch branch in assembly.
+is to be pushed by the owner on main's head once the fix of B-045 is in: the release runs the checks of the
+tagged commit, and the version there is still 0.19.0. No batch branch in assembly.
 
-Working branch `claude/beautiful-noether-f96fnh` = `87035ca`, a merge of main after the squash of PR 30; its
-tree is identical to main's. The branch is not ahead of main in content.
+Working branch `claude/beautiful-noether-f96fnh`: a merge of main after the squash of PR 31; its tree is
+identical to main's. The branch is not ahead of main in content.
 
 ## In flight
 | Topic | Session | Branch | State |
