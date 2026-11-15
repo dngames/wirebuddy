@@ -183,9 +183,9 @@ try {
     await until("the other capture in the page", async () => (await state()).file === other);
     await save();
     assert.equal(await evaluate("document.querySelector('.dlg-comment .goto-hint').textContent"), "To packet 7");
-    await until("the reason", () => evaluate("(document.querySelector('.dlg-comment .of-err')?.textContent ?? '').includes('replaced by another')"));
+    await until("the reason", () => evaluate("(document.querySelector('.dlg-comment .dlg-error')?.textContent ?? '').includes('replaced by another')"));
     assert.equal(await evaluate("document.querySelector('.dlg-comment textarea').value"), "this stays");
-    assert.equal(await evaluate("!document.querySelector('.dlg-comment .of-err').hidden"), true);
+    assert.equal(await evaluate("document.querySelector('.dlg-comment .dlg-error').textContent !== ''"), true);
     await shot("comment-kept.png");
     // (The copy has the first capture's kept comment on frame 6, as a copy does; frame 7's is not there)
     assert.equal((await server.api("/api/frame?num=7")).json.row.cm, undefined, "nothing was saved to the other capture");

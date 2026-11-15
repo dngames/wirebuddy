@@ -11,6 +11,7 @@ import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, renameS
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CustomColumn } from "../shared/api.ts";
+import { isTimeFormat, type TimeFormat } from "../shared/timeformat.ts";
 import { privateDir } from "./investigation.ts";
 
 /** Largest file written or read. */
@@ -119,6 +120,16 @@ export function parseRecent(text: string): string[] | null {
     files.push(f);
   }
   return files;
+}
+
+/** `text` as the Time column's display format; null when it isn't one. */
+export function parseTimeFormat(text: string): TimeFormat | null {
+  try {
+    const raw: unknown = JSON.parse(text);
+    return isTimeFormat(raw) ? raw : null;
+  } catch {
+    return null;
+  }
 }
 
 /** `text` as custom columns, checked as the viewer sets them; null when it isn't a list of those. */

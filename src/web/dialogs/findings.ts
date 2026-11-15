@@ -30,11 +30,7 @@ export function openFindingsDialog(): void {
   const browse = h("button", { class: "btn" }, "Browse…");
   const summaryIn = h("textarea", { class: "ask-in", rows: 6, placeholder: "What was asked, what was found, what is still open (Markdown)", attrs: { "aria-label": "Summary" } });
   const listing = h("div", { class: "goto-hint fd-listing" }, "Counting the marked and commented packets…");
-  const err = h("div", { class: "of-err", hidden: true });
-  const showErr = (m: string | null): void => {
-    err.textContent = m ?? "";
-    err.hidden = !m;
-  };
+  const showErr = d.errorLine();
 
   browse.addEventListener("click", () =>
     openFilePicker({
@@ -53,14 +49,13 @@ export function openFindingsDialog(): void {
     h("div", { class: "dlg-field ex-pathrow" }, h("label", null, "Save as:", pathIn), browse),
     h("div", { class: "dlg-field" }, h("label", null, "Summary (optional):", summaryIn)),
     listing,
-    err,
   );
   void get<FindingsSummary>("api/findings").then(
     (r) => {
-      listing.textContent = `The report lists ${count(r.marks, "marked packet", "marked packets")} and ${count(r.commented, "packet with comments", "packets with comments")}, with the capture's filter, Decode As entries and time references.`;
+      listing.textContent = `The report lists ${count(r.marks, "marked packet", "marked packets")}, ${count(r.commented, "packet with comments", "packets with comments")} and ${count(r.questions, "question to the agent", "questions to the agent")}, with the capture's filter, Decode As entries and time references.`;
     },
     () => {
-      listing.textContent = "The report lists the marked packets and the packets with comments.";
+      listing.textContent = "The report lists the marked packets, the packets with comments and the questions to the agent.";
     },
   );
 
@@ -77,7 +72,7 @@ export function openFindingsDialog(): void {
       const req: FindingsRequest = { path, ...(summaryIn.value.trim() ? { summary: summaryIn.value } : {}), ...(overwrite ? { overwrite: true } : {}) };
       const r = await post<FindingsResult>("api/findings", req);
       d.close();
-      toast("info", `Wrote the findings report ${baseName(r.path)} (${fmtSize(r.size)}: ${count(r.marks, "marked packet", "marked packets")}, ${count(r.commented, "packet", "packets")} with comments)`);
+      toast("info", `Wrote the findings report ${baseName(r.path)} (${fmtSize(r.size)}: ${count(r.marks, "marked packet", "marked packets")}, ${count(r.commented, "packet", "packets")} with comments, ${count(r.questions, "question", "questions")})`);
     } catch (e) {
       if (!overwrite && e instanceof HttpError && e.code === "exists") {
         writeBtn.disabled = false;

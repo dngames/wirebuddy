@@ -6,6 +6,7 @@ import { dirname, extname, isAbsolute, join } from "node:path";
 import { TargetExists } from "./export.ts";
 import { cell, codeSpan, quote } from "./markdown.ts";
 import { reaching, writeRefused } from "./permission.ts";
+import type { Question } from "../shared/api.ts";
 
 /** Marked packets and commented packets a report lists; more are counted in one line. */
 export const MAX_LISTED = 2000;
@@ -58,6 +59,8 @@ export interface Findings {
   /** In frame order; only the first MAX_LISTED are written. */
   marks: MarkedPacket[];
   commented: CommentedPacket[];
+  /** The session's questions to the agent about this capture (or about no packets), oldest first, with their answers. */
+  questions: Question[];
   /** Marked and commented packets beyond those given. */
   moreMarks?: number;
   moreCommented?: number;
@@ -67,6 +70,14 @@ const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n =
 
 /** The packet's place in a heading or cell: its number, "provisional" when a live capture hasn't read it in full. */
 const place = (p: { frame: number; provisional: boolean }): string => `${p.frame}${p.provisional ? " (provisional)" : ""}`;
+
+const stamp = (at: number): string => new Date(at).toISOString().replace(/\.\d+Z$/, "Z");
+
+/** What a question was about: "packet 12", "3 packets, the first is packet 12", "" for none. */
+function subject(q: Question): string {
+  if (q.frame === null || q.count <= 0) return "";
+  return q.count === 1 ? `packet ${q.frame}` : `${q.count} packets, the first is packet ${q.frame}`;
+}
 
 /** The report as text: Markdown ending in a newline. Capture text and notes are written escaped (see markdown.ts). */
 export function buildFindings(f: Findings): string {
@@ -107,6 +118,14 @@ export function buildFindings(f: Findings): string {
       out.push(c.comments.map(quote).join("\n>\n"));
     }
     if (moreCommented) out.push("", `${plural(moreCommented, "more packet")} with comments not listed.`);
+  }
+  if (f.questions.length) {
+    out.push("", "## Questions and answers");
+    for (const q of f.questions) {
+      const about = subject(q);
+      out.push("", `### Question ${q.id}${about ? `: ${about}` : ""}`, `Asked by the user on ${stamp(q.at)}:`, quote(q.text), "");
+      out.push(...(q.answer ? [`Answered by the agent on ${stamp(q.answer.at)}:`, quote(q.answer.text)] : ["Open: no answer yet."]));
+    }
   }
   return `${out.join("\n")}\n`;
 }

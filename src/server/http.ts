@@ -21,6 +21,7 @@ import type { Viewer } from "./viewer.ts";
 import type { AboutView } from "./packetlist.ts";
 import type { CaptureRequest, CaptureState, CommentResult, CustomColumn, DecodeAsResult, DirEntry, DirListing, ExportRequest, ExportResult, FilterCheck, FindingsResult, ForgetResult, IoGraphSpec, MarkResult, ObjectKind, ObjectList, ObjectSaveResult, PanelAct, RecentFiles, ServerEvent, TimeRefsChange, ViewerEvent } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
+import { isTimeFormat, TIME_FORMATS, timeFormatLabel, type TimeFormat } from "../shared/timeformat.ts";
 import { leftOutText } from "../shared/ownport.ts";
 import { countRanges, type Ranges } from "../shared/ranges.ts";
 
@@ -135,6 +136,11 @@ export async function startHttp(viewer: Viewer, opts: { port: number; token: str
     "/api/forget": () => viewer.forgetKept(),
     "/api/wireshark": async (_q, b) => ({ ok: true, note: await viewer.openInWireshark(b.frame ?? null) }),
     "/api/columns": (_q, b) => viewer.setColumns(columnList(b.columns), "user"),
+    "/api/timeformat": (_q, b) => {
+      if (!isTimeFormat(b.format)) throw new ApiError(400, "bad-args", `format is one of ${TIME_FORMATS.map((f) => f.id).join(", ")}`);
+      viewer.setTimeFormat(b.format);
+      return ok;
+    },
     "/api/tls": async (_q, b) => (await viewer.setTlsKeylog(b.keylog ? resolve(String(b.keylog)) : null), ok),
     "/api/decode-as": (_q, b) => viewer.decodeAs(b, "user"),
     "/api/export": (_q, b) => viewer.exportPackets(exportRequest(b), "user"),
@@ -373,6 +379,7 @@ const ACTIONS: Record<string, string> = {
   "/api/comments/delete": "Deleting packet comments",
   "/api/comments/clear": "Deleting all packet comments",
   "/api/columns": "Changing the columns",
+  "/api/timeformat": "Changing the time display format",
   "/api/tls": "Setting the TLS key log",
   "/api/decode-as": "Changing Decode As",
   "/api/export": "Exporting packets",
@@ -455,6 +462,8 @@ function userActivity(path: string, b: any, result: unknown, capture: CaptureSta
       if (r && r.ok === false) return { level: "WARNING", text: `The user's columns were rejected: ${r.error ?? "invalid"}` };
       return { level: "INFO", text: "The user changed the custom columns" };
     }
+    case "/api/timeformat":
+      return { level: "INFO", text: `The user's Time column shows ${timeFormatLabel(b.format as TimeFormat).toLowerCase()} now` };
     case "/api/tls":
       return { level: "INFO", text: b.keylog ? `The user set the TLS key log ${String(b.keylog)}` : "The user turned TLS decryption off" };
     case "/api/decode-as": {

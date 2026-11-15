@@ -49,7 +49,6 @@ export function openExportDialog(initial: Which = "displayed"): void {
   const rangeIn = h("input", { type: "text", class: "ex-range", placeholder: "e.g. 1-10,25", spellcheck: false, attrs: { "aria-label": "Packet range" } });
   const pathIn = h("input", { type: "text", class: "ex-path", spellcheck: false, value: defaultPath(file, which), attrs: { "aria-label": "Output file" } });
   const browse = h("button", { class: "btn" }, "Browse…");
-  const err = h("div", { class: "of-err", hidden: true });
   const commentsBox = h("input", { type: "checkbox", checked: true });
   const commentsOpt = h("label", { class: "ex-opt", hidden: marked === 0 }, commentsBox, h("span", null, "Marks and their notes as packet comments"));
   const edits = s.commentEdits;
@@ -64,10 +63,7 @@ export function openExportDialog(initial: Which = "displayed"): void {
     editedNote.classList.toggle("ex-warn", pcap);
   };
 
-  const showErr = (m: string | null): void => {
-    err.textContent = m ?? "";
-    err.hidden = !m;
-  };
+  const showErr = d.errorLine();
 
   const setWhich = (w: Which): void => {
     which = w;
@@ -120,7 +116,6 @@ export function openExportDialog(initial: Which = "displayed"): void {
     h("div", { class: "goto-hint" }, "The format follows the file extension: .pcapng or .pcap."),
     commentsOpt,
     editedNote,
-    err,
   );
   syncComments();
 

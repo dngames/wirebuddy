@@ -20,7 +20,7 @@ const out = mkdtempSync(join(tmpdir(), "wirebuddy-units-"));
 const entry = join(out, "entry.ts");
 writeFileSync(
   entry,
-  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams", "protoclash"].map((m) => `server/${m}`), "shared/isolation"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
+  [...["paneldata", "layers", "wbpk", "sharkd", "export", "objects", "events", "extensions", "trust", "livetail", "timerefs", "decodeas", "panelcheck", "watch", "loopback", "capture", "investigation", "markdown", "findings", "patch", "memory", "viewstore", "edits", "questions", "stale", "packetlist", "enginesession", "filterhints", "permission", "settings", "streams", "protoclash"].map((m) => `server/${m}`), "shared/isolation", "shared/questions", "shared/timeformat"].map((m) => `export * from ${JSON.stringify(join(root, `src/${m}.ts`))};`).join("\n"),
 );
 await build({ entryPoints: [entry], outfile: join(out, "units.mjs"), bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "silent" });
 const { FrameSet, findLayer, parse, Parsed, rawMatch, ApiError, encodePage, Sharkd, SharkdTooLarge, matchingFrames, splitRuns, commentPasses, exportFrames, objectFileName, objectDir, newObjectFolder, writeObject, EventLog, Extensions, slicesPrefix, removeStaleSlices } =
@@ -32,8 +32,10 @@ const { noLuaReason } = await import(join(out, "units.mjs"));
 const { captureFilter, ownTrafficFilter, seesLoopback, Capture } = await import(join(out, "units.mjs"));
 const { frameList } = await import(join(out, "units.mjs"));
 const { markNode } = await import(join(out, "units.mjs"));
-const { withQuestion, openQuestion, answered, openQuestions, aboutText, MAX_QUESTIONS, MAX_QUESTION_SHOWN, MAX_ANSWER } = await import(join(out, "units.mjs"));
+const { withQuestion, openQuestion, answered, openQuestions, aboutText, seen: seenQuestions, MAX_QUESTIONS, MAX_QUESTION_SHOWN, MAX_ANSWER } = await import(join(out, "units.mjs"));
 const { usesFrameNumber } = await import(join(out, "units.mjs"));
+const { waitingState } = await import(join(out, "units.mjs"));
+const { TIME_FORMATS, isTimeFormat, timeField, timeDigits, timeText, parseTimeFormat } = await import(join(out, "units.mjs"));
 const { writeRefused, checkTarget } = await import(join(out, "units.mjs"));
 const { setHint } = await import(join(out, "units.mjs"));
 const { changedFields, patchMessage } = await import(join(out, "units.mjs"));
@@ -1654,6 +1656,7 @@ try {
     summary: "",
     marks: [],
     commented: [],
+    questions: [],
   };
   await check("findings report: a capture with nothing marked or commented is the heading and the facts", () => {
     assert.equal(buildFindings(base), "# Findings: `robot.pcapng`\n\n## Capture\n- File: `/cap/robot.pcapng`\n- 120 packets, 45678 bytes, 12.346 s\n- Written by WireBuddy 1.2.3 on 2026-11-12T10:20:30Z\n");
@@ -1717,6 +1720,45 @@ try {
         "",
       ].join("\n"),
     );
+  });
+  await check("findings report: the questions and answers, in the order asked, open ones as open, as text", () => {
+    const q = (id, extra) => ({ id, at: Date.parse("2026-11-12T09:00:00.789Z") + id * 1000, text: `q${id}`, file: "/cap/robot.pcapng", frame: null, count: 0, seenAt: null, answer: null, ...extra });
+    const text = buildFindings({
+      ...base,
+      questions: [
+        q(1, { frame: 12, count: 1, text: "Why <i>slow</i>?\n# nope", answer: { text: "A [link](http://x.example) & `code`", at: Date.parse("2026-11-12T09:30:00Z") } }),
+        q(2, { frame: 3, count: 3, text: "these | three?" }),
+        q(5, { text: "no packets" }),
+      ],
+    });
+    assert.equal(
+      text.slice(text.indexOf("## Questions and answers")),
+      [
+        "## Questions and answers",
+        "",
+        "### Question 1: packet 12",
+        "Asked by the user on 2026-11-12T09:00:01Z:",
+        "> Why \\<i\\>slow\\</i\\>?",
+        "> \\# nope",
+        "",
+        "Answered by the agent on 2026-11-12T09:30:00Z:",
+        "> A \\[link\\]\\(http\\://x\\.example\\) \\& \\`code\\`",
+        "",
+        "### Question 2: 3 packets, the first is packet 3",
+        "Asked by the user on 2026-11-12T09:00:02Z:",
+        "> these \\| three?",
+        "",
+        "Open: no answer yet.",
+        "",
+        "### Question 5",
+        "Asked by the user on 2026-11-12T09:00:05Z:",
+        "> no packets",
+        "",
+        "Open: no answer yet.",
+        "",
+      ].join("\n"),
+    );
+    assert.ok(!buildFindings(base).includes("Questions"), "no section without questions");
   });
   await check("findings report: a single time reference is named in the singular", () => {
     assert.match(buildFindings({ ...base, timeRefs: [5] }), /\n- Time references: packet 5\n/);
@@ -2490,6 +2532,66 @@ esac
     assert.equal(long.length, MAX_QUESTION_SHOWN);
     assert.ok(long.endsWith("…"));
     assert.deepEqual([aboutText(12, 1), aboutText(12, 3), aboutText(null, 0), aboutText(4, 0)], ["frame 12", "3 packets", "", ""]);
+  });
+
+  await check("a question is seen once the agent takes its event: all of them, with only the newest events shown, each only the first time", () => {
+    const heard = [];
+    const log = new EventLog(undefined, undefined, (ids) => heard.push(ids));
+    log.add("INFO", "the user applied a filter");
+    log.take();
+    assert.deepEqual(heard, [], "no question, nothing to tell");
+    log.add("QUESTION", "one", undefined, 1);
+    log.add("QUESTION", "two", { frames: "x" }, 2);
+    assert.deepEqual(heard, [], "asked is not seen");
+    for (let i = 0; i < 40; i++) log.add("INFO", `filler ${i}`);
+    assert.deepEqual(log.take().filter((e) => e.level === "QUESTION").map((e) => e.text), ["one", "two"]);
+    assert.deepEqual(heard, [[1, 2]]);
+    assert.deepEqual(log.take(), [], "an event that was taken is not taken again");
+    assert.deepEqual(heard, [[1, 2]]);
+    log.add("QUESTION", "three", undefined, 3);
+    assert.ok(!("question" in log.take()[0]), "the id stays in the log");
+    assert.deepEqual(heard, [[1, 2], [3]]);
+    let qs = [1, 2, 3].reduce((list, id) => withQuestion(list, { id, at: id, text: `q${id}`, file: null, frame: null, count: 0 }), []);
+    assert.deepEqual(qs.map((q) => q.seenAt), [null, null, null]);
+    qs = seenQuestions(qs, [1, 3], 500);
+    assert.deepEqual(qs.map((q) => q.seenAt), [500, null, 500]);
+    assert.deepEqual(seenQuestions(qs, [1, 2], 900).map((q) => q.seenAt), [500, 900, 500], "the first time stays");
+    assert.deepEqual(qs.map((q) => q.seenAt), [500, null, 500], "the list given is not changed");
+    const open = (...seenAt) => seenAt.map((s) => ({ seenAt: s }));
+    assert.equal(waitingState(open(null), "Claude"), "not seen by Claude yet");
+    assert.equal(waitingState(open(5), "Claude"), "seen · waiting for the answer");
+    assert.equal(waitingState(open(null, 5, null), "Claude"), "2 not seen by Claude yet");
+    assert.equal(waitingState(open(7, 5), "Claude"), "seen · waiting for the answer");
+  });
+
+  await check("the Time column's formats: the field sharkd gives each, its text in the capture's decimals, a first packet's delta, what is kept", () => {
+    assert.deepEqual(TIME_FORMATS.map((f) => f.id), ["relative", "delta-displayed", "delta-captured", "time-of-day", "date-time", "utc-time-of-day", "utc-date-time"]);
+    assert.deepEqual(TIME_FORMATS.map((f) => timeField(f.id)), [null, "frame.time_delta_displayed", "frame.time_delta", "frame.time", "frame.time", "frame.time_utc", "frame.time_utc"]);
+    assert.deepEqual(["relative", "utc-date-time", "now", 3, null].map(isTimeFormat), [true, true, false, false, false]);
+    assert.deepEqual(["0.000012275", "0.0031", "12", "*REF*", "", "-0.5"].map(timeDigits), [9, 4, null, null, null, 1]);
+    const local = "2026-10-27T02:36:03.801146840+0530";
+    const utc = "2026-10-26T21:06:03.801146840Z";
+    assert.equal(timeText("time-of-day", local, 9, true), "02:36:03.801146840");
+    assert.equal(timeText("date-time", local, 9, true), "2026-10-27 02:36:03.801146840");
+    assert.equal(timeText("utc-time-of-day", utc, 9, true), "21:06:03.801146840");
+    assert.equal(timeText("utc-date-time", utc, 9, true), "2026-10-26 21:06:03.801146840");
+    // Cut, not rounded, to the capture's decimals; none at all for whole seconds
+    assert.equal(timeText("time-of-day", local, 6, true), "02:36:03.801146");
+    assert.equal(timeText("date-time", "2026-10-27T02:36:03.999999999+0530", 3, true), "2026-10-27 02:36:03.999");
+    assert.equal(timeText("utc-time-of-day", utc, 0, true), "21:06:03");
+    assert.equal(timeText("time-of-day", "2026-10-27T02:36:03+0530", 3, true), "02:36:03.000");
+    assert.equal(timeText("delta-captured", "0.000012275", 6, true), "0.000012");
+    assert.equal(timeText("delta-displayed", "3.5", 9, true), "3.500000000");
+    assert.equal(timeText("delta-displayed", "12", 0, true), "12");
+    // No previous packet: 0, unless the rows come from a slice, which may lack the one before
+    assert.equal(timeText("delta-captured", "", 9, true), "0.000000000");
+    assert.equal(timeText("delta-displayed", "", 0, true), "0");
+    assert.equal(timeText("delta-captured", "", 9, false), "");
+    // Text that is no time is no time
+    assert.equal(timeText("time-of-day", "", 9, true), "");
+    assert.equal(timeText("date-time", "Oct 26, 2026", 9, true), "");
+    assert.equal(timeText("delta-captured", "soon", 9, true), "");
+    assert.deepEqual(["\"utc-date-time\"", '"relative"', '"nope"', "utc-date-time", "{}", ""].map(parseTimeFormat), ["utc-date-time", "relative", null, null, null, null]);
   });
 
   await check("a display filter tests frame.number: found outside quotes, not in other names", () => {

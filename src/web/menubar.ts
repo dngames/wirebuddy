@@ -15,6 +15,7 @@ import { conversationFilters } from "./frame.ts";
 import { closeMenus, menuOpen, menuOwner, SEP, showMenu, toggleMenuAt, type MenuItem } from "./menu.ts";
 import { packetCopyItems } from "./packetlist.ts";
 import { panelItems } from "./panels.ts";
+import { timeFormatItems } from "./timeformat.ts";
 import { toastRefused } from "./toast.ts";
 import { baseName, h, IS_MAC, isTextInput, keyLetter } from "./util.ts";
 
@@ -129,7 +130,9 @@ const MENUS: TopMenu[] = [
     key: "V",
     items: () =>
       [
-        ...items("zoomIn", "zoomOut", "zoomNormal", "resizeColumns", "resetLayout", SEP, "expandSubtrees", "collapseSubtrees", "expandAll", "collapseAll", SEP, "colorize", "autoScroll", SEP),
+        ...items("zoomIn", "zoomOut", "zoomNormal", "resizeColumns", "resetLayout"),
+        { label: "Time Display Format", sub: timeFormatItems() },
+        ...items(SEP, "expandSubtrees", "collapseSubtrees", "expandAll", "collapseAll", SEP, "colorize", "autoScroll", SEP),
         { label: "Panels", sub: panelItems() },
         SEP,
         ...items("reload"),

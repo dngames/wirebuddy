@@ -16,6 +16,7 @@ import { leftOutText } from "../shared/ownport.ts";
 import type { ExtensionTest, Viewer } from "./viewer.ts";
 import type { CaptureState, DecodeAsEntry, DecodeAsResult, ExtensionInfo, PacketRow, PhsNode, ProvisionalTail, Question, TreeNode } from "../shared/api.ts";
 import { entryText } from "../shared/decodeas.ts";
+import { timeFormatLabel } from "../shared/timeformat.ts";
 import { framesFilter, inRanges, type Ranges } from "../shared/ranges.ts";
 import { toRanges } from "./export.ts";
 import { VERSION } from "../shared/version.ts";
@@ -414,6 +415,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
         lines.push(`Frames: ${s.totalFrames}${s.tail ? " read in full" : ""}, displayed: ${s.displayedFrames}, duration: ${s.duration.toFixed(3)} s`);
         if (s.tail?.frames) lines.push(tailLine(s.totalFrames, s.tail));
         lines.push(`Display filter: ${s.filter || "(none)"}`);
+        if (s.timeFormat !== "relative") lines.push(`The user's Time column shows: ${timeFormatLabel(s.timeFormat).toLowerCase()} (packet rows and the agent's own packet reads show it the same way)`);
         if (s.customColumns.length) lines.push(`Custom columns: ${s.customColumns.map((c) => `${c.title} (${c.field})`).join(", ")}`);
         if (s.selected !== null && s.selected > s.totalFrames) lines.push(`Selected frame (by ${s.selectedBy}): ${s.selected} (provisional: not read in full yet)`);
         else if (s.selected !== null) {
@@ -931,7 +933,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
   server.registerTool(
     "write_findings",
     {
-      description: "Write the findings report of the open capture to a new Markdown file: your summary, the capture's facts (file, size, display filter, Decode As, time references), a table of the marked packets with their notes, and the packets with comments. Mark and comment the packets that carry the result first (mark_frames, packet_comments): the report lists them. Text from the capture and the notes is written as plain text, never as Markdown.",
+      description: "Write the findings report of the open capture to a new Markdown file: your summary, the capture's facts (file, size, display filter, Decode As, time references), a table of the marked packets with their notes, the packets with comments, and the questions the user asked you about this capture with your answers (answer_question first: a question without one is listed as open). Mark and comment the packets that carry the result first (mark_frames, packet_comments): the report lists them. Text from the capture and the notes is written as plain text, never as Markdown.",
       inputSchema: {
         path: z.string().describe("Absolute path ending in .md; its directory must exist"),
         summary: z.string().optional().describe("Markdown in your own words: what was asked, what was found, the evidence by packet number, what is still open. Written as given, at the top; no control characters but newline and tab"),
@@ -940,7 +942,7 @@ export async function startMcp(viewer: Viewer, ui: Pick<HttpServer, "url" | "vie
     },
     tool(async ({ path, summary, overwrite }) => {
       const r = await viewer.writeFindings({ path, summary, overwrite }, "agent");
-      return `Wrote the findings report (${r.size} bytes: ${r.marks} marked packet${r.marks === 1 ? "" : "s"}, ${r.commented} packet${r.commented === 1 ? "" : "s"} with comments) to ${r.path}`;
+      return `Wrote the findings report (${r.size} bytes: ${r.marks} marked packet${r.marks === 1 ? "" : "s"}, ${r.commented} packet${r.commented === 1 ? "" : "s"} with comments, ${r.questions} question${r.questions === 1 ? "" : "s"}) to ${r.path}`;
     }, true, "view"),
   );
 

@@ -331,6 +331,27 @@ try {
     assert.equal(await evaluate(`${win}.contains(document.activeElement)`), false);
   });
 
+  await check("browser: until a splitter is dragged, the dock's pane is sized for a chart: about 200-240 px of it where the window allows, the list keeps about ten rows, the details and bytes stay readable", async () => {
+    const sizes = () =>
+      evaluate(`(() => { const h = (c) => document.querySelector(c).getBoundingClientRect().height; return JSON.stringify({ dock: h('.pane-dock'), frame: h('.panel-frame'), details: h('.pane-details'), bytes: h('.pane-bytes'), rows: document.querySelector('.pl-scroll').clientHeight / document.querySelector('.pl-row').offsetHeight }); })()`).then(JSON.parse);
+    try {
+      for (const [width, height, chart] of [[1280, 720, [155, 190]], [1440, 900, [210, 235]], [1280, 1000, [210, 235]]]) {
+        await cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+        await until(`the ${width}x${height} layout`, async () => (await evaluate("innerHeight")) === height);
+        await sleep(300);
+        const got = await sizes();
+        const say = `${width}x${height}: ${JSON.stringify(got)}`;
+        assert.ok(got.frame >= chart[0] && got.frame <= chart[1], `chart ${say}`);
+        assert.ok(got.rows >= 9, `list ${say}`);
+        assert.ok(got.details >= 80 && got.bytes >= 60, `details and bytes ${say}`);
+      }
+      // A window with room does not grow the dock beyond what a chart needs
+      assert.ok((await sizes()).dock <= 251, "capped at 250 px");
+    } finally {
+      await cdp("Emulation.clearDeviceMetricsOverride");
+    }
+  });
+
   await check("browser: Float turns a docked panel into a window over the page, Dock puts it back, and its drawing stays", async () => {
     await evaluate("document.querySelector('.panel-frame').__mark = 'same'");
     const runs = storedRuns();
@@ -721,6 +742,69 @@ try {
   };
   const detailsRow = (text) => `[...document.querySelectorAll('.dt-row')].find((r) => r.querySelector('.dt-label')?.textContent === ${JSON.stringify(text)})`;
 
+  await check("browser: View › Time Display Format lists the seven formats with the one in use checked, a pick changes the Time column, and the column header's menu offers the same list", async () => {
+    const labels = ["Seconds Since Beginning of Capture", "Seconds Since Previous Displayed Packet", "Seconds Since Previous Captured Packet", "Time of Day", "Date and Time of Day", "UTC Time of Day", "UTC Date and Time of Day"];
+    const time = (frame) => evaluate(`${row(frame)}?.querySelectorAll('.pl-cell')[1]?.textContent`);
+    const formats = () => evaluate(`JSON.stringify([...document.querySelectorAll('.menu-item')].map((m) => m.textContent).filter((t) => ${JSON.stringify(labels)}.includes(t.replace(/^✓/, ''))))`).then(JSON.parse);
+    const exact = (label) => `[...document.querySelectorAll('.menu-item')].find((m) => m.textContent.replace(/^✓/, '') === ${JSON.stringify(label)})`;
+    const choose = async (label) => {
+      await until(label, async () => !!(await box(exact(label))));
+      await click(...center(await box(exact(label))));
+      // A menu title clicked within 300 ms of its menu closing is swallowed (A16)
+      await sleep(400);
+    };
+    let failure = null;
+    let step = "start";
+    // The row-holding hook of an earlier check, if it failed before it let go, must not hold this check's rows
+    await evaluate("window.__held ??= () => {}");
+    try {
+      await until("frame 5's time", async () => (await time(5)) === "0.000055355");
+      assert.equal((await state()).timeFormat, "relative");
+      await fromMenuBar("View", "Time Display Format");
+      step = "1";
+      assert.deepEqual(await formats(), labels.map((l, i) => (i ? l : `✓${l}`)));
+      await choose("Seconds Since Previous Captured Packet");
+      step = "2";
+      await until("the delta", async () => (await time(5)) === "0.000004640");
+      assert.equal((await state()).timeFormat, "delta-captured");
+      assert.equal(await evaluate("document.querySelectorAll('.pl-hcell')[1].textContent"), "Time", "the column keeps its title");
+      assert.match(await viewState(), /The user's Time column shows: seconds since previous captured packet/);
+      await fromMenuBar("View", "Time Display Format");
+      step = "3";
+      assert.deepEqual(await formats(), labels.map((l, i) => (i === 2 ? `✓${l}` : l)));
+      // Escape closes the submenu, then the menu
+      await cleanPage();
+      await cleanPage();
+      // The column header's menu: the same list, the one in use checked
+      const head = center(await box("document.querySelectorAll('.pl-hcell')[1]"));
+      await rightClick(head);
+      step = "4";
+      await until("the header's menu", () => evaluate("!!document.querySelector('.menu')")).catch(async (err) => {
+        throw new Error(`${err.message}; the click at ${head.map(Math.round)} met ${await elementAt(...head)}`);
+      });
+      await pick("Time Display Format");
+      assert.deepEqual(await formats(), labels.map((l, i) => (i === 2 ? `✓${l}` : l)));
+      await choose("UTC Time of Day");
+      step = "5";
+      await until("the time of day", async () => /^\d\d:\d\d:\d\d\.\d{9}$/.test((await time(5)) ?? ""));
+      assert.equal((await time(1)).slice(0, 8), "21:06:03");
+      assert.equal((await state()).timeFormat, "utc-time-of-day");
+      // The Time column fits the longest of the formats, which it did not before
+      await fromMenuBar("View", "Time Display Format");
+      step = "6";
+      await choose("UTC Date and Time of Day");
+      step = "7";
+      await until("the date and time", async () => /^2026-10-26 21:06:03\.\d{9}$/.test((await time(5)) ?? ""));
+      await until("the column to fit", () => evaluate(`(() => { const c = ${row(5)}?.querySelectorAll('.pl-cell')[1]; return !!c && c.scrollWidth <= c.clientWidth; })()`));
+    } catch (err) {
+      failure = new Error(`${err.message} (after: ${step})`);
+    }
+    await cleanPage();
+    await fetch(new URL("/api/timeformat", ui.origin), { method: "POST", headers: { "X-WireBuddy-Token": token, "content-type": "application/json" }, body: JSON.stringify({ format: "relative" }) });
+    await until("the default again", async () => (await time(5)) === "0.000055355");
+    if (failure) throw failure;
+  });
+
   await check("browser: page errors reach the agent, Chrome's ResizeObserver loop note doesn't", async () => {
     for (const message of ["ResizeObserver loop completed with undelivered notifications.", "a test bug"]) await evaluate(`window.dispatchEvent(new ErrorEvent("error", { message: ${JSON.stringify(message)} }))`);
     let seen = "";
@@ -852,14 +936,14 @@ try {
     const banner = (sel) => evaluate(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); return e && !e.hidden && e.getClientRects().length ? e.textContent : null; })()`);
     const waitLine = () => banner(".qb-wait-text");
     // The two questions the checks before left open
-    await until("the waiting line", async () => (await waitLine()) === "Asked Agent 2 questions · waiting");
+    await until("the waiting line", async () => (await waitLine()) === "Asked Agent 2 questions · seen · waiting for the answer");
     assert.equal(await banner(".qb-answer"), null, "nothing answered yet");
     // The oldest one is answered first
     await call("answer_question", { text: "It is a GET request." });
     await until("the answer", async () => /^Agent answered: It is a GET request\./.test((await banner(".qb-answer")) ?? ""));
     assert.equal(await banner(".qb-asked"), "You asked: What is this?");
     assert.equal(await evaluate("document.querySelector('.qb-asked').title"), "What is this?");
-    await until("one question left waiting", async () => (await waitLine()) === "Asked Agent about packet 4 · waiting");
+    await until("one question left waiting", async () => (await waitLine()) === "Asked Agent about packet 4 · seen · waiting for the answer");
     await call("answer_question", { text: "Look at frame 9", frame: 9 });
     await until("nothing waiting", async () => (await waitLine()) === null);
     await until("the second answer", async () => /Agent answered: Look at frame 9/.test((await banner(".qb-answer")) ?? ""));
@@ -869,8 +953,11 @@ try {
     await until("the question box", () => evaluate("document.activeElement?.classList.contains('ask-in') === true"));
     await cdp("Input.insertText", { text: "Is this the error?" });
     await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-    await until("the waiting line", async () => (await waitLine()) === "Asked Agent about packet 6 · waiting");
+    // Not seen until the agent's next tool result carries it; then the line says so
+    await until("the waiting line", async () => (await waitLine()) === "Asked Agent about packet 6 · not seen by Agent yet");
     assert.match((await banner(".qb-answer")) ?? "", /Look at frame 9/, "the answer before stays until it is dismissed");
+    await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you about frame 6/));
+    await until("the line says it was seen", async () => (await waitLine()) === "Asked Agent about packet 6 · seen · waiting for the answer");
     // A long answer wraps, in full, and is text: markup in it is not
     const markup = '<b>bold</b> & <img src=x onerror="document.title=1"> ';
     const long = `${markup}${"it keeps going and going and going ".repeat(12)}done`;
@@ -890,10 +977,12 @@ try {
     const items = () => evaluate("JSON.stringify([...document.querySelectorAll('.dlg-questions .q-item')].map((e) => e.textContent))").then(JSON.parse);
     await until("four questions", async () => (await items()).length === 4);
     const list = await items();
-    assert.match(list[0], /packet 6.*And this one\?Waiting for an answer/);
+    assert.match(list[0], /packet 6.*And this one\?Not seen by Agent yet/);
     assert.match(list[1], /packet 6.*Is this the error\?Agent answered: <b>bold<\/b> &/);
     assert.match(list[2], /Wake up\?Agent answered: Look at frame 9/);
     assert.match(list[3], /What is this\?Agent answered: It is a GET request\./);
+    await call("get_view_state", {}, (t) => assert.match(t, /QUESTION The user asks you.*And this one\?/));
+    await until("its entry says seen", async () => /And this one\?Seen · waiting for the answer/.test((await items())[0]));
     await until("the unsent one answered", async () => (await call("answer_question", { text: "Same as before." })).text.startsWith("Answered question 4"));
     await until("its answer in the list", async () => /And this one\?Agent answered: Same as before\./.test((await items())[0]));
     // The one about packet 4
@@ -1019,7 +1108,7 @@ try {
     await evaluate("document.activeElement.select()");
     await cdp("Input.insertText", { text: "the user's" });
     await saveComment();
-    await until("the refusal", () => evaluate("document.querySelector('.dlg-comment .of-err')?.textContent === 'The comment changed meanwhile; close this and choose it again'"));
+    await until("the refusal", () => evaluate("document.querySelector('.dlg-comment .dlg-error')?.textContent === 'The comment changed meanwhile; close this and choose it again'"));
     await closeComment();
     assert.match(await viewState(), /^ {2}2: "replaced by the agent"$/m);
     // Within 300 ms of picking from the Edit menu, a press on it is taken for closing it
@@ -1273,7 +1362,7 @@ try {
     writeFileSync(exists, "x");
     const setPath = (p) => evaluate(`(() => { const i = document.querySelector('.ex-path'); i.value = ${JSON.stringify(p)}; i.dispatchEvent(new Event('input')); })()`);
     const exportIt = async () => click(...center(await box("document.querySelector('.dlg-export button.primary')")));
-    const err = () => evaluate("(() => { const e = document.querySelector('.dlg-export .of-err'); return e && !e.hidden ? e.textContent : ''; })()");
+    const err = () => evaluate("(() => { return document.querySelector('.dlg-export .dlg-error')?.textContent ?? ''; })()");
     const open = async () => {
       await post("/api/select", { frame: 4 });
       await until("frame 4 selected", async () => (await state()).selected === 4);
@@ -1525,6 +1614,59 @@ try {
       assert.equal((await box(write)).top, counting.top, "the Write button moved when the count arrived");
     } finally {
       await evaluate("window.fetch = window.__fetch");
+      await cleanPage();
+    }
+  });
+
+  await check("browser: an error a request brings back sits in the footer's free side, so Cancel and the OK button stay where they are (Decode As, Write Findings Report)", async () => {
+    const footer = (dlg) => evaluate(`JSON.stringify({ win: document.querySelector('${dlg}').getBoundingClientRect().toJSON(), buttons: [...document.querySelectorAll('${dlg} .dlg-footer button')].map((b) => [b.textContent, b.getBoundingClientRect().toJSON()]) })`).then(JSON.parse);
+    const errorLine = (dlg) => evaluate(`(() => { const e = document.querySelector('${dlg} .dlg-footer .dlg-error'); return e && JSON.stringify({ text: e.textContent, title: e.title, role: e.getAttribute('role'), height: e.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(e).lineHeight), inFooter: !!e.closest('.dlg-footer-left'), clipped: e.scrollHeight > e.clientHeight }); })()`).then((j) => j && JSON.parse(j));
+    const moves = (a, b) => a.buttons.map(([label, r], i) => [label, r.left - b.buttons[i][1].left, r.top - b.buttons[i][1].top, r.width - b.buttons[i][1].width]).filter(([, ...d]) => d.some((x) => Math.abs(x) > 0.01));
+    const sameSize = (a, b) => a.win.height === b.win.height && a.win.width === b.win.width && a.win.top === b.win.top && a.win.left === b.win.left;
+    try {
+      await evaluate("document.querySelector('.pl-scroll').scrollTop = 0");
+      // Decode As with a misspelt protocol: the longest message of them, two lines
+      await fromMenu(5, "Decode As");
+      await pick("TCP Port 18080");
+      await until("the dialog", () => evaluate("document.activeElement?.classList.contains('da-in') === true"));
+      const dlg = ".dlg-decodeas";
+      const before = await footer(dlg);
+      assert.equal(await errorLine(dlg).then((e) => e.text), "", "no error yet");
+      await evaluate("document.querySelector('.da-in').value = ''");
+      await cdp("Input.insertText", { text: "mtqq" });
+      await click(...center(await box(`document.querySelector('${dlg} button.primary')`)));
+      await until("the error", async () => !!(await errorLine(dlg))?.text);
+      const shown = await errorLine(dlg);
+      assert.match(shown.text, /close matches: mqtt/);
+      assert.deepEqual([shown.title, shown.role, shown.inFooter], [shown.text, "alert", true]);
+      assert.ok(shown.height > shown.lineHeight * 1.5 && shown.height <= shown.lineHeight * 2.01, `two lines: ${JSON.stringify(shown)}`);
+      const after = await footer(dlg);
+      assert.deepEqual(moves(after, before), [], "Cancel or OK moved when the error came");
+      assert.ok(sameSize(before, after), `the dialog changed: ${JSON.stringify([before.win, after.win])}`);
+      // It goes with a new try that works... here, with the dialog closed; the buttons stay while the text is replaced
+      await evaluate("document.querySelector('.da-in').value = ''");
+      await click(...center(await box(`document.querySelector('${dlg} button.primary')`)));
+      await key("Escape", "Escape", 27);
+      await until("the dialog to close", () => evaluate("!document.querySelector('.dlg-decodeas')"));
+
+      // Write Findings Report into a folder that is not there: a short message
+      await fromMenuBar("File", "Write Findings Report…");
+      await until("the count", () => evaluate("/^The report lists /.test(document.querySelector('.dlg-findings .goto-hint')?.textContent ?? '')"));
+      const fd = ".dlg-findings";
+      const first = await footer(fd);
+      await evaluate(`(() => { const i = document.querySelector('.dlg-findings .ex-path'); i.value = ${JSON.stringify(join(home, "nonexistent", "r.md"))}; i.dispatchEvent(new Event('input')); })()`);
+      await click(...center(await box("[...document.querySelectorAll('.dlg-findings .dlg-footer button')].find((b) => b.textContent === 'Write')")));
+      await until("the error", async () => !!(await errorLine(fd))?.text);
+      assert.match((await errorLine(fd)).text, /no such directory/);
+      const second = await footer(fd);
+      assert.deepEqual(moves(second, first), [], "Cancel or Write moved when the error came");
+      assert.ok(sameSize(first, second), `the dialog changed: ${JSON.stringify([first.win, second.win])}`);
+      // A message that is longer than two lines is cut, with all of it in the tooltip
+      await evaluate("(() => { const e = document.querySelector('.dlg-findings .dlg-error'); e.textContent = e.title = 'This is a long message. '.repeat(30); })()");
+      const long = await errorLine(fd);
+      assert.ok(long.height <= long.lineHeight * 2.01 && long.clipped && long.title.length > 600, JSON.stringify(long));
+      assert.deepEqual(moves(await footer(fd), first), []);
+    } finally {
       await cleanPage();
     }
   });

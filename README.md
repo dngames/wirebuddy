@@ -43,7 +43,9 @@ The viewer itself works like Wireshark:
 - **Packet list, details and bytes** with Wireshark's menu bar, toolbar and keyboard shortcuts:
   coloring rules, a display filter bar with live validation and field autocompletion, linked tree
   and hex highlighting, custom columns ("Apply as Column"), time references the Time column counts
-  from, Find Packet, packet history, zoom.
+  from, View › Time Display Format (seconds since the beginning of the capture, the previous
+  displayed or the previous captured packet, the time of day or date and time of day, local or UTC;
+  also in the Time column's header menu), Find Packet, packet history, zoom.
 - **Follow Stream** like Wireshark's window (TCP, UDP, TLS, HTTP and more), and **several
   packets selected** with Ctrl+click and Shift+click to mark, copy or export them; the agent sees
   the selection too, so you can ask "what's wrong with these packets?".
@@ -66,14 +68,16 @@ The viewer itself works like Wireshark:
   packet comments edited in the viewer are kept in WireBuddy's data folder and come back when
   you open the capture (or a copy of it) again, also after another capture or a restart; File ›
   Forget Kept Marks and Comments… goes back to what the capture file holds. A restart also
-  keeps the custom columns and the recent files list, and the session token, so that a page open
+  keeps the custom columns, the Time display format and the recent files list, and the session token, so that a page open
   across it reconnects by itself (see Security). It does not keep the display filter, the
   questions to the agent with their answers, Decode As entries or the selected packet.
 - **A findings report:** File › Write Findings Report… (or the agent's `write_findings`) writes
   what an investigation found as one Markdown file: your or the agent's summary, the capture's
-  facts, a table of the marked packets with their notes, and the packets with comments, in the
-  rules of an export (a new `.md` file); text from the capture is written escaped, so it reads as
-  text and renders as nothing else.
+  facts, a table of the marked packets with their notes, the packets with comments, and the
+  questions you asked the agent about the capture with its answers (the ones still open as open;
+  questions about another capture are left out), in the rules of an export (a new `.md` file);
+  text from the capture, from you and from the agent is written escaped, so it reads as text and
+  renders as nothing else.
 - **Live capture** with traffic sparklines per interface, promiscuous mode, a capture filter
   checked as you type, new files automatically, a ring buffer and stop conditions; the view
   updates about once a second. On a loopback interface or `any`, WireBuddy's own traffic (the
@@ -235,7 +239,9 @@ checks it (`extensions action "test"` finds syntax errors with file and line, an
 
 A panel opens **docked**: it takes a pane of its own under the packet list, with a splitter like the
 others (its height is remembered), so the list, the panel, the details and the bytes are all in
-view, and nothing the agent set up in the list is covered. **Float** in its title bar turns it into
+view, and nothing the agent set up in the list is covered. Until you drag a splitter, the pane takes
+35 % of the height available, at most 250 px: a chart gets about 220 px in a 900 px window, and the
+list keeps about ten rows in one of 720 px. **Float** in its title bar turns it into
 a window over the page, **Dock** puts it back; the choice is remembered per panel. Reload, Maximize
 and Close work either way, and a maximized panel returns to the state it had. A second docked
 panel shares the pane with the first as tabs. A panel that needs height (3D, images, video) can
@@ -309,7 +315,8 @@ choose **Ask Claude about This Packet…** (or **Ask Claude about These N Packet
 goes to Claude with the packet numbers and wakes it if its watch is running (the dialog says
 whether it is); otherwise it comes with Claude's next step. Claude answers in the chat, and with
 `answer_question` in the page: a line under its banner says the question is waiting until it does,
-then the answer takes its place until you dismiss it, and **Tools › Questions to Claude…** (the
+first "not seen by Claude yet", and "seen · waiting for the answer" once Claude was handed the
+question (with a tool result, or by its watch), then the answer takes its place until you dismiss it, and **Tools › Questions to Claude…** (the
 page puts the attached agent's name there and in **Ask … about This Packet…**, "Agent" when it gave
 none) lists this session's questions with their answers (a click selects the packet a question was about).
 
@@ -389,7 +396,7 @@ solution; `solution/ctseries` is the panel.
 | Tool | What it does |
 |---|---|
 | `viewer_url` | URL of the UI to show in the browser pane |
-| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, edited packet comments, Decode As entries, capture status, open and offered panels |
+| `get_view_state` | What the user sees: file, counts, filter, selected frame and selected packets, marks, time references, the Time column's display format, edited packet comments, Decode As entries, capture status, open and offered panels |
 | `open_capture` | Open a capture file in the viewer |
 | `capture_summary` | Protocol hierarchy, top conversations, expert info counts |
 | `query_packets` | Paginated rows for any display filter, or exact field values per packet with `fields` (like `tshark -T fields`) |
@@ -398,7 +405,7 @@ solution; `solution/ctseries` is the panel.
 | `expert_info` | Expert Information grouped by severity and message, with example frames |
 | `io_graph` | Packets/bytes/bits over time for up to 4 filters: peaks, empty stretches, a downsampled series |
 | `export_packets` | Write matching, displayed, marked, selected or ranged packets to a new capture file, with their packet comments as edited and marks as comments (pcapng) |
-| `write_findings` | Write the findings report to a new Markdown file: the agent's summary, the capture's facts, the marked packets with their notes and the packets with comments |
+| `write_findings` | Write the findings report to a new Markdown file: the agent's summary, the capture's facts, the marked packets with their notes, the packets with comments and the user's questions with the answers |
 | `export_objects` | List the files carried in the traffic (HTTP, email, SMB, TFTP, DICOM, FTP), or save them to a new folder |
 | `check_display_filter` | Validate a filter; hints when capture-filter (BPF) syntax was used |
 | `set_display_filter` | Apply a filter in the user's view |
@@ -531,6 +538,16 @@ plugins don't change the results. The capture checks in `npm test` need `dumpcap
   (GRE, VXLAN, Geneve, IP in IP, an Ethernet pseudowire) come without the start of their own
   connection unless it is among the 2000 or so packets before them, so until read in full they
   read like a capture begun mid-connection (no window scaling, TLS not decrypted).
+- The Time column's other display formats come from sharkd's own fields (`frame.time_delta_displayed`,
+  `frame.time_delta`, `frame.time`, `frame.time_utc`), in the decimals the capture's Time column has.
+  Time references count only for the default format; the delta formats show 0 for the first
+  packet. Provisional rows of a live capture show their time in every format, except since the
+  previous displayed packet while a display filter is set (their cell stays empty until the rows are
+  read in full: a slice of the file can't tell which packet was displayed before it). The agent's
+  own packet reads show the format too, and `get_view_state` says which it is. A single packet's
+  summary row (the selected packet in `get_view_state`, a row of the findings report) is read
+  without the display filter, so "since the previous displayed packet" there means the previous
+  captured one.
 - A time reference the display filter hides stays hidden, while Wireshark lists time references
   whatever the filter; the packets after it count from it all the same, and Next/Previous Time
   Reference go to it. "Open in Wireshark" doesn't take the time references along.

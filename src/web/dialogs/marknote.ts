@@ -43,9 +43,9 @@ export function openMarkNoteDialog(): void {
   current = d;
   const subject = count > 1 ? `Mark the ${fmtInt(count)} selected packets` : `Mark packet ${about.frame}`;
   const input = h("input", { type: "text", class: "goto-in", maxLength: MAX_NOTE, value: mark?.note ?? "", attrs: { "aria-label": "Note" } });
-  const err = h("div", { class: "of-err", hidden: true });
+  const showErr = d.errorLine();
   const replaces = mark?.by === "agent" ? ` ${agentName()} marked it; your mark replaces its mark.` : "";
-  d.body.append(h("div", { class: "goto-hint" }, subject), h("div", { class: "dlg-field" }, h("label", null, "Note:", input)), h("div", { class: "goto-hint" }, `Enter saves it.${replaces}`), err);
+  d.body.append(h("div", { class: "goto-hint" }, subject), h("div", { class: "dlg-field" }, h("label", null, "Note:", input)), h("div", { class: "goto-hint" }, `Enter saves it.${replaces}`));
   const save = async (): Promise<void> => {
     if (okBtn.disabled) return;
     okBtn.disabled = true;
@@ -54,8 +54,7 @@ export function openMarkNoteDialog(): void {
       d.close();
       if (app.conn !== "open") void act.refreshState();
     } catch (e) {
-      err.textContent = e instanceof HttpError && e.status === 409 ? act.staleAbout(about) : errorText(e);
-      err.hidden = false;
+      showErr(e instanceof HttpError && e.status === 409 ? act.staleAbout(about) : errorText(e));
     } finally {
       okBtn.disabled = false;
     }

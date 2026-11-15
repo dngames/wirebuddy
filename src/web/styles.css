@@ -2047,6 +2047,24 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+/* The error of a request: two lines are reserved, so the buttons stay where they are */
+.dlg-footer.has-error .dlg-footer-left {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  white-space: normal;
+}
+
+.dlg-error {
+  color: var(--danger);
+  line-height: 15px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
 .dlg-footer-right {
   display: flex;
   flex-wrap: wrap;

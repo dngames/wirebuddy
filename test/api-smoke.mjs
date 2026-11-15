@@ -701,11 +701,11 @@ try {
       await api("/api/timerefs", { frames: [10], on: true });
       const [s3, s12] = [await cellsOf(3), await cellsOf(12)];
       await api("/api/filter", { filter: "http || tcp.flags.syn == 1" });
-      assert.deepEqual((await api("/api/findings")).json, { marks: 2, commented: 2 });
+      assert.deepEqual((await api("/api/findings")).json, { marks: 2, commented: 2, questions: 0 });
 
       const written = await api("/api/findings", { path: file, summary: "## What was found\n\nThe **server** answers `GET /`.\n\n" });
       assert.equal(written.status, 200, JSON.stringify(written.json));
-      assert.deepEqual(Object.keys(written.json).sort(), ["commented", "marks", "path", "size"]);
+      assert.deepEqual(Object.keys(written.json).sort(), ["commented", "marks", "path", "questions", "size"]);
       assert.deepEqual([written.json.path, written.json.marks, written.json.commented], [file, 2, 2]);
       assert.equal(written.json.size, statSync(file).size);
       if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -735,7 +735,7 @@ try {
       assert.equal(lines[at(/^### Packet 9: /) + 2], "> plain");
       // Nothing from the notes or comments is left that Markdown could act on
       for (const raw of ["<script>", "![x](y)", "\n# heading"]) assert.ok(!text.includes(raw), raw);
-      assert.ok(lines.filter((l) => l.startsWith("#")).every((l) => /^(# Findings: |## |### Packet \d+: )/.test(l)), "no heading but the report's own");
+      assert.ok(lines.filter((l) => l.startsWith("#")).every((l) => /^(# Findings: |## |### Packet \d+: |### Question \d+)/.test(l)), "no heading but the report's own");
       assert.deepEqual(readdirSync(dir), ["report.md"], "no temporary file left");
       assert.ok((await api("/api/events/take", {})).json.events.some((e) => e.text === `The user wrote a findings report to ${file}`));
 
@@ -793,7 +793,7 @@ try {
       await api("/api/comments/edit", { frame: 4, index: 0, old: "file four", comment: "four [edited](http://evil.example)" });
       await api("/api/comments", { frames: [6], comment: "added" });
       await api("/api/comments/delete", { frame: 8, index: 0, old: "file eight" });
-      assert.deepEqual((await api("/api/findings")).json, { marks: 0, commented: 3 });
+      assert.deepEqual((await api("/api/findings")).json, { marks: 0, commented: 3, questions: 0 });
       const report = join(dir, "report.md");
       assert.deepEqual((await api("/api/findings", { path: report })).json.commented, 3);
       const lines = readFileSync(report, "utf8").split("\n");
@@ -1555,6 +1555,125 @@ try {
       s = await startOn(own);
       assert.notEqual(s.token, third);
       assert.equal(mode(join(state, "token")), 0o600);
+    } finally {
+      await s.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await check("time display format: each format's first rows against the fixture, in the capture's own precision, with a display filter, time references and a restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wirebuddy-timefmt-"));
+    // The fixture's first packet is at 2026-10-26 21:06:03.801146840 UTC; Kolkata is 5:30 ahead
+    const first = 1793048763801146840n;
+    const clock = (ns, zone) => {
+      const d = new Date(Number(ns / 1_000_000n) + (zone ? 330 * 60_000 : 0)).toISOString();
+      return { date: d.slice(0, 10), time: `${d.slice(11, 19)}.${String(ns % 1_000_000_000n).padStart(9, "0")}` };
+    };
+    const ns = (text) => BigInt(text.replace(".", ""));
+    const own = join(dir, "home");
+    let s = await keptServer(own, { TZ: "Asia/Kolkata" });
+    const rowsAt = async (count = 29) => {
+      const st = (await s.api("/api/state")).json;
+      return (await s.api(`/api/rows?gen=${st.generation}&start=0&count=${count}`)).json.rows;
+    };
+    const times = async () => (await rowsAt()).map((r) => r.c[1]);
+    try {
+      assert.equal((await s.api("/api/open", { path: fixture })).status, 200);
+      let st = (await s.api("/api/state")).json;
+      assert.equal(st.timeFormat, "relative");
+      const plain = await rowsAt();
+      const rel = plain.map((r) => ns(r.c[1]));
+      assert.equal(plain[0].c[1], "0.000000000");
+      const columns = st.columns;
+
+      // A format is one of the seven, and a change reads the rows again, the same frames
+      assert.equal((await s.api("/api/timeformat", { format: "yesterday" })).status, 400);
+      assert.equal((await s.api("/api/timeformat", {})).status, 400);
+      const [gen, since] = [st.generation, st.rowsSince];
+      assert.equal((await s.api("/api/timeformat", { format: "delta-captured" })).status, 200);
+      st = (await s.api("/api/state")).json;
+      assert.deepEqual([st.timeFormat, st.generation > gen, st.rowsSince], ["delta-captured", true, since]);
+      assert.deepEqual(st.columns, columns, "the Time column keeps its title");
+      const setAgain = st.generation;
+      await s.api("/api/timeformat", { format: "delta-captured" });
+      assert.equal((await s.api("/api/state")).json.generation, setAgain, "the same format changes nothing");
+      const fmt = (n) => `${n / 1_000_000_000n}.${String(n % 1_000_000_000n).padStart(9, "0")}`;
+      let rows = await rowsAt();
+      assert.deepEqual(rows.slice(0, 6).map((r) => r.c[1]), [0n, ...rel.slice(1, 6).map((t, i) => t - rel[i])].map(fmt));
+      // Only the Time cell differs
+      assert.deepEqual(rows.map((r) => r.c.filter((_, j) => j !== 1)), plain.map((r) => r.c.filter((_, j) => j !== 1)));
+
+      // The time of day and the date, local (the server's zone) and UTC
+      const expect = {
+        "time-of-day": (t) => clock(first + t, true).time,
+        "date-time": (t) => `${clock(first + t, true).date} ${clock(first + t, true).time}`,
+        "utc-time-of-day": (t) => clock(first + t, false).time,
+        "utc-date-time": (t) => `${clock(first + t, false).date} ${clock(first + t, false).time}`,
+      };
+      for (const [format, want] of Object.entries(expect)) {
+        await s.api("/api/timeformat", { format });
+        assert.deepEqual((await rowsAt()).slice(0, 6).map((r) => r.c[1]), rel.slice(0, 6).map(want), format);
+      }
+      assert.equal((await times())[0], "2026-10-26 21:06:03.801146840", "UTC date and time");
+      await s.api("/api/timeformat", { format: "date-time" });
+      assert.equal((await times())[0], "2026-10-27 02:36:03.801146840", "local date and time moved to the next day");
+
+      // Since the previous displayed packet: the filter decides which one that is, and a page that starts later knows
+      await s.api("/api/timeformat", { format: "delta-displayed" });
+      assert.deepEqual((await times()).slice(0, 3), ["0.000000000", "0.000012275", "0.000007635"], "unfiltered, the previous captured one");
+      assert.equal((await s.api("/api/filter", { filter: "http" })).json.ok, true);
+      st = (await s.api("/api/state")).json;
+      const shown = plain.filter((r) => [4, 12, 21, 25].includes(r.num));
+      rows = (await s.api(`/api/rows?gen=${st.generation}&start=0&count=4`)).json.rows;
+      assert.deepEqual(rows.map((r) => r.num), [4, 12, 21, 25]);
+      const want = shown.map((r, i) => fmt(i ? ns(r.c[1]) - ns(shown[i - 1].c[1]) : 0n));
+      assert.deepEqual(rows.map((r) => r.c[1]), want);
+      assert.deepEqual((await s.api(`/api/rows?gen=${st.generation}&start=2&count=2`)).json.rows.map((r) => r.c[1]), want.slice(2));
+      assert.equal((await s.api("/api/filter", { filter: "" })).json.ok, true);
+
+      // Time references change what counts from the reference only: the other formats don't see them
+      await s.api("/api/timeformat", { format: "relative" });
+      await s.api("/api/timerefs", { frames: [4], on: true });
+      assert.equal((await times())[3], "*REF*");
+      for (const format of ["delta-captured", "delta-displayed", "utc-time-of-day"]) {
+        await s.api("/api/timeformat", { format });
+        const now = await times();
+        assert.ok(!now.includes("*REF*"), format);
+        assert.equal(now[4], format === "utc-time-of-day" ? clock(first + rel[4], false).time : fmt(rel[4] - rel[3]), format);
+      }
+      // The frame the details show keeps its own times, whatever the column shows
+      assert.ok(!(await s.api("/api/frame?num=5")).json.row.c[1].includes("*REF*"));
+      await s.api("/api/timerefs/clear", {});
+
+      // The event the agent hears, and a restart that keeps the choice with the columns
+      await s.api("/api/timeformat", { format: "utc-date-time" });
+      assert.ok((await eventsSince(s, 0)).includes("INFO The user's Time column shows utc date and time of day now"));
+      await s.stop();
+      s = await keptServer(own, { TZ: "Asia/Kolkata" });
+      await waitFor("the format", async () => (await s.api("/api/state")).json.timeFormat === "utc-date-time");
+      assert.equal((await s.api("/api/open", { path: fixture })).status, 200);
+      assert.equal((await times())[0], "2026-10-26 21:06:03.801146840");
+      await s.api("/api/timeformat", { format: "relative" });
+      await s.stop();
+      s = await keptServer(own);
+      assert.equal((await s.api("/api/state")).json.timeFormat, "relative");
+      await s.stop();
+      // A file that doesn't check out is ignored, the agent told
+      writeFileSync(join(own, ".local/share/wirebuddy/state/timeformat.json"), '"tomorrow"', { mode: 0o600 });
+      s = await keptServer(own);
+      await waitFor("the warning", async () => (await eventsSince(s, 0)).some((t) => t.startsWith("WARNING ") && t.includes("timeformat.json is not what WireBuddy writes there")));
+      assert.equal((await s.api("/api/state")).json.timeFormat, "relative");
+
+      // A capture with microseconds shows microseconds in every format, as its Time column does
+      const micro = join(dir, "micro.pcap");
+      execFileSync("editcap", ["-F", "pcap", fixture, micro]);
+      assert.equal((await s.api("/api/open", { path: micro })).status, 200);
+      assert.match((await times())[1], /^0\.0000\d{2}$/);
+      for (const format of ["delta-captured", "utc-time-of-day", "date-time"]) {
+        await s.api("/api/timeformat", { format });
+        assert.ok((await times()).every((t) => /\.\d{6}$/.test(t)), `${format}: ${(await times()).slice(0, 3)}`);
+      }
+      assert.equal((await times())[0], "2026-10-26 21:06:03.801146", "this server has the zone of the test, UTC here");
     } finally {
       await s.stop();
       rmSync(dir, { recursive: true, force: true });

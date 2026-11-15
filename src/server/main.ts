@@ -131,6 +131,7 @@ try {
 const tlsKeylog = values["tls-keylog"];
 if (tlsKeylog) await viewer.setTlsKeylog(resolve(tlsKeylog)).catch((err) => log(`TLS key log: ${(err as Error).message}`));
 else void viewer.loadTlsPreference();
+viewer.restoreTimeFormat();
 void viewer.restoreColumns();
 
 // An empty token would let anyone on this machine in

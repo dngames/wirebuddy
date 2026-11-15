@@ -72,6 +72,7 @@
  * | GET    | /api/stats/iograph            | ?interval=<ms>&graphs=<JSON IoGraphSpec[]> | IoGraphResult    |
  * | GET    | /api/frame-at                 | ?t=<seconds since first frame>[&until=<seconds>] | { frame: number \| null } |
  * | POST   | /api/columns                  | { columns: CustomColumn[] }          | FilterCheck            |
+ * | POST   | /api/timeformat               | { format: TimeFormat }               | { ok: true }           |
  * | POST   | /api/tls                      | { keylog: string \| null }           | { ok: true }           |
  * | POST   | /api/decode-as                | DecodeAsChange                       | DecodeAsResult         |
  * | POST   | /api/export                   | ExportRequest                        | ExportResult (400 with code "exists": the file is there, ask before `overwrite`) |
@@ -119,6 +120,7 @@
  */
 
 import type { Ranges } from "./ranges.ts";
+import type { TimeFormat } from "./timeformat.ts";
 
 export interface ApiError {
   error: string;
@@ -194,6 +196,14 @@ export interface ViewState {
   timeRefs: number[];
   /** Grows with every change to the time references, also one undone before the next state: rows and details read differently. */
   timeRefsRevision: number;
+  /**
+   * What the Time column shows (View › Time Display Format): seconds since
+   * the beginning of the capture or the time reference, the default, since
+   * the previous displayed or captured packet, or the time of day (local or
+   * UTC, with or without the date). A change bumps {@link generation}. Kept
+   * across restarts with the custom columns.
+   */
+  timeFormat: TimeFormat;
   /**
    * Packets whose comments were added, edited or deleted in the viewer and
    * not exported since: an export of every packet to pcapng writes them to a
@@ -401,6 +411,8 @@ export interface Question {
   file: string | null;
   frame: number | null;
   count: number;
+  /** When the agent was handed the question (with a tool result, or by the watcher), null before. Epoch milliseconds. */
+  seenAt: number | null;
   /** What the agent answered, null while it waits. */
   answer: { text: string; at: number } | null;
 }
@@ -794,6 +806,8 @@ export interface FindingsSummary {
   marks: number;
   /** Packets with comments, as the viewer shows them: edited here, else the file's (packets read in full). */
   commented: number;
+  /** Questions to the agent about this capture, answered or not. */
+  questions: number;
 }
 
 export interface FindingsResult {
@@ -802,6 +816,8 @@ export interface FindingsResult {
   marks: number;
   /** Packets with comments written out. */
   commented: number;
+  /** Questions to the agent written out. */
+  questions: number;
   size: number;
 }
 

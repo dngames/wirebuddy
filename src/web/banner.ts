@@ -2,6 +2,7 @@
 
 import type { AgentNotice, Question } from "../shared/api.ts";
 import { agentName, app, bus } from "./app.ts";
+import { waitingState } from "../shared/questions.ts";
 import { aboutPackets, openQuestionsDialog } from "./dialogs/questions.ts";
 import { icon } from "./icons.ts";
 import { fmtAgo, h, load, save, setText, setTitle } from "./util.ts";
@@ -79,7 +80,7 @@ export function createQuestionBanner(): HTMLElement {
     waitLink.hidden = !answer.hidden;
     if (open.length) {
       const about = aboutPackets(open[open.length - 1]);
-      setText(waitText, `Asked ${agentName()}${open.length > 1 ? ` ${open.length} questions` : about ? ` about ${about}` : ""} · waiting`);
+      setText(waitText, `Asked ${agentName()}${open.length > 1 ? ` ${open.length} questions` : about ? ` about ${about}` : ""} · ${waitingState(open, agentName())}`);
     }
     if (latest && showAnswer) {
       setText(who, `${agentName()} answered: `);

@@ -11,7 +11,7 @@ import { EngineSession, RESTART_WAIT_MS, type LoadResult, type RollBack, type Sh
 import { checkTarget, exportFrames, parseRange, toRanges, type FrameComments } from "./export.ts";
 import { commentAt, commentText, displayedMarks, EDIT_LIMITS, Edits, frameList, markNode, marksWith, marksWithout, MAX_COMMENTED, refsChange, refsWith, toggledMarks, toggledRefs, usesFrameNumber } from "./edits.ts";
 import { EventLog, ReportedError } from "./events.ts";
-import { aboutText, answered, openQuestion, withQuestion } from "./questions.ts";
+import { aboutText, answered, openQuestion, seen, withQuestion } from "./questions.ts";
 import { otherCapture } from "../shared/questions.ts";
 import { setHint } from "./filterhints.ts";
 import { buildFindings, checkReportTarget, MAX_LISTED, writeReport, type CommentedPacket, type MarkedPacket, type RowSummary } from "./findings.ts";
@@ -24,7 +24,8 @@ import { ApiError, FrameSet, PanelData, type PanelSource } from "./paneldata.ts"
 import type { CapturedObject, ObjectKind } from "./objects.ts";
 import { clashKind } from "./protoclash.ts";
 import { Keeper, type KeptRead } from "./keeper.ts";
-import { MAX_RECENT, parseColumns, parseRecent, readSetting, writeSetting } from "./settings.ts";
+import { timeDigits, timeField, timeText, type TimeFormat } from "../shared/timeformat.ts";
+import { MAX_RECENT, parseColumns, parseRecent, parseTimeFormat, readSetting, writeSetting } from "./settings.ts";
 import { LuaErrors } from "./luaerrors.ts";
 import { PanelOffers } from "./offers.ts";
 import { PacketList, clipRanges, listChanged, type AboutView, rowOf, rowSelection, startsWith, type ListView } from "./packetlist.ts";
@@ -186,6 +187,7 @@ export class Viewer extends EventEmitter {
   readonly events = new EventLog(
     (pending) => this.store.set({ agent: { ...this.state.agent, pending } }),
     (watching) => this.store.set({ agent: { ...this.state.agent, watching } }),
+    (ids) => this.store.set({ questions: seen(this.state.questions, ids, Date.now()) }),
   );
   /** The frames the display filter shows, and which row is which frame. */
   private readonly list = new PacketList();
@@ -264,6 +266,8 @@ export class Viewer extends EventEmitter {
   private baseColumns: string[] = [];
   /** Their formats (%m the number, %i Info). */
   private columnFormats: string[] = [];
+  /** Decimals of the Time column's text as sharkd gave it last: the other time formats have them too. */
+  private timeDigits = 9;
   /** sharkd ftypes of fields, null when unknown; as the extensions of `typesSeq` define them. */
   private readonly fieldTypes = new Map<string, number | null>();
   private typesSeq = 0;
@@ -1127,8 +1131,8 @@ export class Viewer extends EventEmitter {
     const { epoch, columns, customColumns } = this.state;
     return {
       numbering,
-      fetch: (engine, params, refs) => this.framesWithColumns(engine, params, refs),
-      key: [epoch, ...columns, ...customColumns.map((c) => c.field), JSON.stringify(numbering)].join("\u0001"),
+      fetch: (engine, params, refs) => this.framesWithColumns(engine, params, refs, true),
+      key: [epoch, this.state.timeFormat, ...columns, ...customColumns.map((c) => c.field), JSON.stringify(numbering)].join("\u0001"),
     };
   }
 
@@ -1292,9 +1296,15 @@ export class Viewer extends EventEmitter {
   }
 
   /** sharkd "frames" rows with the custom columns appended and the comments of the file; times count from the references `refs` names (see framesWithRefs). */
-  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>, refs: RowRefs = () => []): Promise<PacketRow[]> {
+  private async framesWithColumns(engine: Sharkd, params: Record<string, unknown>, refs: RowRefs = () => [], slice = false): Promise<PacketRow[]> {
     const custom = this.state.customColumns;
-    const columns = custom.length ? columnParams(custom.map((c) => c.field)) : null;
+    // The Time column in another format: its field comes first in the second request and replaces sharkd's text
+    const format = this.state.timeFormat;
+    const timeAt = timeField(format) ? this.columnFormats.indexOf("%t") : -1;
+    const fields = [...(timeAt >= 0 ? [timeField(format)!] : []), ...custom.map((c) => c.field)];
+    const columns = fields.length ? columnParams(fields) : null;
+    // A slice lacks the packets before it: a delta from the previous displayed one can't be told in a filtered list
+    const blank = slice && format === "delta-displayed" && !!params.filter;
     // The longer request decides how many rows a part has
     return framesWithRefs(params, refs, async (base) => {
       const [rows, extra] = await Promise.all([
@@ -1302,9 +1312,20 @@ export class Viewer extends EventEmitter {
         // Custom column params replace sharkd's default columns, so they come in a second request
         columns ? engine.call<PacketRow[]>("frames", { ...base, ...columns }) : null,
       ]);
+      // The decimals the Time column has in this capture
+      for (const r of rows) {
+        const digits = timeAt >= 0 ? timeDigits(r.c[timeAt] ?? "") : null;
+        if (digits !== null) {
+          this.timeDigits = digits;
+          break;
+        }
+      }
       return rows.map((r, i) => {
-        const values = extra?.[i]?.num === r.num ? extra[i].c.map(clip) : custom.map(() => "");
-        return { num: r.num, c: [...r.c, ...values], bg: r.bg, fg: r.fg, ...(r.comments ? { cm: r.comments } : {}) };
+        const got = extra?.[i]?.num === r.num ? extra[i].c : null;
+        const values = got ? got.slice(timeAt >= 0 ? 1 : 0).map(clip) : custom.map(() => "");
+        const c = [...r.c];
+        if (timeAt >= 0 && got) c[timeAt] = blank ? "" : timeText(format, got[0] ?? "", this.timeDigits, !slice);
+        return { num: r.num, c: [...c, ...values], bg: r.bg, fg: r.fg, ...(r.comments ? { cm: r.comments } : {}) };
       });
     }, columns ?? {});
   }
@@ -1376,6 +1397,13 @@ export class Viewer extends EventEmitter {
       if (by === "agent") this.notice(customColumns.length ? `Columns: ${customColumns.map((c) => c.title).join(", ")}` : "Removed the custom columns");
       return { ok: true };
     });
+  }
+
+  /** Sets the Time column's display format; rows read again. */
+  setTimeFormat(format: TimeFormat, keep = true): void {
+    if (format === this.state.timeFormat) return;
+    this.store.set({ timeFormat: format, generation: this.state.generation + 1 });
+    if (keep) this.keepSetting("timeformat.json", JSON.stringify(format));
   }
 
   /** The field's display name, e.g. "Status Code" for http.response.code. */
@@ -1793,7 +1821,7 @@ export class Viewer extends EventEmitter {
     const listed = framesFilter(frames, MAX_QUESTION_FRAMES) ?? `frames ${frames[0][0]} to ${frames[frames.length - 1][1]} (too many ranges to list)`;
     const woken = this.events.watched();
     const id = this.recordQuestion(text, about?.view.file ?? this.state.file, frames[0]?.[0] ?? null, count);
-    this.events.add("QUESTION", `The user asks you${subject} (${answerHow(id)}): ${text}`, count > 1 ? { frames: listed } : undefined);
+    this.events.add("QUESTION", `The user asks you${subject} (${answerHow(id)}): ${text}`, count > 1 ? { frames: listed } : undefined, id);
     return { woken };
   }
 
@@ -1904,7 +1932,7 @@ export class Viewer extends EventEmitter {
       const id = this.recordQuestion(held ? `Held Now for ${secs}` : "Pressed Now", left ? null : path, frames[0] ?? null, held && spanned ? spanned : frames.length ? 1 : 0);
       this.events.add("QUESTION", `The user ${held ? `held Now for ${secs}` : "pressed Now"} in the live capture, without words (${answerHow(id)}): what happened ${held ? "then" : "just before"}? ${where}`, {
         filter: `frame.time_epoch >= ${(Math.floor(from * 1000) / 1000).toFixed(3)} && frame.time_epoch <= ${(Math.ceil(end * 1000) / 1000).toFixed(3)}`,
-      });
+      }, id);
     }
     return { frames, about, commented: commented.length, held: held > 0, agent, woken };
   }
@@ -2193,7 +2221,12 @@ export class Viewer extends EventEmitter {
   async findingsSummary(): Promise<FindingsSummary> {
     this.requireFile();
     const { marks, commented } = await this.findingsFrames();
-    return { marks: marks.length, commented: commented.length };
+    return { marks: marks.length, commented: commented.length, questions: this.reportQuestions().length };
+  }
+
+  /** The questions a findings report lists: those about the open capture, or about no packets; not the ones about another capture. */
+  private reportQuestions(): Question[] {
+    return this.state.questions.filter((q) => !otherCapture(q, this.state.file));
   }
 
   /** What the packet list shows of frame `num`: its time, source, destination, protocol and info. */
@@ -2235,6 +2268,7 @@ export class Viewer extends EventEmitter {
     this.edits.sameCapture(capture);
     if (this.state.file !== input) throw new StaleGenerationError("the capture was closed or another one opened meanwhile");
     const s = this.state;
+    const questions = this.reportQuestions();
     const text = buildFindings({
       name: basename(input),
       path: input,
@@ -2250,6 +2284,7 @@ export class Viewer extends EventEmitter {
       summary,
       marks: markedOut,
       commented: commentedOut,
+      questions,
       moreMarks: marks.length - markedOut.length,
       moreCommented: commented.length - listed.length,
     });
@@ -2258,7 +2293,7 @@ export class Viewer extends EventEmitter {
       this.agentExports.add(resolve(path));
       this.notice(`Wrote a findings report to ${path}`);
     }
-    return { path, marks: marks.length, commented: commentedOut.length, size };
+    return { path, marks: marks.length, commented: commentedOut.length, questions: questions.length, size };
   }
 
   async follow(proto: string, filter: string, limit = FOLLOW_LIMIT): Promise<FollowResult> {
@@ -2347,6 +2382,12 @@ export class Viewer extends EventEmitter {
     const r = await this.setColumns(kept, "user", false);
     if (r.ok) this.events.add("INFO", `Restored the custom columns of the run before: ${this.state.customColumns.map((c) => c.title).join(", ")}`);
     else this.settingsProblem(`The custom columns kept by the run before were not restored: ${r.error}`);
+  }
+
+  /** Brings back the Time column's format kept by the run before. */
+  restoreTimeFormat(): void {
+    const kept = this.readSetting("timeformat.json", parseTimeFormat);
+    if (kept) this.setTimeFormat(kept, false);
   }
 
   private requireFile(): void {

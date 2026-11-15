@@ -23,7 +23,7 @@ const MAX_KEPT_QUESTIONS = 100;
 export class ReportedError extends Error {}
 
 export class EventLog {
-  private events: (ViewerEvent & { at: number })[] = [];
+  private events: (ViewerEvent & { at: number; question?: number })[] = [];
   private seq = 0;
   /** Seq of the last event the agent has seen. */
   private seen = 0;
@@ -36,11 +36,13 @@ export class EventLog {
   /**
    * `onProblems(count)` gets the number of problems the agent has not seen
    * yet, `onWatching(on)` whether a `--watch` waits for the next problem or
-   * question.
+   * question, `onQuestions(ids)` the questions whose events the agent was
+   * just handed (with a tool result or to the watcher).
    */
   constructor(
     private readonly onProblems: (count: number) => void = () => {},
     private readonly onWatching: (on: boolean) => void = () => {},
+    private readonly onQuestions: (ids: number[]) => void = () => {},
   ) {}
 
   get last(): number {
@@ -51,7 +53,8 @@ export class EventLog {
     return this.seen;
   }
 
-  add(level: ViewerEvent["level"], text: string, details?: Record<string, unknown>): void {
+  /** `question`: the id of the question a QUESTION event tells the agent of. */
+  add(level: ViewerEvent["level"], text: string, details?: Record<string, unknown>, question?: number): void {
     // One line each: a file name can't pose as another event
     text = printable(text);
     const now = Date.now();
@@ -62,7 +65,7 @@ export class EventLog {
       prev.at = now;
       if (details) prev.details = details;
     } else {
-      this.events.push({ seq: ++this.seq, time: new Date(now).toISOString(), level, text, details, at: now });
+      this.events.push({ seq: ++this.seq, time: new Date(now).toISOString(), level, text, details, at: now, question });
       let drop = this.events.length - MAX_EVENTS;
       // The newest unseen questions stay until the agent takes them
       if (drop > 0) {
@@ -132,9 +135,13 @@ export class EventLog {
 
   /** The events the agent has not seen (the newest MAX_TAKE and every question), marked seen. */
   take(): ViewerEvent[] {
-    let found = this.events.filter((e) => e.seq > this.seen).map(publicEvent);
+    const unseen = this.events.filter((e) => e.seq > this.seen);
+    let found = unseen.map(publicEvent);
     this.seen = this.seq;
     this.onProblems(0);
+    // Every question is in what comes back, however many events were left out
+    const asked = unseen.flatMap((e) => (e.question === undefined ? [] : [e.question]));
+    if (asked.length) this.onQuestions(asked);
     if (found.length > MAX_TAKE) {
       const skipped = found.slice(0, -MAX_TAKE);
       const questions = skipped.filter((e) => e.level === "QUESTION");
@@ -168,8 +175,8 @@ function isProblem(level: ViewerEvent["level"]): boolean {
   return level === "WARNING" || level === "ERROR";
 }
 
-function publicEvent(e: ViewerEvent & { at: number }): ViewerEvent {
-  const { at: _at, ...rest } = e;
+function publicEvent(e: ViewerEvent & { at: number; question?: number }): ViewerEvent {
+  const { at: _at, question: _question, ...rest } = e;
   return rest;
 }
 
