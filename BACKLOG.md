@@ -406,3 +406,12 @@ state: unsure
 when: 2026-11-15, 2026-11-15
 what: Local branches claude/macos-live-capture, claude/macos-trust-checks and claude/panel-isolation (last commits 2026-11-11) differ from origin/main by about 10,000 lines each, as branches from before later squash merges do. Probably merged already; not checked. Next step: confirm each by its changes in main, then delete or keep.
 evidence: git branch -a; git diff --stat origin/main <branch>
+
+### live-tail: the time display formats check among provisional packets fails on a slow runner
+id: B-045
+area: tests/live
+kind: bug
+state: not-started
+when: 2026-11-15, 2026-11-15
+what: The check added with 0.19.0 failed on Node 22 in the CI run of pull request 31 (a change to docs only): rows 773480 to 773483 were no longer provisional, in all 12 attempts, after 4.5 minutes. Each attempt reads the same rows in several formats in a row, and a full read overtakes it on a slow runner. It passed on Node 24 in the same run and in the three runs before. Next step: read each format once from one fetch of rows that stay provisional, or hold full reads back while the check runs; what it asserts stays.
+evidence: https://github.com/dngames/wirebuddy/actions/runs/43770458566 job test (22), first attempt; test/live-tail.mjs provisionalFormats
