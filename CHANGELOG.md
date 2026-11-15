@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-15
+
 - The waiting line under the agent's banner and the Questions dialog say whether the agent has seen the question: "not seen by Claude yet" until its event was handed to the agent (with a tool result, or to the watcher), then "seen · waiting for the answer"; the question carries `seenAt`
 - The findings report lists the session's questions about the open capture and their answers (the open ones as open, those about another capture left out), and the dialog's line and the agent's `write_findings` result count them
 - View › Time Display Format (also in the Time column's header menu): seconds since the beginning of the capture (default), since the previous displayed or captured packet, the time of day or date and time of day, local or UTC; read from sharkd's own fields, kept across a restart with the custom columns, and `get_view_state` says which one the user's Time column shows
@@ -162,7 +164,8 @@ First public version.
 - An example investigation to try with the agent: a robot arm that stutters
   (`examples/investigations/robot-arm`), also the demo video's story
 
-[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/dngames/wirebuddy/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/dngames/wirebuddy/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/dngames/wirebuddy/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/dngames/wirebuddy/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/dngames/wirebuddy/compare/v0.15.0...v0.16.0
