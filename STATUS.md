@@ -1,6 +1,6 @@
 # Status
 
-**2026-11-16, 06:35 UTC:** main = `b205f2a` (release 0.19.1, pushed by the owner's local session; before it `eca0e9e`, PR 32). Tag `v0.19.1` is on it and its release run is under way.
+**2026-11-16, 06:35 UTC:** main = `b205f2a` (release 0.19.1, pushed by the owner's local session; before it `eca0e9e`, PR 32). Tag `v0.19.1` is on it; 0.19.1 is on npm (checked 06:51 UTC).
 Tag `v0.19.0` (on `e1037f4`, 2026-11-15) failed its release run and never reached npm: 0.19.1 is the first published 0.19. The release runs the checks of the
 tagged commit. No batch branch in assembly.
 
