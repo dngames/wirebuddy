@@ -1,7 +1,7 @@
 # Status
 
-**2026-11-15, 22:36 UTC:** main = `b21f990` (PR 31: the open-items list left docs; before it `e1037f4`, release 0.19.0, PR 30). Tag `v0.19.0`
-is to be pushed by the owner on main's head once the fix of B-045 is in: the release runs the checks of the
+**2026-11-16, 06:25 UTC:** main = `eca0e9e` (PR 32: the live-tail time format check holds on a slow runner; before it `b21f990`, PR 31, and `e1037f4`, release 0.19.0). Tag `v0.19.0`
+is to be pushed by the owner on `eca0e9e`: the release runs the checks of the
 tagged commit, and the version there is still 0.19.0. No batch branch in assembly.
 
 Working branch `claude/beautiful-noether-f96fnh`: a merge of main after the squash of PR 31; its tree is
@@ -10,7 +10,6 @@ identical to main's. The branch is not ahead of main in content.
 ## In flight
 | Topic | Session | Branch | State |
 |---|---|---|---|
-| B-045, the live-tail time format check | orchestrator | `claude/beautiful-noether-f96fnh` (7ec3e1f) | CI green, waits for the owner's word |
 
 ## Who owns which paths
 One orchestrator session owns the status files and every merge. Implementers get one topic each, on their own
