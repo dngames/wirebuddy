@@ -415,3 +415,12 @@ state: not-started
 when: 2026-11-15, 2026-11-15
 what: The check added with 0.19.0 failed on Node 22 in the CI run of pull request 31 (a change to docs only): rows 773480 to 773483 were no longer provisional, in all 12 attempts, after 4.5 minutes. Each attempt reads the same rows in several formats in a row, and a full read overtakes it on a slow runner. It passed on Node 24 in the same run and in the three runs before. Next step: read each format once from one fetch of rows that stay provisional, or hold full reads back while the check runs; what it asserts stays.
 evidence: https://github.com/dngames/wirebuddy/actions/runs/43770458566 job test (22), first attempt; test/live-tail.mjs provisionalFormats
+
+### live-tail: two short-of-memory checks failed under heavy machine load, not checked on main
+id: B-046
+area: tests/live
+kind: question
+state: not-started
+when: 2026-11-16, 2026-11-16
+what: During the three loaded runs for B-045 (6 busy loops on 4 cores, load about 12), the checks 'short of memory: full reads wait...' and 'a final read in place killed for memory...' failed in two of three runs. They pass unloaded and in CI. Unknown whether main behaves the same under that load. Next step: run the suite on main under the same load, three times.
+evidence: implementer report of 2026-11-16 on branch fix/live-tail-time-format-check; CI run https://github.com/dngames/wirebuddy/actions/runs/43784916052 green
