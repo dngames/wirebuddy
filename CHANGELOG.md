@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-16
+
+- Removed docs/open-items.md; the backlog on the status branch replaces it.
+- The live-tail time-format test holds on a slow runner.
+
 ## [0.19.0] - 2026-11-15
 
 - The waiting line under the agent's banner and the Questions dialog say whether the agent has seen the question: "not seen by Claude yet" until its event was handed to the agent (with a tool result, or to the watcher), then "seen · waiting for the answer"; the question carries `seenAt`
