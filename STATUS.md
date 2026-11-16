@@ -1,7 +1,7 @@
 # Status
 
-**2026-11-16, 06:25 UTC:** main = `eca0e9e` (PR 32: the live-tail time format check holds on a slow runner; before it `b21f990`, PR 31, and `e1037f4`, release 0.19.0). Tag `v0.19.0`
-is to be pushed by the owner on `eca0e9e`: the release runs the checks of the
+**2026-11-16, 06:35 UTC:** main = `b205f2a` (release 0.19.1, pushed by the owner's local session; before it `eca0e9e`, PR 32). Tag `v0.19.1` is on it and its release run is under way.
+Tag `v0.19.0` (on `e1037f4`, 2026-11-15) failed its release run and never reached npm: 0.19.1 is the first published 0.19. The release runs the checks of the
 tagged commit, and the version there is still 0.19.0. No batch branch in assembly.
 
 Working branch `claude/beautiful-noether-f96fnh`: a merge of main after the squash of PR 31; its tree is
