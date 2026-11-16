@@ -411,9 +411,9 @@ evidence: git branch -a; git diff --stat origin/main <branch>
 id: B-045
 area: tests/live
 kind: bug
-state: not-started
-when: 2026-11-15, 2026-11-15
-what: The check added with 0.19.0 failed on Node 22 in the CI run of pull request 31 (a change to docs only): rows 773480 to 773483 were no longer provisional, in all 12 attempts, after 4.5 minutes. Each attempt reads the same rows in several formats in a row, and a full read overtakes it on a slow runner. It passed on Node 24 in the same run and in the three runs before. Next step: read each format once from one fetch of rows that stay provisional, or hold full reads back while the check runs; what it asserts stays.
+state: review
+when: 2026-11-15, 2026-11-16
+what: The check added with 0.19.0 failed on Node 22 in the CI run of pull request 31 (a change to docs only): rows 773480 to 773483 were no longer provisional, in all 12 attempts, after 4.5 minutes. Each attempt reads the same rows in several formats in a row, and a full read overtakes it on a slow runner. It passed on Node 24 in the same run and in the three runs before. Next step: read each format once from one fetch of rows that stay provisional, or hold full reads back while the check runs; what it asserts stays. Fixed in test/live-tail.mjs on the working branch (7ec3e1f), CI green on both Node versions; waits for the owner's word to go to main. Cause measured: the display filter set mid-attempt is checked against the whole capture (8.6 s at 350,000 packets), not the format change (10 ms).
 evidence: https://github.com/dngames/wirebuddy/actions/runs/43770458566 job test (22), first attempt; test/live-tail.mjs provisionalFormats
 
 ### live-tail: two short-of-memory checks failed under heavy machine load, not checked on main

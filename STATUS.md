@@ -10,7 +10,7 @@ identical to main's. The branch is not ahead of main in content.
 ## In flight
 | Topic | Session | Branch | State |
 |---|---|---|---|
-| B-045, the live-tail time format check | one implementer | `fix/live-tail-time-format-check` (local) | in work |
+| B-045, the live-tail time format check | orchestrator | `claude/beautiful-noether-f96fnh` (7ec3e1f) | CI green, waits for the owner's word |
 
 ## Who owns which paths
 One orchestrator session owns the status files and every merge. Implementers get one topic each, on their own
