@@ -295,43 +295,53 @@ try {
   });
 
   await check("time display formats among provisional packets: deltas and the time of day read as for exact packets, since the previous displayed one stays empty under a display filter until the full read", async () => {
-    try {
+    // A part reads the same four rows in a few formats within about a second; one that a full read covers meanwhile is tried again with newer rows
+    const attempts = async (part, wait, listed = (s) => s.tail.frames) => {
       for (let attempt = 1; ; attempt++) {
-        const s = await until("newer packets", 10_000, (s) => s.tail?.frames > 60 && s.totalFrames > 1000);
+        const s = await until("newer packets", 30_000, wait);
         try {
           // Near the newest packets: the ones that stay provisional longest
-          await provisionalFormats(s.totalFrames + s.tail.frames - 20);
+          await part(s.totalFrames + listed(s) - 20);
           return;
         } catch (err) {
           if (attempt >= 12 || !err.overtaken) throw err;
         }
       }
+    };
+    try {
+      await api("/api/timeformat", { format: "relative" });
+      await api("/api/filter", { filter: "" });
+      await attempts(provisionalFormats, (s) => s.tail?.frames > 60 && s.totalFrames > 1000);
+      // A display filter is checked against every packet read in full so far: seconds on a big capture, during which full reads cover the newest packets. So it is set before the rows are chosen, and kept across the attempts; rows are taken from the packets it has checked already
+      assert.equal((await api("/api/filter", { filter: "frame" })).ok, true);
+      await attempts(provisionalFormatsFiltered, (s) => s.tail?.displayed > 60 && s.totalFrames > 1000, (s) => s.tail.displayed);
     } finally {
       await api("/api/timeformat", { format: "relative" });
       await api("/api/filter", { filter: "" });
     }
   });
 
-  /** Reads provisional frames `first`..`first+5` in each format and checks them against the relative times the same rows have. */
+  /** Frames `first`..`first+3` as they read now: provisional, or a full read has covered them (overtaken). */
+  async function provisionalRows(first, allowEmpty = false) {
+    // Provisional rows that can't be read just now come empty: asked again
+    let rows = [];
+    for (let k = 0; k < 40; k++) {
+      ({ rows } = await wb.rows(first - 1, 4));
+      if (allowEmpty ? rows.length > 0 : rows.length >= 4) break;
+      await sleep(250);
+    }
+    await stillProvisional(first, rows.length > 0 && (allowEmpty || rows.length === 4) && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
+    return rows;
+  }
+
+  /** Reads provisional frames `first`..`first+3` in each format, with no display filter, and checks them against the relative times the same rows have. */
   async function provisionalFormats(first) {
-    // An attempt that was overtaken by a full read left its format and filter behind
-    await api("/api/timeformat", { format: "relative" });
-    await api("/api/filter", { filter: "" });
-    const read = async () => {
-      // Provisional rows that can't be read just now come empty: asked again
-      let rows = [];
-      for (let k = 0; k < 40; k++) {
-        ({ rows } = await wb.rows(first - 1, 4));
-        if (rows.length >= 4) break;
-        await sleep(250);
-      }
-      await stillProvisional(first, rows.length === 4 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
-      return rows;
-    };
+    const read = () => provisionalRows(first);
     const ns = (text) => {
       const [whole, fraction = ""] = text.split(".");
       return BigInt(whole) * 1_000_000_000n + BigInt(fraction.padEnd(9, "0"));
     };
+    await api("/api/timeformat", { format: "relative" });
     const rel = await read();
     // The fake dumpcap writes microseconds: every format has the decimals the Time column has
     const digits = rel[0].c[1].split(".")[1].length;
@@ -350,23 +360,24 @@ try {
       return (BigInt(h) * 3600n + BigInt(m) * 60n) * 1_000_000_000n + ns(rest);
     };
     for (let i = 1; i < clock.length; i++) assert.equal(sinceMidnight(clock[i]) - sinceMidnight(clock[i - 1]), relative[i] - relative[i - 1], `row ${i}: ${clock[i - 1]} then ${clock[i]}`);
-    // A display filter: a slice can't tell which packet was displayed before it
+  }
+
+  /** With the display filter "frame" set: provisional rows `first`.. have no "since previous displayed", exact ones have, and the other formats read. */
+  async function provisionalFormatsFiltered(first) {
+    // A slice can't tell which packet was displayed before it
+    // The fake dumpcap writes microseconds: every format has the decimals the Time column has
+    await api("/api/timeformat", { format: "delta-captured" });
+    const digits = (await wb.rows(0, 3)).rows[1].c[1].split(".")[1].length;
+    const decimals = new RegExp(`^\\d+\\.\\d{${digits}}$`);
     await api("/api/timeformat", { format: "delta-displayed" });
-    assert.equal((await api("/api/filter", { filter: "frame" })).ok, true);
-    let rows = [];
-    for (let k = 0; k < 40; k++) {
-      ({ rows } = await wb.rows(first - 1, 4));
-      if (rows.length) break;
-      await sleep(250);
-    }
-    await stillProvisional(first, rows.length > 0 && rows.every((r) => r.p), `rows ${rows.map((r) => `${r.num}${r.p ? "p" : ""}`)}`);
+    const rows = await provisionalRows(first, true);
     assert.deepEqual(rows.map((r) => r.c[1]), rows.map(() => ""), "provisional rows under a display filter");
     const exact = (await wb.rows(0, 3)).rows;
-    const decimals = new RegExp(`^\\d+\\.\\d{${digits}}$`);
     assert.ok(exact.every((r) => !r.p && decimals.test(r.c[1])), exact.map((r) => r.c[1]).join(" "));
     // The other formats still read under the filter
     await api("/api/timeformat", { format: "delta-captured" });
-    assert.ok((await wb.rows(first - 1, 4)).rows.every((r) => decimals.test(r.c[1])));
+    const other = await provisionalRows(first, true);
+    assert.ok(other.every((r) => decimals.test(r.c[1])), other.map((r) => r.c[1]).join(" "));
   }
 
   /** Sets the exact frame `early` and the provisional `ref` as time references and checks the rows and details around `ref`. */
